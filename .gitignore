@@ -1,0 +1,8 @@
+result
+result-*
+*.bak
+/tmp/
+.logoscore/
+__pycache__/
+*.pyc
+.DS_Store

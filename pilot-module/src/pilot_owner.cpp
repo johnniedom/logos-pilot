@@ -1,0 +1,59 @@
+#include "pilot_impl.h"
+#include "logos_api.h"
+#include "logos_api_client.h"
+#include <sqlite3.h>
+#include <chrono>
+#include <QString>
+#include <QVariant>
+
+bool PilotImpl::establishOwnerChannel() {
+    if (!logosAPI_) return false;
+
+    auto* chat = logosAPI_->getClient("chat_module");
+    if (!chat) return false;
+
+    QVariant bundleResult = chat->invokeRemoteMethod(
+        "chat_module", "requestMyBundle");
+    if (bundleResult.isNull()) return false;
+
+    QString bundle = bundleResult.toString();
+
+    QVariant convResult = chat->invokeRemoteMethod(
+        "chat_module", "createConversation",
+        bundle, QString("Pilot connected."));
+    if (convResult.isNull()) return false;
+
+    ownerChannelId_ = convResult.toString().toStdString();
+
+    sqlite3_stmt* stmt = nullptr;
+    auto now = std::chrono::system_clock::now();
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+    sqlite3_prepare_v2(db_,
+        "INSERT OR REPLACE INTO owner_channel (id, conversation_id, established_at) VALUES (1, ?, ?);",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, ownerChannelId_.c_str(), -1, SQLITE_TRANSIENT);
+    std::string ts = std::to_string(seconds);
+    sqlite3_bind_text(stmt, 2, ts.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return true;
+}
+
+bool PilotImpl::sendToOwner(const std::string& message) {
+    if (!logosAPI_ || ownerChannelId_.empty()) return false;
+
+    auto* chat = logosAPI_->getClient("chat_module");
+    if (!chat) return false;
+
+    chat->invokeRemoteMethod(
+        "chat_module", "sendMessage",
+        QString::fromStdString(ownerChannelId_),
+        QString::fromStdString(message));
+    return true;
+}
+
+std::string PilotImpl::getOwnerChannelId() {
+    return ownerChannelId_;
+}

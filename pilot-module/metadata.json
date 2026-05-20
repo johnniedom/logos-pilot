@@ -1,0 +1,31 @@
+{
+  "name": "pilot",
+  "version": "1.0.0",
+  "description": "Autonomous AI agent with wallet, storage, and messaging on LEZ",
+  "author": "Johnnie Dom",
+  "type": "core",
+  "interface": "universal",
+  "category": "general",
+  "main": "pilot_plugin",
+  "dependencies": [
+    "lez_wallet_module",
+    "delivery_module",
+    "storage_module",
+    "chat_module"
+  ],
+  "include": [],
+  "capabilities": [],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": ["SQLite3"],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

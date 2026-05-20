@@ -1,0 +1,265 @@
+#include "pilot_crypto.h"
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/ec.h>
+#include <openssl/sha.h>
+#include <openssl/err.h>
+#include <openssl/core_names.h>
+#include <openssl/param_build.h>
+#include <stdexcept>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
+
+static std::string bytesToHex(const std::vector<uint8_t>& data) {
+    std::ostringstream ss;
+    for (auto b : data)
+        ss << std::hex << std::setfill('0') << std::setw(2) << (int)b;
+    return ss.str();
+}
+
+static std::vector<uint8_t> hexToBytes(const std::string& hex) {
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        uint8_t byte = static_cast<uint8_t>(
+            std::stoi(hex.substr(i, 2), nullptr, 16));
+        out.push_back(byte);
+    }
+    return out;
+}
+
+AESKey generateFileKey() {
+    AESKey k;
+    k.key.resize(32);
+    k.iv.resize(12);
+    k.tag.resize(16);
+    RAND_bytes(k.key.data(), 32);
+    RAND_bytes(k.iv.data(), 12);
+    return k;
+}
+
+std::vector<uint8_t> aesEncrypt(const std::vector<uint8_t>& plaintext, AESKey& key) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+
+    std::vector<uint8_t> ciphertext(plaintext.size() + 16);
+    int len = 0, ciphertextLen = 0;
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr);
+    EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.key.data(), key.iv.data());
+    EVP_EncryptUpdate(ctx, ciphertext.data(), &len,
+                      plaintext.data(), static_cast<int>(plaintext.size()));
+    ciphertextLen = len;
+    EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+    ciphertextLen += len;
+
+    key.tag.resize(16);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, key.tag.data());
+    EVP_CIPHER_CTX_free(ctx);
+
+    ciphertext.resize(ciphertextLen);
+    return ciphertext;
+}
+
+std::vector<uint8_t> aesDecrypt(const std::vector<uint8_t>& ciphertext, const AESKey& key) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+
+    std::vector<uint8_t> plaintext(ciphertext.size());
+    int len = 0, plaintextLen = 0;
+
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr);
+    EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.key.data(), key.iv.data());
+    EVP_DecryptUpdate(ctx, plaintext.data(), &len,
+                      ciphertext.data(), static_cast<int>(ciphertext.size()));
+    plaintextLen = len;
+
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16,
+                        const_cast<uint8_t*>(key.tag.data()));
+
+    int ret = EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len);
+    EVP_CIPHER_CTX_free(ctx);
+
+    if (ret <= 0) throw std::runtime_error("AES-GCM decryption failed (tag mismatch)");
+    plaintextLen += len;
+    plaintext.resize(plaintextLen);
+    return plaintext;
+}
+
+std::string aesKeyToHex(const AESKey& key) {
+    return bytesToHex(key.key) + ":" + bytesToHex(key.iv) + ":" + bytesToHex(key.tag);
+}
+
+AESKey aesKeyFromHex(const std::string& hex) {
+    AESKey k;
+    size_t p1 = hex.find(':');
+    size_t p2 = hex.find(':', p1 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos)
+        throw std::runtime_error("Invalid AES key hex format");
+    k.key = hexToBytes(hex.substr(0, p1));
+    k.iv = hexToBytes(hex.substr(p1 + 1, p2 - p1 - 1));
+    k.tag = hexToBytes(hex.substr(p2 + 1));
+    return k;
+}
+
+// ECIES: ephemeral ECDH (secp256k1) + SHA256 KDF + AES-256-GCM
+
+ECIESCiphertext eciesEncrypt(const std::string& recipientNpk,
+                              const std::vector<uint8_t>& plaintext) {
+    std::vector<uint8_t> recipientPub = hexToBytes(recipientNpk);
+
+    EVP_PKEY_CTX* paramCtx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+    EVP_PKEY_keygen_init(paramCtx);
+    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(paramCtx, NID_secp256k1);
+    EVP_PKEY* ephKey = nullptr;
+    EVP_PKEY_keygen(paramCtx, &ephKey);
+    EVP_PKEY_CTX_free(paramCtx);
+
+    // Extract ephemeral public key
+    size_t ephPubLen = 0;
+    EVP_PKEY_get_octet_string_param(ephKey, OSSL_PKEY_PARAM_PUB_KEY,
+                                     nullptr, 0, &ephPubLen);
+    std::vector<uint8_t> ephPub(ephPubLen);
+    EVP_PKEY_get_octet_string_param(ephKey, OSSL_PKEY_PARAM_PUB_KEY,
+                                     ephPub.data(), ephPub.size(), &ephPubLen);
+
+    // Load recipient public key
+    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "secp256k1", 0);
+    OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
+                                      recipientPub.data(), recipientPub.size());
+    OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
+    EVP_PKEY_CTX* fromCtx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    EVP_PKEY_fromdata_init(fromCtx);
+    EVP_PKEY* peerKey = nullptr;
+    EVP_PKEY_fromdata(fromCtx, &peerKey, EVP_PKEY_PUBLIC_KEY, params);
+    OSSL_PARAM_free(params);
+    OSSL_PARAM_BLD_free(bld);
+    EVP_PKEY_CTX_free(fromCtx);
+
+    // ECDH derive shared secret
+    EVP_PKEY_CTX* deriveCtx = EVP_PKEY_CTX_new(ephKey, nullptr);
+    EVP_PKEY_derive_init(deriveCtx);
+    EVP_PKEY_derive_set_peer(deriveCtx, peerKey);
+    size_t secretLen = 0;
+    EVP_PKEY_derive(deriveCtx, nullptr, &secretLen);
+    std::vector<uint8_t> secret(secretLen);
+    EVP_PKEY_derive(deriveCtx, secret.data(), &secretLen);
+    EVP_PKEY_CTX_free(deriveCtx);
+
+    // SHA256 the shared secret to get AES key
+    uint8_t derived[32];
+    SHA256(secret.data(), secretLen, derived);
+
+    AESKey aesKey;
+    aesKey.key.assign(derived, derived + 32);
+    aesKey.iv.resize(12);
+    RAND_bytes(aesKey.iv.data(), 12);
+
+    std::vector<uint8_t> ct;
+    try {
+        ct = aesEncrypt(plaintext, aesKey);
+    } catch (...) {
+        EVP_PKEY_free(ephKey);
+        EVP_PKEY_free(peerKey);
+        throw;
+    }
+
+    EVP_PKEY_free(ephKey);
+    EVP_PKEY_free(peerKey);
+
+    return {ephPub, ct, aesKey.iv, aesKey.tag};
+}
+
+std::vector<uint8_t> eciesDecrypt(const std::string& privateKeyHex,
+                                   const ECIESCiphertext& ct) {
+    std::vector<uint8_t> privBytes = hexToBytes(privateKeyHex);
+
+    // Load private key
+    BIGNUM* privBn = BN_bin2bn(privBytes.data(), static_cast<int>(privBytes.size()), nullptr);
+    if (!privBn) throw std::runtime_error("BN_bin2bn failed");
+
+    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "secp256k1", 0);
+    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, privBn);
+    OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
+
+    EVP_PKEY_CTX* fromCtx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    EVP_PKEY_fromdata_init(fromCtx);
+    EVP_PKEY* myKey = nullptr;
+    EVP_PKEY_fromdata(fromCtx, &myKey, EVP_PKEY_KEYPAIR, params);
+    OSSL_PARAM_free(params);
+    OSSL_PARAM_BLD_free(bld);
+    EVP_PKEY_CTX_free(fromCtx);
+    BN_free(privBn);
+
+    // Load ephemeral public key
+    OSSL_PARAM_BLD* bld2 = OSSL_PARAM_BLD_new();
+    OSSL_PARAM_BLD_push_utf8_string(bld2, OSSL_PKEY_PARAM_GROUP_NAME, "secp256k1", 0);
+    OSSL_PARAM_BLD_push_octet_string(bld2, OSSL_PKEY_PARAM_PUB_KEY,
+                                      ct.ephemeralPub.data(), ct.ephemeralPub.size());
+    OSSL_PARAM* params2 = OSSL_PARAM_BLD_to_param(bld2);
+    EVP_PKEY_CTX* fromCtx2 = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    EVP_PKEY_fromdata_init(fromCtx2);
+    EVP_PKEY* ephKey = nullptr;
+    EVP_PKEY_fromdata(fromCtx2, &ephKey, EVP_PKEY_PUBLIC_KEY, params2);
+    OSSL_PARAM_free(params2);
+    OSSL_PARAM_BLD_free(bld2);
+    EVP_PKEY_CTX_free(fromCtx2);
+
+    // ECDH
+    EVP_PKEY_CTX* deriveCtx = EVP_PKEY_CTX_new(myKey, nullptr);
+    EVP_PKEY_derive_init(deriveCtx);
+    EVP_PKEY_derive_set_peer(deriveCtx, ephKey);
+    size_t secretLen = 0;
+    EVP_PKEY_derive(deriveCtx, nullptr, &secretLen);
+    std::vector<uint8_t> secret(secretLen);
+    EVP_PKEY_derive(deriveCtx, secret.data(), &secretLen);
+    EVP_PKEY_CTX_free(deriveCtx);
+
+    uint8_t derived[32];
+    SHA256(secret.data(), secretLen, derived);
+
+    AESKey aesKey;
+    aesKey.key.assign(derived, derived + 32);
+    aesKey.iv = ct.iv;
+    aesKey.tag = ct.tag;
+
+    std::vector<uint8_t> result;
+    try {
+        result = aesDecrypt(ct.ciphertext, aesKey);
+    } catch (...) {
+        EVP_PKEY_free(myKey);
+        EVP_PKEY_free(ephKey);
+        throw;
+    }
+
+    EVP_PKEY_free(myKey);
+    EVP_PKEY_free(ephKey);
+
+    return result;
+}
+
+std::string eciesSerialize(const ECIESCiphertext& ct) {
+    return bytesToHex(ct.ephemeralPub) + ":" +
+           bytesToHex(ct.ciphertext) + ":" +
+           bytesToHex(ct.iv) + ":" +
+           bytesToHex(ct.tag);
+}
+
+ECIESCiphertext eciesDeserialize(const std::string& data) {
+    ECIESCiphertext ct;
+    size_t p1 = data.find(':');
+    size_t p2 = data.find(':', p1 + 1);
+    size_t p3 = data.find(':', p2 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos)
+        throw std::runtime_error("Invalid ECIES serialized format");
+    ct.ephemeralPub = hexToBytes(data.substr(0, p1));
+    ct.ciphertext = hexToBytes(data.substr(p1 + 1, p2 - p1 - 1));
+    ct.iv = hexToBytes(data.substr(p2 + 1, p3 - p2 - 1));
+    ct.tag = hexToBytes(data.substr(p3 + 1));
+    return ct;
+}
