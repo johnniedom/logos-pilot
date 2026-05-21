@@ -5,8 +5,22 @@
 #include <sstream>
 #include <chrono>
 #include <random>
+#include <cstring>
 #include <QString>
 #include <QVariant>
+
+static std::string amountToHexLE(int64_t amount) {
+    uint8_t bytes[16] = {};
+    for (int i = 0; i < 8 && amount > 0; i++) {
+        bytes[i] = static_cast<uint8_t>(amount & 0xFF);
+        amount >>= 8;
+    }
+    char hex[33];
+    for (int i = 0; i < 16; i++)
+        snprintf(hex + i * 2, 3, "%02x", bytes[i]);
+    hex[32] = '\0';
+    return std::string(hex);
+}
 
 static std::string generateId() {
     auto now = std::chrono::high_resolution_clock::now();
@@ -93,7 +107,7 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
         "lez_wallet_module", "transfer_private",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(recipient),
-        QString::number(amount));
+        QString::fromStdString(amountToHexLE(amount)));
 
     QString resultStr = result.toString();
     bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive);
@@ -247,7 +261,7 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         "lez_wallet_module", "transfer_private",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(recipient),
-        QString::number(amount));
+        QString::fromStdString(amountToHexLE(amount)));
 
     QString resultStr = result.toString();
     bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive) && !resultStr.contains("error", Qt::CaseInsensitive);
