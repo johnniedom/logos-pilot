@@ -95,7 +95,8 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
         QString::fromStdString(recipient),
         QString::number(amount));
 
-    bool ok = !result.isNull();
+    QString resultStr = result.toString();
+    bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive);
     std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
     now = currentTimestamp();
     sqlite3_prepare_v2(db_,
@@ -248,7 +249,8 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         QString::fromStdString(recipient),
         QString::number(amount));
 
-    bool ok = !result.isNull();
+    QString resultStr = result.toString();
+    bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive) && !resultStr.contains("error", Qt::CaseInsensitive);
     std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
     now = currentTimestamp();
     sqlite3_prepare_v2(db_,
