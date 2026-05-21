@@ -43,7 +43,7 @@ pilot-module/src/
 ├── pilot_impl.h             # Public interface (pure C++, 37 methods)
 ├── pilot_impl.cpp           # Core: constructor, DB schema, LLM routing
 ├── pilot_identity.cpp       # Identity creation, wallet setup, config loading
-├── pilot_owner.cpp          # Owner channel via chat_module E2E
+├── pilot_owner.cpp          # Owner channel via delivery_module + ECIES
 ├── pilot_spending.cpp       # 9-state spending FSM with SQLite persistence
 ├── pilot_storage.cpp        # AES-256-GCM encrypted upload/download/share
 ├── pilot_messaging.cpp      # ECIES-encrypted messaging
@@ -73,16 +73,16 @@ QVariant result = wallet->invokeRemoteMethod(
 
 Dependencies (declared in `metadata.json`):
 - `lez_wallet_module` — shielded accounts, transfers, program calls
-- `delivery_module` — fire-and-forget Waku message delivery
+- `delivery_module` — Waku message delivery (owner channel, A2A, messaging skills)
 - `storage_module` — chunked file upload/download (Codex)
-- `chat_module` — E2E encrypted owner channel
+- `chat_module` — listed but bypassed (see [Owner Channel](owner-channel.md))
 - `waku_module` — Store queries for crash recovery
 
 ## Encryption Model
 
 | Channel | Encryption | Implementation |
 |---------|-----------|----------------|
-| Owner channel | E2E via chat_module | Handled by chat_module |
+| Owner channel | ECIES to owner NPK via delivery_module | `pilot_crypto.cpp` ([details](owner-channel.md)) |
 | Agent inbox (`/pilot/1/inbox-{npk}/proto`) | ECIES to agent NPK | `pilot_crypto.cpp` |
 | A2A reply topics | ECIES to sender NPK | `pilot_crypto.cpp` |
 | Discovery topic | Plaintext (Agent Cards are public) | No encryption |
