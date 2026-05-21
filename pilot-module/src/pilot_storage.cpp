@@ -92,10 +92,11 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
 
     std::string tmpPath = path + ".enc";
     QVariant result = storage->invokeRemoteMethod(
-        "storage_module", "downloadFile",
+        "storage_module", "downloadChunks",
         QString::fromStdString(cid),
-        QString::fromStdString(tmpPath),
-        QVariant(0));
+        QVariant(true),
+        QVariant(0),
+        QString::fromStdString(tmpPath));
 
     if (result.isNull())
         return "{\"error\": \"download failed\"}";
