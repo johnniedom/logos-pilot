@@ -118,12 +118,17 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
         QVariant(0),
         QString::fromStdString(tmpPath));
 
-    if (result.isNull())
-        return "{\"error\": \"download failed\"}";
+    std::string downloadedData;
+    if (result.canConvert<LogosResult>()) {
+        LogosResult lr = result.value<LogosResult>();
+        if (!lr.success)
+            return "{\"error\": \"download failed: " + lr.error.toString().toStdString() + "\"}";
+        downloadedData = lr.value.toString().toStdString();
+    }
 
     std::ifstream encFile(tmpPath, std::ios::binary);
-    if (!encFile.is_open())
-        return "{\"error\": \"cannot read downloaded file\"}";
+    if (!encFile.is_open() && downloadedData.empty())
+        return "{\"error\": \"download failed: no data returned\"}";
     std::string encContent((std::istreambuf_iterator<char>(encFile)),
                             std::istreambuf_iterator<char>());
     encFile.close();
