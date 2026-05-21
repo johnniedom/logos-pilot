@@ -44,13 +44,25 @@ require_cmd() {
 # Configuration
 # ──────────────────────────────────────────────────────────────
 PILOT_DATA_DIR="${PILOT_DATA_DIR:-/tmp/pilot-data}"
-PILOT_MODULE_PATH="${PILOT_MODULE_PATH:-./result/lib}"
+PILOT_MODULE_PATH="${PILOT_MODULE_PATH:-/tmp/pilot-logoscore/modules}"
 PILOT_CONFIG_DIR="${PILOT_CONFIG_DIR:-${PILOT_DATA_DIR}/.logoscore}"
 PILOT_START_TIME_FILE="${PILOT_DATA_DIR}/.pilot_start_time"
+PILOT_MODULES="capability_module,lez_wallet_module,delivery_module,storage_module,chat_module,pilot"
 
 # logoscore CLI — from logos-co/logos-logoscore-cli (NOT logos-liblogos)
-# Ref: https://github.com/logos-co/logos-logoscore-cli
+if [[ -z "${LOGOSCORE:-}" ]]; then
+    LOGOSCORE="$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli*" -type f 2>/dev/null | head -1)"
+fi
 LOGOSCORE="${LOGOSCORE:-logoscore}"
+
+# logos_host — required for module subprocess spawning
+if [[ -z "${LOGOS_HOST_PATH:-}" ]]; then
+    LOGOS_HOST_PATH="$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d 2>/dev/null | head -1)/bin/logos_host"
+    export LOGOS_HOST_PATH
+fi
+
+# Waku peer for delivery_module
+export PILOT_WAKU_ADDR="${PILOT_WAKU_ADDR:-/ip4/127.0.0.1/tcp/30303}"
 
 # ──────────────────────────────────────────────────────────────
 # Module interaction — inline mode (one-shot calls)
@@ -60,16 +72,14 @@ LOGOSCORE="${LOGOSCORE:-logoscore}"
 pilot_call() {
     local method_call="$1"
     local full_cmd="pilot.${method_call}"
-    "$LOGOSCORE" -m "${PILOT_MODULE_PATH}" -l pilot \
-        --persistence-path "${PILOT_DATA_DIR}" \
+    "$LOGOSCORE" -m "${PILOT_MODULE_PATH}" -l "${PILOT_MODULES}" \
         -c "${full_cmd}" --quit-on-finish 2>&1
 }
 
 pilot_call_quiet() {
     local method_call="$1"
     local full_cmd="pilot.${method_call}"
-    "$LOGOSCORE" -m "${PILOT_MODULE_PATH}" -l pilot \
-        --persistence-path "${PILOT_DATA_DIR}" \
+    "$LOGOSCORE" -m "${PILOT_MODULE_PATH}" -l "${PILOT_MODULES}" \
         -c "${full_cmd}" --quit-on-finish 2>/dev/null || true
 }
 
@@ -77,14 +87,20 @@ pilot_call_quiet() {
 # Daemon management — for persistent agent operation (chat)
 # ──────────────────────────────────────────────────────────────
 pilot_daemon_start() {
+    mkdir -p "${PILOT_DATA_DIR}"
     "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" \
-        -D -m "${PILOT_MODULE_PATH}" \
-        --persistence-path "${PILOT_DATA_DIR}" > "${PILOT_DATA_DIR}/daemon.log" 2>&1 &
+        -D -m "${PILOT_MODULE_PATH}" > "${PILOT_DATA_DIR}/daemon.log" 2>&1 &
     local pid=$!
     echo "$pid" > "${PILOT_DATA_DIR}/daemon.pid"
-    sleep 2
+    sleep 3
     if kill -0 "$pid" 2>/dev/null; then
-        "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" load-module pilot --json >/dev/null 2>&1 || true
+        local IFS=','
+        for mod in ${PILOT_MODULES}; do
+            "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" load-module "$mod" >/dev/null 2>&1 || true
+        done
+        unset IFS
+        sleep 2
+        "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot initialize "${PILOT_DATA_DIR}" >/dev/null 2>&1 || true
         return 0
     else
         return 1
@@ -94,7 +110,10 @@ pilot_daemon_start() {
 pilot_daemon_call() {
     local method="$1"
     shift
-    "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot "$method" "$@" 2>&1
+    local raw
+    raw=$("$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot "$method" "$@" 2>&1)
+    # Extract the result field from daemon JSON wrapper
+    echo "$raw" | sed -n 's/.*"result":"\(.*\)","status":"ok".*/\1/p' | sed 's/\\"/"/g; s/\\\\"/\\"/g' || echo "$raw"
 }
 
 pilot_daemon_stop() {
