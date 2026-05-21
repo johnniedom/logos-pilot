@@ -9,32 +9,24 @@
 #include <cstdlib>
 #include <QString>
 #include <QVariant>
-#include <QDebug>
 
 bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
 
     initDatabase(dataDir);
     initLLM();
-
-    qWarning() << "[pilot] initialize: logosAPI_=" << (logosAPI_ ? "set" : "NULL")
-               << "db_=" << (db_ ? "set" : "NULL")
-               << "dataDir_=" << QString::fromStdString(dataDir_);
+    initDependencyModules();
 
     if (loadIdentity()) {
-        qWarning() << "[pilot] initialize: loaded existing identity";
         initialized_ = true;
         recoverPendingTransactions();
         return true;
     }
-    qWarning() << "[pilot] initialize: no existing identity, creating...";
 
     if (createIdentity()) {
-        qWarning() << "[pilot] initialize: identity created successfully";
         initialized_ = true;
         return true;
     }
-    qWarning() << "[pilot] initialize: createIdentity FAILED";
 
     return false;
 }
@@ -96,20 +88,17 @@ bool PilotImpl::initWallet() {
     if (!logosAPI_) { qWarning() << "[pilot] initWallet: logosAPI_ is NULL"; return false; }
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
-    if (!wallet) { qWarning() << "[pilot] initWallet: getClient returned NULL"; return false; }
+    if (!wallet) return false;
 
     std::string configPath = dataDir_ + "/wallet_config.json";
     std::string storagePath = dataDir_ + "/wallet_storage";
 
-    qWarning() << "[pilot] initWallet: trying open(" << QString::fromStdString(configPath) << ")";
     QVariant openResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "open",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath));
-    qWarning() << "[pilot] initWallet: open returned" << openResult;
     if (openResult.toInt() == 0) return true;
 
-    // Write wallet config if it doesn't exist
     std::string sequencerAddr = "http://127.0.0.1:8080";
     if (const char* env = std::getenv("PILOT_SEQUENCER_ADDR"))
         sequencerAddr = env;
@@ -127,13 +116,11 @@ bool PilotImpl::initWallet() {
         configFile.close();
     }
 
-    qWarning() << "[pilot] initWallet: trying create_new";
     QVariant createResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
         QString("pilot_agent"));
-    qWarning() << "[pilot] initWallet: create_new returned" << createResult;
     return createResult.toInt() == 0;
 }
 

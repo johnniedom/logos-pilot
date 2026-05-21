@@ -75,6 +75,7 @@ public:
 
 private:
     void initDatabase(const std::string& dataDir);
+    void initDependencyModules();
     bool initWallet();
     bool loadIdentity();
     bool createIdentity();

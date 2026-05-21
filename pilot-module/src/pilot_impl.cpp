@@ -1,8 +1,12 @@
 #include "pilot_impl.h"
 #include "pilot_llm.h"
 #include "pilot_skill.h"
+#include "logos_api.h"
+#include "logos_api_client.h"
+#include "logos_object.h"
 #include <sqlite3.h>
 #include <stdexcept>
+#include <cstdlib>
 #include <sys/stat.h>
 
 PilotImpl::PilotImpl()
@@ -78,6 +82,33 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         std::string err = errMsg ? errMsg : "unknown";
         sqlite3_free(errMsg);
         throw std::runtime_error("Schema creation failed: " + err);
+    }
+}
+
+void PilotImpl::initDependencyModules() {
+    if (!logosAPI_) return;
+
+    auto* storage = logosAPI_->getClient("storage_module");
+    if (storage) {
+        storage->invokeRemoteMethod("storage_module", "init", QString("{}"));
+        storage->invokeRemoteMethod("storage_module", "start");
+    }
+
+    auto* chat = logosAPI_->getClient("chat_module");
+    if (chat) {
+        std::string wakuAddr;
+        if (const char* env = std::getenv("PILOT_WAKU_ADDR"))
+            wakuAddr = env;
+        else
+            wakuAddr = "/ip4/127.0.0.1/tcp/60000";
+
+        std::string chatConfig = "{\"name\":\"pilot\",\"staticPeers\":[\"" + wakuAddr + "\"]}";
+
+        LogosObject* chatObj = chat->requestObject("chat_module");
+        if (chatObj) {
+            chat->onEventResponse(chatObj, "chatInit", {QString::fromStdString(chatConfig)});
+            chat->onEventResponse(chatObj, "chatStart", {});
+        }
     }
 }
 
