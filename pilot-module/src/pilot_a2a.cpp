@@ -142,7 +142,9 @@ std::string PilotImpl::agentCard() {
 std::string PilotImpl::agentDiscover(const std::string& topic) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
-    std::string discoveryTopic = topic.empty() ? "/pilot/1/discovery/proto" : topic;
+    std::string discoveryTopic = topic.empty()
+        ? "/pilot/1/discovery/proto"
+        : "/pilot/1/discovery-" + topic + "/proto";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
