@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pilot-cli/lib/chat.sh — Headless terminal chat with the Pilot agent
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
@@ -253,7 +253,7 @@ chat_main() {
         # Direct slash commands — skip LLM
         if [[ "$input" == /* ]]; then
             printf "${BOLD}${BLUE}pilot${RESET} ${DIM}›${RESET} "
-            dispatch_command "$input"
+            dispatch_command "$input" || true
             printf "\n"
             continue
         fi
