@@ -111,9 +111,17 @@ pilot_daemon_call() {
     local method="$1"
     shift
     local raw
-    raw=$("$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot "$method" "$@" 2>&1)
-    # Extract the result field from daemon JSON wrapper
-    echo "$raw" | sed -n 's/.*"result":"\(.*\)","status":"ok".*/\1/p' | sed 's/\\"/"/g; s/\\\\"/\\"/g' || echo "$raw"
+    raw=$("$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot "$method" "$@" 2>&1) || true
+    if [[ "$raw" == *'"status":"ok"'* ]]; then
+        # Extract result value between "result":" and ","status"
+        local result
+        result=$(echo "$raw" | sed 's/.*"result":"//; s/","status":"ok".*//' | sed 's/\\"/"/g')
+        echo "$result"
+    elif [[ "$raw" == *"Result:"* ]]; then
+        echo "$raw" | sed 's/.*Result: //'
+    else
+        echo "$raw"
+    fi
 }
 
 pilot_daemon_stop() {
