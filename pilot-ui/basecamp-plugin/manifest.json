@@ -1,0 +1,13 @@
+{
+  "author": "Johnnie Dom",
+  "category": "general",
+  "dependencies": ["pilot"],
+  "description": "Pilot Agent — Autonomous AI agent with wallet, storage, and messaging",
+  "icon": "",
+  "main": {},
+  "manifestVersion": "0.2.0",
+  "name": "pilot_ui",
+  "type": "ui_qml",
+  "version": "1.0.0",
+  "view": "Main.qml"
+}

@@ -3,6 +3,7 @@
 #include "pilot_skill.h"
 #include <sqlite3.h>
 #include <stdexcept>
+#include <sys/stat.h>
 
 PilotImpl::PilotImpl()
     : llm_(std::make_unique<NoOpProvider>()),
@@ -17,15 +18,14 @@ PilotImpl::~PilotImpl() {
     }
 }
 
-void PilotImpl::onInit(QVariant api) {
-    logosAPI_ = static_cast<LogosAPI*>(api.value<void*>());
-}
 
 std::string PilotImpl::echo(const std::string& input) {
     return "echo: " + input;
 }
 
 void PilotImpl::initDatabase(const std::string& dataDir) {
+    dataDir_ = dataDir;
+    mkdir(dataDir.c_str(), 0755);
     std::string dbPath = dataDir + "/pilot.db";
     int rc = sqlite3_open(dbPath.c_str(), &db_);
     if (rc != SQLITE_OK)

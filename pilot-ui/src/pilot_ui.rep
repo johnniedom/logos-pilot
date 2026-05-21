@@ -1,0 +1,15 @@
+class PilotUi
+{
+    PROP(QString status READWRITE)
+    PROP(QString balance READWRITE)
+    PROP(int pendingTxCount READWRITE)
+    PROP(QString agentNpk READWRITE)
+    PROP(bool ownerChannelActive READWRITE)
+
+    SLOT(QString approve(QString requestId))
+    SLOT(QString reject(QString requestId))
+    SLOT(QString sendCommand(QString command))
+    SLOT(QString getStatus())
+    SLOT(QString getPending())
+    SLOT(QString getFiles())
+}

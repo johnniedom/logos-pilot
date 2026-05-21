@@ -1,0 +1,554 @@
+# Logos Module Developer Guide
+
+Hard-won lessons from building LP-0008 (Pilot Agent Module). Everything here was figured out by reading source code, SDK headers, and existing modules — it's not documented elsewhere.
+
+## The Real API (not what you'd expect)
+
+The Logos docs and specs reference `logosAPI->callModule("module", "method", {args})`. **This does not exist.** The actual pattern is:
+
+```cpp
+// WRONG — this API doesn't exist
+LogosResult result = logosAPI_->callModule("delivery_module", "send", {topic, payload});
+
+// RIGHT — how it actually works
+auto* client = logosAPI_->getClient("delivery_module");
+QVariant result = client->invokeRemoteMethod("delivery_module", "send", topic, payload);
+```
+
+### Key differences from what you'd expect
+
+| What you'd guess | What actually works |
+|---|---|
+| `logosAPI->callModule(...)` | `logosAPI->getClient("module")->invokeRemoteMethod(...)` |
+| `LogosResult` with `.success()` | `QVariant` — check `.isNull()` for failure |
+| `result.data().toString()` | `result.toString()` directly |
+| `result.errorMessage()` | Doesn't exist — no error message accessor |
+| `setLogosAPI(LogosAPI* api)` | `onInit(QVariant api)` — code generator wraps it |
+
+### Where to find the real API
+
+After your first `nix build` (even if it fails), the SDK headers are cached in the nix store:
+
+```bash
+# Find the SDK headers
+find /nix/store -name "logos_api.h" -path "*/cpp/*" 2>/dev/null
+
+# Key files to read:
+# logos_api.h        — LogosAPI class (getClient, getProvider)
+# logos_api_client.h — LogosAPIClient (invokeRemoteMethod, onEvent)
+# logos_result.h     — StdLogosResult (for return types, NOT for inter-module calls)
+```
+
+### The onInit problem
+
+The code generator wraps every method parameter as `QVariant`. For `onInit`, it generates:
+
+```cpp
+void PilotProviderObject::onInit(QVariant api) {
+    m_impl.onInit(api);  // passes QVariant, not LogosAPI*
+}
+```
+
+So your impl must accept `QVariant`:
+
+```cpp
+// In header
+void onInit(QVariant api);
+
+// In implementation
+void MyImpl::onInit(QVariant api) {
+    logosAPI_ = static_cast<LogosAPI*>(api.value<void*>());
+}
+```
+
+### Reference implementation
+
+The anchor module (LP-0017) is the best working reference:
+
+```
+~/dev/logos/logos-anchor/anchor-module/src/anchor_impl.h   — header
+~/dev/logos/logos-anchor/anchor-module/src/anchor_impl.cpp — implementation
+```
+
+It shows the correct `onInit`, `getClient`, and `invokeRemoteMethod` patterns.
+
+## Building
+
+### Build targets
+
+All from `pilot-module/` directory:
+
+```bash
+nix --extra-experimental-features "nix-command flakes" build          # .so binary
+nix --extra-experimental-features "nix-command flakes" build .#lgx    # .lgx installable package
+nix --extra-experimental-features "nix-command flakes" build .#install       # module + manifest
+nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # run tests
+```
+
+### The `result/` symlink
+
+`result/` only holds the LAST thing you built. `nix build` → `.so`. `nix build .#lgx` → `.lgx`. They overwrite each other.
+
+### First build is slow, subsequent builds are fast
+
+The first `nix build` downloads and compiles the entire dependency tree — Rust toolchain, Qt, all Logos modules. This takes 1-3 hours depending on your machine. After that, everything is cached in `/nix/store/` and rebuilds only recompile YOUR code (~2 minutes).
+
+### The dirty git tree warning
+
+Nix warns if you have uncommitted changes. It still builds, but uses the dirty tree. Commit before building for reproducible builds:
+
+```bash
+git add -A && git commit -m "wip"
+nix build
+```
+
+## Linking SQLite
+
+If your module uses SQLite, declaring it in `metadata.json` under `find_packages` is NOT enough. You must also link it in CMakeLists.txt:
+
+```cmake
+find_package(SQLite3 REQUIRED)
+
+logos_module(
+    NAME mymodule
+    SOURCES ...
+)
+
+target_link_libraries(mymodule_plugin PRIVATE SQLite::SQLite3)
+```
+
+Without `target_link_libraries`, the build succeeds but `lm` fails with `undefined symbol: sqlite3_*`.
+
+## Dependency stubs
+
+The code generator creates client stubs for each module in your `dependencies` list. If a dependency module's stub is incompatible with the current SDK version (happened with `waku_module`), remove it from `metadata.json` dependencies and call it at runtime instead:
+
+```cpp
+// Works without compile-time stubs
+auto* waku = logosAPI_->getClient("waku_module");
+waku->invokeRemoteMethod("waku_module", "storeQuery", topic);
+```
+
+## Testing
+
+### Unit tests (no runtime needed)
+
+Create `tests/` directory with three files:
+
+```
+tests/
+├── main.cpp           — #include <logos_test.h> / LOGOS_TEST_MAIN()
+├── test_mymodule.cpp  — LOGOS_TEST(name) { ... }
+└── CMakeLists.txt     — logos_test() macro
+```
+
+Tests instantiate your impl class directly — no logoscore, no Qt runtime, no dependencies needed:
+
+```cpp
+LOGOS_TEST(echo_works) {
+    MyImpl impl;
+    LOGOS_ASSERT_EQ(impl.echo("hello"), std::string("echo: hello"));
+}
+```
+
+### Verifying with `lm` (module inspector)
+
+```bash
+# Find lm in the nix store
+find /nix/store -name "lm" -path "*/logos-module*/bin/*" 2>/dev/null
+
+# Inspect your module
+lm result/lib/mymodule_plugin.so
+```
+
+This shows metadata + all registered methods. If it fails with `undefined symbol`, you're missing a `target_link_libraries`.
+
+### logoscore CLI — headless runtime
+
+**Source:** https://github.com/logos-co/logos-logoscore-cli
+**Library:** https://github.com/logos-co/logos-liblogos
+
+There are two separate things called "logoscore":
+- **`logos-logoscore-cli`** — the real CLI tool with `-c`, `-l`, `-m`, daemon mode. This is what you want.
+- **`logos-liblogos-build`** — the core C library (`liblogos_core.so` + `logos_host`). This is what `logos-module-builder` pulls in as a build dependency. It has NO CLI argument parsing.
+
+Always build the CLI from its own repo:
+
+```bash
+nix build 'github:logos-co/logos-logoscore-cli' --extra-experimental-features 'nix-command flakes'
+```
+
+#### Inline mode — quick method calls
+
+```bash
+logoscore -m ./result/lib -l pilot -c "pilot.echo(hello)" --quit-on-finish
+logoscore -m ./result/lib -l pilot -c "pilot.metaSkills()" --quit-on-finish
+logoscore -m ./result/lib -l pilot,chat_module -c "pilot.echo(test)"
+```
+
+Flags:
+- `-m, --modules-dir <path>` — where to find `.so` files (repeatable for multiple dirs)
+- `-l, --load-modules <names>` — comma-separated module names to load
+- `-c, --call <call>` — method invocation: `module.method(arg1, arg2)` (repeatable)
+- `--quit-on-finish` — exit after all `-c` calls complete
+- `--persistence-path <path>` — module data directory (default: `~/.logoscore/data`)
+
+#### Daemon mode — persistent runtime for agent operation
+
+```bash
+# Start daemon with modules directory
+logoscore -D -m ./modules
+
+# In another terminal — interact with the running daemon
+logoscore status                              # check daemon state
+logoscore load-module pilot                   # load a module
+logoscore list-modules --loaded               # see what's running
+logoscore module-info pilot                   # inspect methods
+logoscore call pilot echo "hello world"       # call a method
+logoscore call pilot metaSkills               # no-arg method
+logoscore call storage load_config @config.json  # @file reads file content
+logoscore watch pilot --event testEvent --json   # stream events (Ctrl+C to stop)
+logoscore stop                                # shutdown daemon
+```
+
+Daemon state lives under `~/.logoscore/` (override with `--config-dir`):
+- `daemon/state.json` — live state (created at boot, removed at shutdown)
+- `daemon/tokens.json` — auth tokens (hashed at rest)
+- `client/auto.json` — auto-issued local client token
+
+#### Authentication
+
+Local same-host connections are automatic — the daemon issues an `auto` token at boot. For remote access:
+
+```bash
+logoscore issue-token --name alice             # create named token
+logoscore issue-token --name ci --expires 30d  # with expiration
+logoscore list-tokens                          # see all tokens
+logoscore revoke-token alice                   # revoke
+```
+
+#### Parallel instances
+
+```bash
+logoscore --config-dir /tmp/agent-a -D -m ./modules &
+logoscore --config-dir /tmp/agent-b -D -m ./modules &
+logoscore --config-dir /tmp/agent-a call pilot echo "I am agent A"
+logoscore --config-dir /tmp/agent-b call pilot echo "I am agent B"
+```
+
+#### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error / daemon not running |
+| 2 | No daemon running |
+| 3 | Module error (not found, load/unload failed) |
+| 4 | Method error (not found, call failed, timeout) |
+
+### Testing with Basecamp (GUI)
+
+**Source:** https://github.com/logos-co/logos-basecamp (release 0.1.2-RC3)
+
+For full integration testing with the QML UI:
+
+```bash
+BASECAMP_BIN=$(nix build "github:logos-co/logos-basecamp" \
+  --extra-experimental-features 'nix-command flakes' \
+  --no-link --print-out-paths)/bin/LogosBasecamp
+
+mkdir -p /tmp/pilot-basecamp/modules
+cp result/lib/pilot_plugin.so /tmp/pilot-basecamp/modules/
+
+export QT_QPA_PLATFORM=xcb  # for WSL/headless Linux
+$BASECAMP_BIN --user-dir /tmp/pilot-basecamp
+```
+
+The `--user-dir` flag isolates the instance with its own `modules/`, `plugins/`, `module_data/`, and `logs/` directories.
+
+### What works at each testing level
+
+| Level | What works | What doesn't |
+|-------|-----------|-------------|
+| Unit tests (`nix build .#unit-tests`) | All 44 tests, crypto, skills, LLM, core | No inter-module calls |
+| logoscore inline (`-c ... --quit-on-finish`) | Load module, call methods, scripting | No dependency modules unless also loaded with `-l` |
+| logoscore daemon (`-D`) | Persistent runtime, load/unload, events, auth | No GUI |
+| Basecamp (`--user-dir`) | Everything — LogosAPI, inter-module, QML UI | Needs display or `QT_QPA_PLATFORM=offscreen` |
+
+## Installing into Logos Basecamp
+
+### Where Basecamp stores things
+
+```
+~/.local/share/Logos/LogosBasecamp/
+├── modules/     — core modules (.so files)
+├── plugins/     — UI plugins (QML or .so)
+└── module_data/ — per-module persistent data
+```
+
+### Portable vs non-portable builds
+
+**This is critical.** A regular `nix build` produces a `.so` with hardcoded `/nix/store/...` paths for Qt and other libraries. This works inside the nix environment but **breaks inside Basecamp** because Basecamp bundles its own Qt.
+
+```bash
+# WRONG for Basecamp — hardcoded nix paths
+nix build
+ldd result/lib/mymodule_plugin.so
+# libQt6Core.so.6 => /nix/store/xxx-qtbase-6.9.2/lib/libQt6Core.so.6  ← BAD
+
+# RIGHT for Basecamp — portable, uses runtime libraries
+nix build .#lgx-portable
+# or
+nix build .#install-portable
+```
+
+The portable build sets `RUNPATH` to `$ORIGIN/.` and bundles dependency libraries (libssl, libcrypto, libboost) alongside the `.so`. Qt libraries are resolved from Basecamp's runtime.
+
+### SQLite must be bundled manually
+
+The portable build does NOT include `libsqlite3.so`. If your module uses SQLite, you must copy it manually after installing:
+
+```bash
+chmod -R u+w ~/.local/share/Logos/LogosBasecamp/modules/mymodule/
+cp /usr/lib/x86_64-linux-gnu/libsqlite3.so.0 \
+   ~/.local/share/Logos/LogosBasecamp/modules/mymodule/libsqlite3.so
+```
+
+Without this, Basecamp logs: `Failed to load plugin: libsqlite3.so: cannot open shared object file`
+
+### Install a core module via lgpm
+
+```bash
+# Find lgpm in nix store
+LGPM=$(find /nix/store -name "lgpm" -path "*/bin/*" 2>/dev/null | head -1)
+
+# Build the portable .lgx package
+nix --extra-experimental-features "nix-command flakes" build .#lgx-portable
+
+# Install into Basecamp
+$LGPM install --file result/logos-mymodule-lib.lgx \
+  --modules-dir ~/.local/share/Logos/LogosBasecamp/modules \
+  --allow-unsigned
+
+# Don't forget to bundle sqlite if needed (see above)
+```
+
+### Manifest format matters
+
+Basecamp v0.1.1 uses `manifestVersion: "0.1.0"`. Basecamp v0.1.2+ uses `manifestVersion: "0.2.0"` with a `"view"` field for QML plugins. Check which version you're targeting.
+
+**Core module manifest (v0.1.0):**
+```json
+{
+  "name": "mymodule",
+  "type": "core",
+  "main": { "linux-amd64": "mymodule_plugin.so" },
+  "manifestVersion": "0.1.0",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "My module",
+  "dependencies": ["delivery_module", "storage_module"],
+  "category": "general"
+}
+```
+
+**Core module manifest (v0.2.0):**
+```json
+{
+  "name": "mymodule",
+  "type": "core",
+  "main": { "linux-amd64": "mymodule_plugin.so" },
+  "manifestVersion": "0.2.0",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "My module",
+  "dependencies": ["delivery_module", "storage_module"],
+  "category": "general"
+}
+```
+
+### Platform key must match
+
+The nix build produces `"linux-amd64-dev"` as the platform key. Basecamp expects `"linux-amd64"`. If your module doesn't load, check the manifest:
+
+```bash
+# WRONG
+"main": { "linux-amd64-dev": "mymodule_plugin.so" }
+
+# RIGHT
+"main": { "linux-amd64": "mymodule_plugin.so" }
+```
+
+### Dependency names must match installed modules
+
+List what's actually installed before declaring dependencies:
+
+```bash
+ls ~/.local/share/Logos/LogosBasecamp/modules/
+```
+
+Use those exact names. Common mismatches:
+- `lez_wallet_module` (in spec) vs `liblogos_execution_zone_wallet_module` (installed name)
+- `wallet_module` vs `lez_wallet_module` — different modules entirely
+
+### Installing dependency modules from nix store
+
+If the package manager isn't working, you can install dependency modules directly from your nix store (they're cached from your build):
+
+```bash
+MODULES_DIR=~/.local/share/Logos/LogosBasecamp/modules
+for mod in delivery_module chat_module storage_module; do
+    src=$(find /nix/store -maxdepth 1 -name "*logos-${mod}-module" -type d 2>/dev/null | head -1)
+    if [ -d "$src/lib" ]; then
+        mkdir -p "$MODULES_DIR/$mod"
+        cp "$src/lib/"* "$MODULES_DIR/$mod/"
+        # Create a manifest.json for each (see format above)
+    fi
+done
+```
+
+### Create a QML UI plugin
+
+Core modules and UI plugins are **always separate** — different folders, different packages. You cannot bundle them in one `.lgx`.
+
+Basecamp UI plugins go in `~/.local/share/Logos/LogosBasecamp/plugins/myapp/`:
+
+```
+myapp/
+├── manifest.json
+└── Main.qml
+```
+
+manifest.json (v0.2.0 — for Basecamp 0.1.2+):
+```json
+{
+  "name": "myapp",
+  "type": "ui_qml",
+  "main": {},
+  "view": "Main.qml",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "My Logos app",
+  "dependencies": ["my_core_module"],
+  "category": "general",
+  "manifestVersion": "0.2.0"
+}
+```
+
+manifest.json (v0.1.0 — for Basecamp 0.1.1):
+```json
+{
+  "name": "myapp",
+  "type": "ui_qml",
+  "main": { "linux-amd64": "Main.qml" },
+  "version": "1.0.0",
+  "author": "Your Name",
+  "description": "My Logos app",
+  "dependencies": ["my_core_module"],
+  "category": "general",
+  "manifestVersion": "0.1.0"
+}
+```
+
+### Calling core module methods from QML
+
+The QML bridge provides `logos.callModule(moduleName, methodName, args)`:
+
+```javascript
+// In your Main.qml
+function call(method, args) {
+    if (typeof logos !== "undefined" && logos.callModule)
+        return logos.callModule("mymodule", method, args)
+    return "Bridge unavailable"
+}
+
+// Usage
+Button {
+    text: "Echo"
+    onClicked: result = call("echo", ["hello"])
+}
+```
+
+Returns the method's return value as a string, or `"false"` if the call failed.
+
+### QML syntax rules
+
+Do NOT put semicolons between QML property assignments in one-liner components:
+
+```qml
+// WRONG — "Unexpected token ';'"
+Button { text: "Go"; onClicked: doThing(); background: Rectangle { color: "red" } }
+
+// RIGHT — expanded
+Button {
+    text: "Go"
+    onClicked: doThing()
+    background: Rectangle { color: "red" }
+}
+```
+
+### Debugging module loading
+
+Check Basecamp's stderr for loading messages:
+
+```bash
+~/apps/logos-basecamp-x86_64.AppImage 2>&1 | grep -i "pilot\|error\|fail"
+```
+
+Key messages:
+- `"Successfully loaded core module: pilot"` — module loaded
+- `"Module process crashed: pilot"` — missing library (check ldd)
+- `"Failed to load plugin: libsqlite3.so: cannot open"` — bundle sqlite
+- `"Token server started, waiting for auth token"` — module waiting for capability_module
+- `"Missing dependencies detected"` — dependency name mismatch in manifest
+
+### Verifying module is running
+
+```bash
+# Check if logos_host started for your module
+ps aux | grep "logos_host.*mymodule" | grep -v grep
+
+# Check IPC sockets exist
+ls /tmp/logos_mymodule_*
+```
+
+Restart Basecamp after any changes to modules or plugins.
+
+## Common rejection reasons (from lambda-prize)
+
+Based on reviewing rejected submissions:
+
+1. **Not a real Logos module** — building a standalone Python/Rust app instead of a `.so` that loads into logoscore. The module MUST use `logos-module-builder` and compile via `nix build`.
+
+2. **No `module.json` / not a Basecamp app** — the spec says "Logos Basecamp app" meaning Qt/QML, not a web app.
+
+3. **Tests don't pass** — pinning wrong dependency versions, untested code.
+
+4. **Not deployed to LEZ** — no evidence of running against a real sequencer.
+
+5. **Missing demo** — no video, no `demo.sh`, program IDs listed as "[to be added]".
+
+6. **Submitting too fast** — max 1 submission per week, max 3 total per prize.
+
+## Two GitHub orgs
+
+Logos modules are split across two orgs:
+
+- **logos-co** — most modules (delivery, storage, waku, chat, basecamp)
+- **logos-blockchain** — LEZ wallet module, key_protocol, execution zone
+
+If you can't find a module in `logos-co`, check `logos-blockchain`.
+
+## Useful nix store paths
+
+After building, these are cached and reusable:
+
+```bash
+# Find any header or binary
+find /nix/store -name "logos_api.h" 2>/dev/null
+find /nix/store -name "logoscore" -type f 2>/dev/null
+find /nix/store -name "lm" -path "*/bin/*" 2>/dev/null
+find /nix/store -name "lgpm" -path "*/bin/*" 2>/dev/null
+```
+
+The entire nix store is shared across all Logos projects. Building one module caches dependencies for all future modules.

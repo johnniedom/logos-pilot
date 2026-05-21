@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl *)",
+      "Skill(nix-flake-setup)",
+      "Skill(inter-module-comm)",
+      "Bash(find \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\johnnie\\\\dev\\\\logos\\\\logos-pilot\" -type f -name \"*.md\")",
+      "Bash(find *)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(x['path']\\) for x in data.get\\('tree',[]\\) if 'solution' in x['path'].lower\\(\\) or 'LP-0008' in x['path'] or 'submission' in x['path'].lower\\(\\)]\")",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(x['path']\\) for x in data.get\\('tree',[]\\)]\")",
+      "Bash(grep -i -E \"prize|reward|bounty|effort|\\\\\\\\\\\\$\")",
+      "Bash(grep -i -E \"prize|reward|bounty|effort|\\\\\\\\\\\\$|usd\")",
+      "Bash(grep -E \"\\\\.\\(h|cpp|qml\\)$\")",
+      "Bash(nix build *)",
+      "Bash(python3 -c \"import sys, base64; print\\(base64.b64decode\\(sys.stdin.read\\(\\)\\).decode\\(\\)\\)\")",
+      "Bash(export LOGOSCORE=/nix/store/510yj8rfcjhdijzfj8yhrk8sy7r6k8f5-logos-logoscore-cli-0.1.0/bin/logoscore)",
+      "Bash(export LOGOS_HOST_PATH=/nix/store/90xva89s7bhsi0w6l1p1l44xvpwxz53h-logos-liblogos/bin/logos_host)",
+      "Bash(/nix/store/510yj8rfcjhdijzfj8yhrk8sy7r6k8f5-logos-logoscore-cli-0.1.0/bin/logoscore -m /tmp/pilot-logoscore/modules -l lez_wallet_module,delivery_module,storage_module,chat_module,pilot -c 'pilot.initialize\\(/tmp/pilot-data\\)' --quit-on-finish)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3.14 -c ' *)",
+      "Bash(docker manifest *)",
+      "Bash(docker run *)",
+      "Bash(chmod +x *)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "logos-dev-boost"
+  ]
+}

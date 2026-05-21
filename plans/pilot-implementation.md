@@ -6,44 +6,44 @@
 
 ---
 
-## Current State (as of 2026-05-20)
+## Current State (updated 2026-05-20 evening)
 
-### What exists and works
-- C++ Logos Core module that builds via `nix build` (regular + portable)
-- 21 skill method signatures in `pilot_impl.h` with implementations across 8 source files
+### What exists, works, and is verified live
+- C++ Logos Core module: 37 methods, builds via `nix build` (regular + portable + LGX)
+- **Confirmed running headlessly via logoscore CLI** (`logos-co/logos-logoscore-cli`)
+- `echo()`, `metaSkills()`, `metaStatus()`, `processOwnerMessage()` all return correct results live
+- 44 unit tests pass: crypto round-trips, skill registry, LLM factory, owner message routing
+- 21 skills registered through `SkillRegistry` with names, categories, descriptions, pricing
+- LLM Provider: `AnthropicProvider` + `OpenAIProvider` + `NoOpProvider` fallback
+- AES-256-GCM file encryption: encrypt before upload, decrypt after download (unit tested)
+- ECIES encryption: secp256k1 ECDH + SHA256 KDF + AES-GCM for A2A and messaging (unit tested)
+- `pilot` CLI: deploy wizard (arrow-key selector), chat REPL, verify, discover, configure, status
+- Skill interface: `PilotSkill` abstract class, `LambdaSkill`, `SkillRegistry`, example weather skill
+- 7 docs written: architecture, security-model, payment-model, owner-guide, deployment-guide, skill-interface, DEVELOPER_GUIDE
 - SQLite WAL persistence (identity, owner channel, spend requests, stored files, config)
-- Correct inter-module API: `getClient()->invokeRemoteMethod()` throughout
-- `onInit(QVariant api)` correctly handles code-generator wrapping
-- 20 unit tests pass (test the impl class directly, no runtime)
-- Module loads in Basecamp alongside delivery, chat, storage modules
 - 4-tab QML Basecamp UI plugin (Dashboard, Chat, Wallet, Skills)
-- `echo()`, `metaSkills()`, `metaStatus()` confirmed working through `logos.callModule()` bridge
 
-### What compiles but is NOT production-ready
-| Component | What's faked |
-|-----------|-------------|
-| Storage encryption | `generateFileKey()` creates hex string but never encrypts file content with AES-256-GCM |
-| File sharing | `storageShare()` sends file key as plaintext JSON — no ECIES encryption to recipient NPK |
-| Messaging encryption | `messagingSend()` sends plaintext over delivery_module |
-| Identity creation | Calls `lez_wallet_module.createAccountPrivate()` but not verified against real wallet |
-| Owner channel | Calls `chat_module.requestMyBundle()` but not tested with real chat instance |
-| Spending FSM | State transitions coded but never integration-tested with real wallet transfers |
-| A2A transport | JSON-RPC 2.0 envelope correct but no ECIES encryption on inbox/reply topics |
-| Crash recovery | `recoverPendingTransactions()` declared, implementation not verified |
+### What is code-complete but NOT integration-tested against real Logos modules
+| Component | What's needed |
+|-----------|--------------|
+| Identity creation | Test `lez_wallet_module.createAccountPrivate()` with real wallet module |
+| Owner channel | Test `chat_module.requestMyBundle()` + `createConversation()` with real chat |
+| Spending FSM | Test full 9-state flow with real `transferPrivate()` on-chain |
+| Storage encryption | Test AES-256-GCM encrypt→upload→download→decrypt with real storage_module |
+| File sharing | Test ECIES key encryption + delivery with real delivery_module |
+| A2A transport | Test ECIES-encrypted task request/reply between two pilot instances |
+| LLM integration | Test with real `ANTHROPIC_API_KEY` for natural language command routing |
+| Crash recovery | Test `recoverPendingTransactions()` after kill/restart |
 
-### What is completely missing (spec requires it)
+### What is still missing (spec requires it)
 | Required by spec | Status |
 |-----------------|--------|
-| LLM Provider trait + AnthropicProvider + OpenAIProvider | **Zero code** |
-| `pilot deploy` CLI with arrow-key selector | **Zero code** |
-| `pilot verify` evidence output | **Zero code** |
-| Real AES-256-GCM file encryption | **Zero code** |
-| Real ECIES encryption for A2A inboxes | **Zero code** |
-| Documented third-party skill interface | **Zero docs** |
-| 3 narrated demo videos | **Not started** |
-| 5 third-party deployments on LEZ testnet | **Not started** |
-| CU cost documentation per on-chain operation | **Not started** |
-| Reproducible `demo.sh` against real local sequencer | **Exists but not verified** |
+| 3 narrated demo videos | **Not started** (Phase F) |
+| 5 third-party deployments on LEZ testnet | **Not started** (Phase G) |
+| CU cost documentation per on-chain operation | **Not started** (Phase F — needs live testing) |
+| Reproducible `demo.sh` against real local sequencer | **Script exists, not verified against real infra** |
+| CI green on default branch | **Not set up** |
+| End-to-end integration tests in CI | **Not set up** |
 
 ---
 
@@ -66,7 +66,7 @@ These are locked. Do not revisit:
 
 ---
 
-## Phase A: LLM Provider (the intelligence layer)
+## Phase A: LLM Provider (the intelligence layer) — COMPLETED 2026-05-20
 
 **Why first**: Without this, Pilot is a dumb RPC dispatcher, not an AI agent. The spec says "pluggable inference" and the prototype shows LLM as a core architecture component. The agent needs to understand natural language owner commands and make decisions about task delegation.
 
@@ -132,7 +132,7 @@ public:
 
 ---
 
-## Phase B: Real Encryption
+## Phase B: Real Encryption — COMPLETED 2026-05-20
 
 **Why second**: The spec says "encrypts and uploads" for storage, "end-to-end encrypted" for messaging. Our current code fakes this entirely. Without real encryption, evaluators can trivially see that files are uploaded in cleartext.
 
@@ -184,7 +184,7 @@ public:
 
 ---
 
-## Phase C: `pilot` CLI Tool
+## Phase C: `pilot` CLI Tool — COMPLETED 2026-05-20
 
 **Why third**: The spec explicitly requires "a CLI for agent deployment, configuration, and initial funding" and "single CLI command" deployment. Evaluators will run this.
 
@@ -252,7 +252,7 @@ The CLI is a **separate executable** (not part of the Logos Core module). Two op
 
 ---
 
-## Phase D: Third-Party Skill Interface
+## Phase D: Third-Party Skill Interface — COMPLETED 2026-05-20
 
 **Why fourth**: Spec requires "a documented skill interface (module/SDK) that can be used to add new skills without modifying the core agent module."
 
@@ -435,27 +435,29 @@ public:
 
 ## Phase Order Summary
 
-| Phase | What | Depends on | Estimated effort |
-|-------|------|-----------|-----------------|
-| **A** | LLM Provider | Existing module code | 1-2 days |
-| **B** | Real Encryption | Existing module code | 1-2 days |
-| **C** | `pilot` CLI | Phases A, B (configures both) | 1-2 days |
-| **D** | Skill Interface | Existing skills code | 1 day |
-| **E** | Integration Verification | Phases A-D + real Logos modules | 2-3 days |
-| **F** | Demo & Docs | Phase E (need working system) | 2-3 days |
-| **G** | Deployments & Submit | Phases E, F | 5-7 days (waiting on people) |
+| Phase | What | Status | Effort |
+|-------|------|--------|--------|
+| **A** | LLM Provider | **COMPLETED** 2026-05-20 | Done in 1 session |
+| **B** | Real Encryption | **COMPLETED** 2026-05-20 | Done in 1 session |
+| **C** | `pilot` CLI | **COMPLETED** 2026-05-20 | Done in 1 session |
+| **D** | Skill Interface | **COMPLETED** 2026-05-20 | Done in 1 session |
+| **E** | Integration Verification | **NEXT** — needs dependency modules installed | 2-3 days |
+| **F** | Demo & Docs | Docs written, videos not started | 2-3 days |
+| **G** | Deployments & Submit | Not started | 5-7 days (waiting on people) |
 
-**Total: ~14-20 days from now**
+**Completed:** Phases A-D (all code work) in one session.
+**Remaining:** Phases E-G (integration, demos, deployments) — ~10-13 days.
 
 Start Phase G outreach (writing quickstart guide, Docker Compose) in parallel with Phase E — don't wait until code-complete.
 
 ---
 
-## Key Risks
+## Key Risks (updated)
 
-1. **LLM HTTP calls from C++ module** — Qt's QNetworkAccessManager requires event loop. May need to use synchronous libcurl or async wrapper. Research before coding.
-2. **OpenSSL availability in nix build** — need `find_package(OpenSSL REQUIRED)` in CMakeLists. May need to add to metadata.json nix packages.
-3. **ECIES with LEZ key types** — NPK from key_protocol may not be a standard EC public key. Need to verify the exact curve and format before implementing ECIES.
-4. **waku_module storeQuery** — removed from dependencies earlier due to stub incompatibility. May need to re-add or call at runtime via `getClient()`.
-5. **RISC0 proof generation** — only needed for Video 3. Must have a SPEL guest binary to prove. If no custom SPEL program exists, use an existing one from LEZ testnet.
+1. ~~**LLM HTTP calls from C++ module**~~ — **RESOLVED.** QNetworkAccessManager + QEventLoop works inside the logos_host subprocess.
+2. ~~**OpenSSL availability in nix build**~~ — **RESOLVED.** `find_package(OpenSSL REQUIRED)` works, OpenSSL 3.5.1 available.
+3. **ECIES with LEZ key types** — NPK from key_protocol may not be a standard EC public key. Need to verify the exact curve and format during Phase E integration testing.
+4. **waku_module storeQuery** — not in current dependencies. May need to re-add for crash recovery message replay.
+5. **RISC0 proof generation** — only needed for Video 3. Must have a SPEL guest binary to prove.
 6. **Third-party deployer conversion rate** — budget time for the $100 bounty fallback.
+7. **logoscore CLI vs liblogos** — **RESOLVED.** The real CLI is `logos-co/logos-logoscore-cli` (daemon + inline mode). The old `logos-liblogos-build` binary has no CLI parsing. Modules must be installed via `lgpm` (LGX packages), not bare `.so` files.

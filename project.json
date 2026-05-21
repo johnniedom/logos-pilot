@@ -1,0 +1,7 @@
+{
+  "type": "full-app",
+  "name": "pilot",
+  "description": "Logos module + UI app",
+  "module": "pilot-module",
+  "ui": "pilot-ui"
+}
