@@ -164,21 +164,20 @@ step_llm_provider() {
 step_owner_identity() {
     log_step "Step 3/5: Owner Identity"
 
-    printf "  Enter your Logos address (from Basecamp > Settings): "
-    read -r owner_address
+    printf "  Enter your secp256k1 public key (owner's ECIES key): "
+    read -r owner_npk
 
-    if [[ -z "$owner_address" ]]; then
-        log_error "Owner address cannot be empty"
+    if [[ -z "$owner_npk" ]]; then
+        log_error "Owner public key cannot be empty"
         return 1
     fi
 
-    # Store for later use
-    export PILOT_OWNER_ADDRESS="$owner_address"
+    export PILOT_OWNER_NPK="$owner_npk"
 
-    pilot_call "metaConfigure(owner.address, ${owner_address})" &>/dev/null || true
+    pilot_call "metaConfigure(owner.npk, ${owner_npk})" &>/dev/null || true
 
     printf "\n"
-    print_kv "Owner" "$owner_address"
+    print_kv "Owner NPK" "$(truncate_str "$owner_npk" 24)"
     printf "\n"
 
     log_success "Owner identity set"

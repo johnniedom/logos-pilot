@@ -218,14 +218,23 @@ chat_main() {
     # Cleanup daemon on exit
     trap 'printf "\n"; log_info "Stopping daemon..."; pilot_daemon_stop; exit 0' INT TERM
 
-    # Get agent info for the header
-    local llm_status npk
-    llm_status=$(pilot_daemon_call metaStatus 2>&1) || llm_status="{}"
-    npk=$(pilot_daemon_call getAgentNpk 2>&1) || npk="not initialized"
+    # Auto-initialize if not already done
+    local npk
+    npk=$(pilot_daemon_call getAgentNpk 2>&1) || npk=""
+    if [[ -z "$npk" || "$npk" == "{}" ]]; then
+        log_info "Initializing agent identity..."
+        pilot_daemon_call initialize "${PILOT_DATA_DIR}" >/dev/null 2>&1 || true
+        npk=$(pilot_daemon_call getAgentNpk 2>&1) || npk="not initialized"
+    fi
 
-    local provider model
-    provider=$(echo "$llm_status" | sed -n 's/.*"provider"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    model=$(echo "$llm_status" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    # Get agent info for the header
+    local llm_status
+    llm_status=$(pilot_daemon_call metaStatus 2>&1) || llm_status="{}"
+
+    local provider model account
+    provider=$(echo "$llm_status" | sed -n 's/.*"provider"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || true
+    model=$(echo "$llm_status" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || true
+    account=$(echo "$llm_status" | sed -n 's/.*"account"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || true
 
     printf "\n"
     hrule "═" 50
@@ -235,10 +244,13 @@ chat_main() {
     else
         printf "  ${DIM}LLM: not configured (command-only mode)${RESET}\n"
     fi
-    printf "  ${DIM}NPK: %s${RESET}\n" "$(truncate_str "$npk" 20)"
+    printf "  ${DIM}Account: %s${RESET}\n" "$(truncate_str "${account:-unknown}" 20)"
     printf "  ${DIM}Type /help for commands, /quit to exit${RESET}\n"
     hrule "═" 50
     printf "\n"
+
+    # Disable errexit for the REPL — daemon calls may fail without crashing the loop
+    set +e
 
     # Main REPL loop
     while true; do
