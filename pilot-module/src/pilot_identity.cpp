@@ -1,5 +1,6 @@
 #include "pilot_impl.h"
 #include "pilot_skill.h"
+#include "pilot_crypto.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include <sqlite3.h>
@@ -71,6 +72,9 @@ bool PilotImpl::loadIdentity() {
                 if (key == "spend_limit_per_tx") spendLimitPerTx_ = std::stoll(val);
                 else if (key == "spend_limit_per_period") spendLimitPerPeriod_ = std::stoll(val);
                 else if (key == "spend_period_seconds") spendPeriodSeconds_ = std::stoll(val);
+                else if (key == "owner.npk") ownerNpk_ = val;
+                else if (key == "ecies.pub") agentEciesPub_ = val;
+                else if (key == "ecies.priv") agentEciesPriv_ = val;
                 else if (key == "llm.provider") llmProvider_ = val;
                 else if (key == "llm.model") llmModel_ = val;
             }
@@ -145,6 +149,10 @@ bool PilotImpl::createIdentity() {
 
     agentNpk_ = keysResult.toString().toStdString();
 
+    ECIESKeypair kp = generateECIESKeypair();
+    agentEciesPub_ = kp.publicKeyHex;
+    agentEciesPriv_ = kp.privateKeyHex;
+
     auto now = std::chrono::system_clock::now();
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
     std::string timestamp = std::to_string(seconds);
@@ -160,8 +168,23 @@ bool PilotImpl::createIdentity() {
     sqlite3_bind_text(stmt, 3, timestamp.c_str(), -1, SQLITE_TRANSIENT);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return false;
 
-    return rc == SQLITE_DONE;
+    sqlite3_prepare_v2(db_,
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('ecies.pub', ?);",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, agentEciesPub_.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    sqlite3_prepare_v2(db_,
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('ecies.priv', ?);",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, agentEciesPriv_.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return true;
 }
 
 std::string PilotImpl::getAgentNpk() {

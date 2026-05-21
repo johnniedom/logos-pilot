@@ -37,6 +37,8 @@ bool PilotImpl::metaConfigure(const std::string& key, const std::string& value) 
         spendLimitPerPeriod_ = std::stoll(value);
     } else if (key == "spending.period_seconds") {
         spendPeriodSeconds_ = std::stoll(value);
+    } else if (key == "owner.npk") {
+        ownerNpk_ = value;
     } else if (key == "llm.provider") {
         llmProvider_ = value;
         initLLM();

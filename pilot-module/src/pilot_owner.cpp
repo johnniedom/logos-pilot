@@ -1,4 +1,5 @@
 #include "pilot_impl.h"
+#include "pilot_crypto.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include <sqlite3.h>
@@ -6,26 +7,16 @@
 #include <QString>
 #include <QVariant>
 
-static std::string toHex(const std::string& input) {
-    std::string hex;
-    hex.reserve(input.size() * 2);
-    for (unsigned char c : input) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", c);
-        hex += buf;
-    }
-    return hex;
-}
-
 bool PilotImpl::establishOwnerChannel() {
     if (!logosAPI_ || agentNpk_.empty()) return false;
+    if (ownerNpk_.empty()) return false;
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return false;
 
-    std::string topic = "/pilot/1/owner-" + agentNpk_ + "/proto";
+    std::string topic = "/pilot/1/owner-" + agentAccountId_ + "/proto";
 
-    QVariant subResult = delivery->invokeRemoteMethod(
+    delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
         QString::fromStdString(topic));
 
@@ -46,22 +37,29 @@ bool PilotImpl::establishOwnerChannel() {
         sqlite3_finalize(stmt);
     }
 
-    std::string greeting = toHex("Pilot agent connected. NPK: " + agentNpk_);
+    std::string greeting = "Pilot agent connected. Account: " + agentAccountId_;
+    std::vector<uint8_t> plainBytes(greeting.begin(), greeting.end());
+    ECIESCiphertext ct = eciesEncrypt(ownerNpk_, plainBytes);
+    std::string payload = eciesSerialize(ct);
+
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(topic),
-        QString::fromStdString(greeting));
+        QString::fromStdString(payload));
 
     return true;
 }
 
 bool PilotImpl::sendToOwner(const std::string& message) {
-    if (!logosAPI_ || ownerChannelId_.empty()) return false;
+    if (!logosAPI_ || ownerChannelId_.empty() || ownerNpk_.empty()) return false;
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return false;
 
-    std::string payload = toHex(message);
+    std::vector<uint8_t> plainBytes(message.begin(), message.end());
+    ECIESCiphertext ct = eciesEncrypt(ownerNpk_, plainBytes);
+    std::string payload = eciesSerialize(ct);
+
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(ownerChannelId_),
