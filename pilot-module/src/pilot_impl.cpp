@@ -3,8 +3,6 @@
 #include "pilot_skill.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
-#include "logos_object.h"
-#include <QStringList>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <cstdlib>
@@ -89,12 +87,6 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
 void PilotImpl::initDependencyModules() {
     if (!logosAPI_) return;
 
-    std::string wakuAddr;
-    if (const char* env = std::getenv("PILOT_WAKU_ADDR"))
-        wakuAddr = env;
-    else
-        wakuAddr = "/ip4/127.0.0.1/tcp/30303";
-
     auto* storage = logosAPI_->getClient("storage_module");
     if (storage) {
         storage->invokeRemoteMethod("storage_module", "init",
@@ -102,15 +94,19 @@ void PilotImpl::initDependencyModules() {
         storage->invokeRemoteMethod("storage_module", "start");
     }
 
-    auto* chat = logosAPI_->getClient("chat_module");
-    if (chat) {
-        std::string chatConfig = "{\"name\":\"pilot\",\"staticPeers\":[\"" + wakuAddr + "\"]}";
+    std::string wakuAddr;
+    if (const char* env = std::getenv("PILOT_WAKU_ADDR"))
+        wakuAddr = env;
+    else
+        wakuAddr = "/ip4/127.0.0.1/tcp/30303";
 
-        LogosObject* chatObj = chat->requestObject("chat_module");
-        if (chatObj) {
-            chat->onEventResponse(chatObj, "chatInit", {QString::fromStdString(chatConfig)});
-            chat->onEventResponse(chatObj, "chatStart", {});
-        }
+    auto* delivery = logosAPI_->getClient("delivery_module");
+    if (delivery) {
+        std::string cfg = "{\"clusterId\":2,\"shards\":[0,1,2,3,4,5,6,7],"
+            "\"staticNodes\":[\"" + wakuAddr + "\"]}";
+        delivery->invokeRemoteMethod("delivery_module", "createNode",
+            QString::fromStdString(cfg));
+        delivery->invokeRemoteMethod("delivery_module", "start");
     }
 }
 
