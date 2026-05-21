@@ -3,6 +3,8 @@
 #include "pilot_skill.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "logos_object.h"
+#include "pilot_crypto.h"
 #include <sqlite3.h>
 #include <stdexcept>
 #include <cstdlib>
@@ -107,6 +109,26 @@ void PilotImpl::initDependencyModules() {
         delivery->invokeRemoteMethod("delivery_module", "createNode",
             QString::fromStdString(cfg));
         delivery->invokeRemoteMethod("delivery_module", "start");
+
+        LogosObject* deliveryObj = delivery->requestObject("delivery_module");
+        if (deliveryObj) {
+            delivery->onEvent(deliveryObj, "messageReceived",
+                [this](const QString&, const QVariantList& data) {
+                    if (data.size() < 2) return;
+                    std::string topic = data[0].toString().toStdString();
+                    std::string payload = data[1].toString().toStdString();
+
+                    if (topic != ownerChannelId_ || agentEciesPriv_.empty()) return;
+
+                    try {
+                        ECIESCiphertext ct = eciesDeserialize(payload);
+                        std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
+                        std::string message(plain.begin(), plain.end());
+                        std::string response = processOwnerMessage(message);
+                        sendToOwner(response);
+                    } catch (...) {}
+                });
+        }
     }
 }
 

@@ -107,6 +107,29 @@ AESKey aesKeyFromHex(const std::string& hex) {
 
 // ECIES: ephemeral ECDH (secp256k1) + SHA256 KDF + AES-256-GCM
 
+ECIESKeypair generateECIESKeypair() {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+    EVP_PKEY_keygen_init(ctx);
+    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_secp256k1);
+    EVP_PKEY* key = nullptr;
+    EVP_PKEY_keygen(ctx, &key);
+    EVP_PKEY_CTX_free(ctx);
+
+    size_t pubLen = 0;
+    EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY, nullptr, 0, &pubLen);
+    std::vector<uint8_t> pubBytes(pubLen);
+    EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY, pubBytes.data(), pubBytes.size(), &pubLen);
+
+    BIGNUM* privBn = nullptr;
+    EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_PRIV_KEY, &privBn);
+    std::vector<uint8_t> privBytes(BN_num_bytes(privBn));
+    BN_bn2bin(privBn, privBytes.data());
+    BN_free(privBn);
+
+    EVP_PKEY_free(key);
+    return {bytesToHex(pubBytes), bytesToHex(privBytes)};
+}
+
 ECIESCiphertext eciesEncrypt(const std::string& recipientNpk,
                               const std::vector<uint8_t>& plaintext) {
     std::vector<uint8_t> recipientPub = hexToBytes(recipientNpk);

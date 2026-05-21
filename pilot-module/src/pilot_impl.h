@@ -88,6 +88,9 @@ private:
     std::string agentNpk_;
     std::string agentAccountId_;
     std::string ownerChannelId_;
+    std::string ownerNpk_;
+    std::string agentEciesPub_;
+    std::string agentEciesPriv_;
     std::string llmProvider_;
     std::string llmModel_;
     int64_t spendLimitPerTx_ = 100;

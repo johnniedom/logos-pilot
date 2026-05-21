@@ -22,6 +22,13 @@ struct ECIESCiphertext {
     std::vector<uint8_t> tag;
 };
 
+struct ECIESKeypair {
+    std::string publicKeyHex;
+    std::string privateKeyHex;
+};
+
+ECIESKeypair generateECIESKeypair();
+
 ECIESCiphertext eciesEncrypt(const std::string& recipientNpk,
                               const std::vector<uint8_t>& plaintext);
 std::vector<uint8_t> eciesDecrypt(const std::string& privateKeyHex,
