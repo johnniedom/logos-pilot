@@ -90,7 +90,7 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
     if (!wallet) return false;
 
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "transferPrivate",
+        "lez_wallet_module", "transfer_private",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(recipient),
         QString::number(amount));
@@ -243,7 +243,7 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         return "{\"status\": \"failed\", \"request_id\": \"" + reqId + "\", \"error\": \"wallet unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "transferPrivate",
+        "lez_wallet_module", "transfer_private",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(recipient),
         QString::number(amount));

@@ -29,18 +29,28 @@ Comprehensive record of everything discovered during Phase E (Integration Verifi
 
 ## 2. Running a Local Sequencer
 
-### Option A: Pre-built Docker Image (Recommended)
+### Option A: Docker Compose from Source (What We Use)
 
-Building from source fails — the full LEZ sequencer images are pushed to a **private Docker registry**. Use the pre-built devnet image instead:
+```bash
+git clone https://github.com/logos-blockchain/logos-execution-zone
+cd logos-execution-zone
+docker compose up sequencer_service
+```
+
+**First build is slow** (~40 min, Rust + RISC0 toolchain compilation). Subsequent runs start in seconds (Docker layer cache).
+
+**Known issues on first build:**
+- `explorer_service` may fail — Debian trixie apt mirrors returned "410 Gone" (DNS/CDN issue in WSL Docker). Not needed for sequencer.
+- `cargo chef cook` can fail during Rust dependency compilation — retry usually works.
+
+**Verify:** `curl http://localhost:8080` (empty response = working)
+
+### Option B: Pre-built Docker Image (Alternative)
+
+The devnet image has pre-compiled binaries if building from source proves too difficult:
 
 ```bash
 docker pull ghcr.io/logos-blockchain/logos-blockchain:devnet
-```
-
-Image contains: `logos-blockchain-demo-sequencer` (7.6 MB), `logos-blockchain-node` (45 MB), `logos-blockchain-faucet` (4.9 MB), demo webapp, ZK circuits.
-
-Run script (`run-sequencer.sh`):
-```bash
 docker run --rm -p 8080:8080 \
   -e SEQUENCER_LISTEN_ADDR=0.0.0.0:8080 \
   -e SEQUENCER_DB_PATH=/data/sequencer.db \
@@ -52,28 +62,14 @@ docker run --rm -p 8080:8080 \
   ghcr.io/logos-blockchain/logos-blockchain:devnet
 ```
 
-**Required env vars:**
+Image contains: `logos-blockchain-demo-sequencer` (7.6 MB), `logos-blockchain-node` (45 MB), `logos-blockchain-faucet` (4.9 MB), demo webapp, ZK circuits.
+
+**Required env vars (for pre-built image):**
 - `SEQUENCER_LISTEN_ADDR` — bind address (0.0.0.0:8080)
 - `SEQUENCER_CHANNEL_ID` — hex channel ID (required, panics without it)
 - `SEQUENCER_DB_PATH` — SQLite database path
 - `SEQUENCER_SIGNING_KEY_PATH` — key file path
 - `SEQUENCER_INITIAL_BALANCE` — initial token supply
-
-**Verify:** `curl http://localhost:8080` (empty response = working)
-
-### Option B: Docker Compose from Source (NOT Recommended)
-
-```bash
-git clone https://github.com/logos-blockchain/logos-execution-zone
-cd logos-execution-zone
-docker compose up sequencer_service
-```
-
-**Problems encountered:**
-1. `explorer_service` fails — Debian trixie apt mirrors return "410 Gone" (DNS/CDN issue in WSL Docker)
-2. `sequencer_service` build takes 40+ minutes (Rust + RISC0 toolchain compilation)
-3. `cargo chef cook` failed during Rust dependency compilation
-4. Full LEZ sequencer images pushed to private registry — can't be pulled
 
 ### Docker Caching
 - First build is slow (40+ min). Subsequent `docker compose up` starts in seconds (layers cached).
