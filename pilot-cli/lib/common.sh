@@ -47,7 +47,7 @@ PILOT_DATA_DIR="${PILOT_DATA_DIR:-/tmp/pilot-data}"
 PILOT_MODULE_PATH="${PILOT_MODULE_PATH:-/tmp/pilot-logoscore/modules}"
 PILOT_CONFIG_DIR="${PILOT_CONFIG_DIR:-${PILOT_DATA_DIR}/.logoscore}"
 PILOT_START_TIME_FILE="${PILOT_DATA_DIR}/.pilot_start_time"
-PILOT_MODULES="capability_module,lez_wallet_module,delivery_module,storage_module,chat_module,pilot"
+PILOT_MODULES="capability_module,lez_wallet_module,delivery_module,storage_module,pilot"
 
 # logoscore CLI — from logos-co/logos-logoscore-cli (NOT logos-liblogos)
 if [[ -z "${LOGOSCORE:-}" ]]; then
@@ -67,8 +67,6 @@ export PILOT_WAKU_ADDR="${PILOT_WAKU_ADDR:-/ip4/127.0.0.1/tcp/30303}"
 # ──────────────────────────────────────────────────────────────
 # Module interaction — inline mode (one-shot calls)
 # ──────────────────────────────────────────────────────────────
-# pilot_call "method(args)" — invoke a pilot module method
-# Uses inline mode for one-shot calls (deploy, verify, discover)
 pilot_call() {
     local method_call="$1"
     local full_cmd="pilot.${method_call}"
@@ -92,19 +90,44 @@ pilot_daemon_start() {
         -D -m "${PILOT_MODULE_PATH}" > "${PILOT_DATA_DIR}/daemon.log" 2>&1 &
     local pid=$!
     echo "$pid" > "${PILOT_DATA_DIR}/daemon.pid"
-    sleep 3
-    if kill -0 "$pid" 2>/dev/null; then
-        local IFS=','
-        for mod in ${PILOT_MODULES}; do
-            "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" load-module "$mod" >/dev/null 2>&1 || true
-        done
-        unset IFS
-        sleep 2
-        "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot initialize "${PILOT_DATA_DIR}" >/dev/null 2>&1 || true
-        return 0
-    else
+
+    # Poll until daemon is responding (max 15s)
+    local attempts=0
+    while (( attempts < 15 )); do
+        if pilot_daemon_running 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        (( attempts++ ))
+    done
+
+    if ! kill -0 "$pid" 2>/dev/null; then
         return 1
     fi
+
+    # Load modules
+    local IFS=','
+    for mod in ${PILOT_MODULES}; do
+        "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" load-module "$mod" >/dev/null 2>&1 || true
+    done
+    unset IFS
+
+    # Wait until pilot module responds
+    local ready=0
+    for i in 1 2 3 4 5; do
+        if pilot_daemon_call echo ready 2>/dev/null | grep -q "ready"; then
+            ready=1
+            break
+        fi
+        sleep 2
+    done
+
+    if (( ready )); then
+        pilot_daemon_call initialize "${PILOT_DATA_DIR}" >/dev/null 2>&1 || true
+    fi
+
+    record_start_time
+    return 0
 }
 
 pilot_daemon_call() {
@@ -113,7 +136,6 @@ pilot_daemon_call() {
     local raw
     raw=$("$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" call pilot "$method" "$@" 2>&1) || true
     if [[ "$raw" == *'"status":"ok"'* ]]; then
-        # Extract result value between "result":" and ","status"
         local result
         result=$(echo "$raw" | sed 's/.*"result":"//; s/","status":"ok".*//' | sed 's/\\"/"/g')
         echo "$result"
@@ -142,7 +164,6 @@ hrule() {
     printf '%*s\n' "$width" '' | tr ' ' "$char"
 }
 
-# Truncate a string to a max length, appending "..." if truncated
 truncate_str() {
     local str="$1"
     local max="${2:-16}"
@@ -153,7 +174,6 @@ truncate_str() {
     fi
 }
 
-# Print a key-value pair with alignment
 print_kv() {
     local key="$1"
     local val="$2"
