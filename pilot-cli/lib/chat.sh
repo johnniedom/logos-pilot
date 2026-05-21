@@ -60,7 +60,9 @@ dispatch_command() {
             pilot_daemon_call storageList
             ;;
         discover)
-            pilot_daemon_call agentDiscover
+            local topic="${args:-}"
+            [[ "$topic" == "$cmd" ]] && topic=""
+            pilot_daemon_call agentDiscover "${topic}"
             ;;
         send)
             local recipient amount reason
