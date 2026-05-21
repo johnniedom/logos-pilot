@@ -1,0 +1,28 @@
+services:
+  nwaku:
+    image: harbor.status.im/wakuorg/nwaku:v0.38.0
+    container_name: pilot-nwaku
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8645:8645"
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+    volumes:
+      - ./store:/store
+    command:
+      - --rest=true
+      - --rest-address=0.0.0.0
+      - --rest-port=8645
+      - --rest-admin=true
+      - --relay=true
+      - --cluster-id=2
+      - --num-shards-in-network=8
+      - --store=true
+      - --store-message-db-url=sqlite:///store/store.sqlite3
+      - --discv5-discovery=true
+      - --staticnode=/dns4/delivery-01.do-ams3.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby
+      - --staticnode=/dns4/delivery-02.do-ams3.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAmMK7PYygBtKUQ8EHp7EfaD3bCEsJrkFooK8RQ2PVpJprH
+      - --staticnode=/dns4/delivery-01.gc-us-central1-a.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm4S1JYkuzDKLKQvwgAhZKs9otxXqt8SCGtB4hoJP1S397
+      - --staticnode=/dns4/delivery-02.gc-us-central1-a.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm8Y9kgBNtjxvCnf1X6gnZJW5EGE4UwwCL3CCm55TwqBiH
+      - --staticnode=/dns4/delivery-01.ac-cn-hongkong-c.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm8YokiNun9BkeA1ZRmhLbtNUvcwRr64F69tYj9fkGyuEP
+      - --staticnode=/dns4/delivery-02.ac-cn-hongkong-c.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAkvwhGHKNry6LACrB8TmEFoCJKEX29XR5dDUzk3UT3UNSE

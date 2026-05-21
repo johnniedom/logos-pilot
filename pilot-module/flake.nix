@@ -23,6 +23,12 @@
           --impl-header pilot_impl.h \
           --metadata metadata.json \
           --output-dir ./generated_code
+
+        # The generator does NOT produce an onInit wrapper (we removed it from
+        # the impl header). Inject an override so the framework can pass the
+        # LogosAPI pointer to PilotImpl when the module loads.
+        sed -i '/^private:/i\    void onInit(LogosAPI* api) override {\n        m_impl.logosAPI_ = api;\n    }\n' \
+          ./generated_code/pilot_qt_glue.h
       '';
     };
 }

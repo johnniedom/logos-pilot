@@ -3,8 +3,6 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
-#include <QVariant>
-
 struct sqlite3;
 class LogosAPI;
 class LLMProvider;
@@ -73,17 +71,16 @@ public:
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
 
-    void onInit(QVariant api);
+    LogosAPI* logosAPI_ = nullptr;
 
 private:
     void initDatabase(const std::string& dataDir);
+    bool initWallet();
     bool loadIdentity();
     bool createIdentity();
     void recoverPendingTransactions();
     void initLLM();
     std::string buildLLMSystemPrompt();
-
-    LogosAPI* logosAPI_ = nullptr;
     sqlite3* db_ = nullptr;
     std::unique_ptr<LLMProvider> llm_;
     std::unique_ptr<SkillRegistry> registry_;
@@ -95,5 +92,6 @@ private:
     int64_t spendLimitPerTx_ = 100;
     int64_t spendLimitPerPeriod_ = 500;
     int64_t spendPeriodSeconds_ = 86400;
+    std::string dataDir_;
     bool initialized_ = false;
 };
