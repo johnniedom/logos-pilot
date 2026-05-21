@@ -324,7 +324,7 @@ std::string PilotImpl::programQuery(const std::string& programId, const std::str
         QString::fromStdString(paramsJson));
 
     if (result.isNull())
-        return "{\"error\": \"query failed\"}";
+        return "{\"error\": \"query failed — wallet-ffi does not yet support program queries\", \"program\": \"" + programId + "\"}";
 
     return "{\"program\": \"" + programId + "\", \"result\": " + result.toString().toStdString() + "}";
 }
@@ -351,7 +351,7 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         QString::fromStdString(paramsJson));
 
     if (result.isNull())
-        return "{\"error\": \"call failed\"}";
+        return "{\"error\": \"call failed — wallet-ffi does not yet support program calls\", \"program\": \"" + programId + "\"}";
 
     return "{\"program\": \"" + programId + "\", \"instruction\": \"" + instruction +
         "\", \"result\": " + result.toString().toStdString() + "}";
