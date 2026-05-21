@@ -9,7 +9,9 @@
 #include <cstring>
 #include <QString>
 #include <QVariant>
+#include <QVariantMap>
 #include <QByteArray>
+#include "logos_types.h"
 
 static std::string currentTs() {
     auto now = std::chrono::system_clock::now();
@@ -38,7 +40,16 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
         "storage_module", "uploadInit",
         QString::fromStdString(label));
 
-    QString sessionId = initResult.toString();
+    QString sessionId;
+    if (initResult.canConvert<LogosResult>()) {
+        LogosResult lr = initResult.value<LogosResult>();
+        if (lr.success)
+            sessionId = lr.value.toString();
+    } else if (initResult.canConvert<QVariantMap>()) {
+        sessionId = initResult.toMap().value("value").toString();
+    } else {
+        sessionId = initResult.toString();
+    }
     if (sessionId.isEmpty())
         return "{\"error\": \"upload init failed\"}";
 
@@ -51,7 +62,16 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     QVariant finalResult = storage->invokeRemoteMethod(
         "storage_module", "uploadFinalize", sessionId);
 
-    std::string cid = finalResult.toString().toStdString();
+    std::string cid;
+    if (finalResult.canConvert<LogosResult>()) {
+        LogosResult lr = finalResult.value<LogosResult>();
+        if (lr.success)
+            cid = lr.value.toString().toStdString();
+    } else if (finalResult.canConvert<QVariantMap>()) {
+        cid = finalResult.toMap().value("value").toString().toStdString();
+    } else {
+        cid = finalResult.toString().toStdString();
+    }
     if (cid.empty())
         return "{\"error\": \"upload finalize failed\"}";
 
