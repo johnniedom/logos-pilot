@@ -86,6 +86,19 @@ pilot_call_quiet() {
 # ──────────────────────────────────────────────────────────────
 pilot_daemon_start() {
     mkdir -p "${PILOT_DATA_DIR}"
+
+    # Clean stale daemon state from a previous crash
+    if [[ -f "${PILOT_DATA_DIR}/daemon.pid" ]]; then
+        local old_pid
+        old_pid=$(< "${PILOT_DATA_DIR}/daemon.pid")
+        if ! kill -0 "$old_pid" 2>/dev/null; then
+            log_info "Cleaning stale daemon state..."
+            "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" stop 2>/dev/null || true
+            rm -f "${PILOT_DATA_DIR}/daemon.pid"
+            rm -rf "${PILOT_CONFIG_DIR}/daemon"
+        fi
+    fi
+
     "$LOGOSCORE" --config-dir "${PILOT_CONFIG_DIR}" \
         -D -m "${PILOT_MODULE_PATH}" > "${PILOT_DATA_DIR}/daemon.log" 2>&1 &
     local pid=$!
