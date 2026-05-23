@@ -67,7 +67,7 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
-        "SELECT recipient, amount, state FROM spend_requests WHERE id = ?;",
+        "SELECT recipient, amount, state, expires_at FROM spend_requests WHERE id = ?;",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, requestId.c_str(), -1, SQLITE_TRANSIENT);
 
@@ -79,9 +79,24 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
     std::string recipient = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     int64_t amount = sqlite3_column_int64(stmt, 1);
     std::string state = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    std::string expiresAt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     sqlite3_finalize(stmt);
 
     if (state != "HELD" && state != "NOTIFIED") return false;
+
+    int64_t nowEpoch = std::stoll(currentTimestamp());
+    if (!expiresAt.empty() && nowEpoch > std::stoll(expiresAt)) {
+        std::string ts = std::to_string(nowEpoch);
+        sqlite3_prepare_v2(db_,
+            "UPDATE spend_requests SET state = 'EXPIRED', updated_at = ? WHERE id = ?;",
+            -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, requestId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        sendToOwner("Spend request " + requestId + " has expired.");
+        return false;
+    }
 
     std::string now = currentTimestamp();
     sqlite3_prepare_v2(db_,
@@ -210,6 +225,31 @@ bool PilotImpl::setSpendingLimits(int64_t perTransaction, int64_t perPeriod, int
 std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, const std::string& reason) {
     if (!logosAPI_ || agentAccountId_.empty())
         return "{\"error\": \"not initialized\"}";
+
+    // Check per-period spending limit
+    if (db_) {
+        int64_t periodStart = std::stoll(currentTimestamp()) - spendPeriodSeconds_;
+        std::string psStr = std::to_string(periodStart);
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_,
+            "SELECT COALESCE(SUM(amount), 0) FROM spend_requests "
+            "WHERE state IN ('COMPLETED', 'EXECUTING', 'APPROVED') AND created_at > ?;",
+            -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, psStr.c_str(), -1, SQLITE_TRANSIENT);
+        int64_t periodTotal = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            periodTotal = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        if (periodTotal + amount > spendLimitPerPeriod_) {
+            std::string reqId = createSpendRequest(recipient, amount, reason);
+            sendToOwner("Period limit exceeded (" + std::to_string(periodTotal) + "/" +
+                std::to_string(spendLimitPerPeriod_) + " LEZ). Approval required.\n/approve " +
+                reqId + "\n/reject " + reqId);
+            return "{\"status\": \"held\", \"request_id\": \"" + reqId +
+                "\", \"message\": \"Period spending limit exceeded\"}";
+        }
+    }
 
     if (amount > spendLimitPerTx_) {
         std::string reqId = createSpendRequest(recipient, amount, reason);

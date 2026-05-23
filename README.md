@@ -13,10 +13,10 @@ cd pilot-module
 # 1. Build the module
 nix --extra-experimental-features "nix-command flakes" build
 
-# 2. Verify the module loads (shows all 33 methods)
+# 2. Verify the module loads (shows all 36 methods)
 lm result/lib/pilot_plugin.so
 
-# 3. Run unit tests (20/20)
+# 3. Run unit tests (44/44)
 nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L
 
 # 4. Build the installable .lgx package
@@ -152,8 +152,8 @@ Agent-to-agent coordination follows the [A2A specification](https://a2a-protocol
 | Agent-to-agent tasks | Yes | — |
 
 - **Identity**: `KeyChain::new_os_random()` via wallet-ffi (not custom key generation)
-- **Encryption**: ECIES for agent inboxes, chat_module E2E for owner, AES-256-GCM for files
-- **Key storage**: Agent private keys held in LEZ wallet module, never exposed to pilot module
+- **Encryption**: ECIES (secp256k1) for owner channel + agent inboxes + file sharing, AES-256-GCM for files
+- **Key storage**: Wallet keys in LEZ wallet module, agent ECIES keypair in SQLite config
 
 ## Dependencies
 
@@ -214,7 +214,7 @@ QString walletSend(QString recipient, int amount, QString reason)
 nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L
 ```
 
-Runs 20 tests covering all phases — echo, pre-init error handling, skill isolation, meta introspection. All tests pass in under 1ms.
+Runs 44 tests covering all phases — echo, crypto round-trips, skill registry, LLM factory, owner message routing. All tests pass in under 100ms.
 
 ### 3. Loading into logoscore
 
@@ -310,9 +310,9 @@ logoscore call pilot agentTask targetNpk wallet-balance "{}"
 
 ## Known Limitations
 
-- Encryption uses placeholder pass-through pending full ECIES/AES integration with logos-cpp-sdk crypto primitives
-- `waku_module` called at runtime via `getClient()` without compile-time stubs (version mismatch in generated code)
-- LLM provider trait defined but not wired (pluggable: Anthropic, OpenAI — no bundled model)
+- `chat_module` has empty callMethod dispatch — owner channel uses `delivery_module` with ECIES encryption instead
+- `programCall`/`programQuery` — wallet-ffi v0.1 does not expose program methods (LEZ v0.2.0-rc3 feature)
+- Storage download requires peer network — local-only node can upload but not serve data back
 - RISC0 proof generation requires `RISC0_DEV_MODE=0` only when a SPEL guest binary exists
 
 ## License
