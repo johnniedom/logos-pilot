@@ -35,7 +35,7 @@ std::string SkillRegistry::listSkillsForCard() const {
         for (auto& c : id) if (c == '.') c = '-';
         json << "{"
              << "\"id\": \"" << id << "\","
-             << "\"name\": \"" << skill->description() << "\","
+             << "\"name\": \"" << skill->name() << "\","
              << "\"description\": \"" << skill->description() << "\","
              << "\"inputModes\": [\"application/json\"],"
              << "\"outputModes\": [\"application/json\"]"
