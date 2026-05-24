@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-module:
+    name: Build C++ Module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-pilot
+          skipPush: true
+        continue-on-error: true
+
+      - name: Build module
+        run: cd pilot-module && nix build
+
+      - name: Run unit tests (44 tests)
+        run: cd pilot-module && nix build .#unit-tests -L
+
+      - name: Build LGX package
+        run: cd pilot-module && nix build .#lgx
+
+  build-cli:
+    name: Build Nim CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build CLI
+        run: cd pilot-cli && nix build
+
+      - name: Verify binary
+        run: |
+          pilot-cli/result/bin/pilot version
+          pilot-cli/result/bin/pilot help

@@ -2,30 +2,42 @@
 #include "pilot_llm.h"
 #include "pilot_skill.h"
 #include <sqlite3.h>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QByteArray>
+#include <QString>
 
 std::string PilotImpl::metaSkills() {
     if (registry_) return registry_->listSkills();
-    return "{\"skills\": [], \"count\": 0}";
+    QJsonObject root;
+    root["skills"] = QJsonArray();
+    root["count"] = 0;
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::metaStatus() {
     std::string balance = walletBalance();
     std::string pending = getPendingSpends();
 
-    std::string llmInfo = "\"none\"";
+    QJsonObject root;
+    root["initialized"] = initialized_;
+    root["npk"] = QString::fromStdString(agentNpk_);
+    root["account"] = QString::fromStdString(agentAccountId_);
+    root["owner_channel"] = QString::fromStdString(ownerChannelId_);
+    root["balance"] = QJsonDocument::fromJson(QByteArray::fromStdString(balance)).object();
+    root["pending"] = QJsonDocument::fromJson(QByteArray::fromStdString(pending)).object();
+
     if (llm_ && llm_->isConfigured()) {
-        llmInfo = "{\"provider\": \"" + llm_->providerName() +
-                  "\", \"model\": \"" + llm_->model() + "\"}";
+        QJsonObject llmObj;
+        llmObj["provider"] = QString::fromStdString(llm_->providerName());
+        llmObj["model"] = QString::fromStdString(llm_->model());
+        root["llm"] = llmObj;
+    } else {
+        root["llm"] = QString("none");
     }
 
-    return "{\"initialized\": " + std::string(initialized_ ? "true" : "false") +
-        ", \"npk\": \"" + agentNpk_ + "\""
-        ", \"account\": \"" + agentAccountId_ + "\""
-        ", \"owner_channel\": \"" + ownerChannelId_ + "\""
-        ", \"balance\": " + balance +
-        ", \"pending\": " + pending +
-        ", \"llm\": " + llmInfo +
-        "}";
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
 bool PilotImpl::metaConfigure(const std::string& key, const std::string& value) {

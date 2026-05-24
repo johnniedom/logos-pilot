@@ -8,6 +8,9 @@
 #include <cstring>
 #include <QString>
 #include <QVariant>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 static std::string amountToHexLE(int64_t amount) {
     uint8_t bytes[16] = {};
@@ -175,26 +178,23 @@ std::string PilotImpl::getPendingSpends() {
         "WHERE state IN ('CREATED', 'HELD', 'NOTIFIED') ORDER BY created_at;",
         -1, &stmt, nullptr);
 
-    std::ostringstream json;
-    json << "{\"pending\": [";
-    bool first = true;
+    QJsonArray arr;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!first) json << ",";
-        first = false;
-        json << "{"
-             << "\"id\": \"" << sqlite3_column_text(stmt, 0) << "\","
-             << "\"recipient\": \"" << sqlite3_column_text(stmt, 1) << "\","
-             << "\"amount\": " << sqlite3_column_int64(stmt, 2) << ","
-             << "\"reason\": \"" << sqlite3_column_text(stmt, 3) << "\","
-             << "\"state\": \"" << sqlite3_column_text(stmt, 4) << "\","
-             << "\"created_at\": \"" << sqlite3_column_text(stmt, 5) << "\","
-             << "\"expires_at\": \"" << sqlite3_column_text(stmt, 6) << "\""
-             << "}";
+        QJsonObject obj;
+        obj["id"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        obj["recipient"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+        obj["amount"] = static_cast<double>(sqlite3_column_int64(stmt, 2));
+        obj["reason"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)));
+        obj["state"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
+        obj["created_at"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)));
+        obj["expires_at"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6)));
+        arr.append(obj);
     }
-    json << "]}";
     sqlite3_finalize(stmt);
 
-    return json.str();
+    QJsonObject root;
+    root["pending"] = arr;
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
 bool PilotImpl::setSpendingLimits(int64_t perTransaction, int64_t perPeriod, int64_t periodSeconds) {
@@ -246,8 +246,11 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
             sendToOwner("Period limit exceeded (" + std::to_string(periodTotal) + "/" +
                 std::to_string(spendLimitPerPeriod_) + " LEZ). Approval required.\n/approve " +
                 reqId + "\n/reject " + reqId);
-            return "{\"status\": \"held\", \"request_id\": \"" + reqId +
-                "\", \"message\": \"Period spending limit exceeded\"}";
+            QJsonObject res;
+            res["status"] = QString("held");
+            res["request_id"] = QString::fromStdString(reqId);
+            res["message"] = QString("Period spending limit exceeded");
+            return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
         }
     }
 
@@ -278,7 +281,11 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
 
-        return "{\"status\": \"held\", \"request_id\": \"" + reqId + "\", \"message\": \"Awaiting owner approval\"}";
+        QJsonObject res;
+        res["status"] = QString("held");
+        res["request_id"] = QString::fromStdString(reqId);
+        res["message"] = QString("Awaiting owner approval");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
     std::string reqId = createSpendRequest(recipient, amount, reason);
@@ -294,8 +301,13 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
     sqlite3_finalize(stmt);
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
-    if (!wallet)
-        return "{\"status\": \"failed\", \"request_id\": \"" + reqId + "\", \"error\": \"wallet unavailable\"}";
+    if (!wallet) {
+        QJsonObject res;
+        res["status"] = QString("failed");
+        res["request_id"] = QString::fromStdString(reqId);
+        res["error"] = QString("wallet unavailable");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
 
     QVariant result = wallet->invokeRemoteMethod(
         "lez_wallet_module", "transfer_private",
@@ -316,10 +328,10 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    if (ok)
-        return "{\"status\": \"completed\", \"request_id\": \"" + reqId + "\"}";
-    else
-        return "{\"status\": \"failed\", \"request_id\": \"" + reqId + "\"}";
+    QJsonObject res;
+    res["status"] = ok ? QString("completed") : QString("failed");
+    res["request_id"] = QString::fromStdString(reqId);
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 void PilotImpl::recoverPendingTransactions() {

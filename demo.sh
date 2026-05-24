@@ -27,38 +27,48 @@ else
     echo "      lm inspector not found, skipping introspection"
 fi
 
-# Step 3: Set up logoscore with the module
+# Step 3: Set up logoscore environment
 echo ""
 echo "[3/4] Setting up logoscore environment..."
-LOGOSCORE_BUILD=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos-build-*" -type d 2>/dev/null | head -1)
 
-if [ -z "$LOGOSCORE_BUILD" ]; then
-    echo "      ERROR: logoscore build not found in nix store. Run 'nix build' first."
+# Find logoscore CLI (from logos-logoscore-cli, NOT logos-liblogos)
+LOGOSCORE="$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli*" -type f 2>/dev/null | head -1)"
+if [ -z "$LOGOSCORE" ]; then
+    echo "      ERROR: logoscore CLI not found. Run: nix build 'github:logos-co/logos-logoscore-cli'"
     exit 1
 fi
 
+# Find lgpm for module installation
+LGPM="$(find /nix/store -maxdepth 3 -name lgpm -path "*/bin/*" 2>/dev/null | head -1)"
+
+# Set LOGOS_HOST_PATH (required for module spawning)
+export LOGOS_HOST_PATH="$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d 2>/dev/null | head -1)/bin/logos_host"
+
+# Install module via lgpm (logoscore uses lgpm package format)
+MODULES_DIR="$TEST_DIR/modules"
 rm -rf "$TEST_DIR"
-mkdir -p "$TEST_DIR/bin" "$TEST_DIR/modules"
-cp "$LOGOSCORE_BUILD/bin/.logoscore-wrapped" "$TEST_DIR/bin/logoscore"
-cp result/lib/pilot_plugin.so "$TEST_DIR/modules/"
+mkdir -p "$MODULES_DIR"
 
-# Find Qt plugin paths
-QT_BASE=$(find /nix/store -maxdepth 1 -name "*-qtbase-6.*" -not -name "*only*" -not -name "*dev*" -type d 2>/dev/null | head -1)
-QT_DECL=$(find /nix/store -maxdepth 1 -name "*-qtdeclarative-6.*" -not -name "*dev*" -type d 2>/dev/null | head -1)
-QT_RO=$(find /nix/store -maxdepth 1 -name "*-qtremoteobjects-6.*" -not -name "*dev*" -type d 2>/dev/null | head -1)
+if [ -n "$LGPM" ]; then
+    nix --extra-experimental-features "nix-command flakes" build .#lgx -o result-lgx
+    $LGPM install --file result-lgx/logos-pilot-module-lib.lgx \
+        --modules-dir "$MODULES_DIR" --allow-unsigned 2>&1 || true
+    echo "      Installed via lgpm"
+else
+    echo "      WARN: lgpm not found, copying .so directly"
+    mkdir -p "$MODULES_DIR/pilot"
+    cp result/lib/pilot_plugin.so "$MODULES_DIR/pilot/"
+fi
 
-export QT_PLUGIN_PATH="$QT_BASE/lib/qt-6/plugins:$QT_DECL/lib/qt-6/plugins"
-export NIXPKGS_QT6_QML_IMPORT_PATH="$QT_DECL/lib/qt-6/qml:$QT_RO/lib/qt-6/qml"
-export LD_LIBRARY_PATH="$LOGOSCORE_BUILD/lib"
+echo "      logoscore:  $LOGOSCORE"
+echo "      modules:    $MODULES_DIR"
 
-echo "      logoscore:  $TEST_DIR/bin/logoscore"
-echo "      module:     $TEST_DIR/modules/pilot_plugin.so"
-
-# Step 4: Load module in logoscore
+# Step 4: Load module in logoscore (inline mode)
 echo ""
 echo "[4/4] Loading pilot module in logoscore..."
 echo ""
-timeout 10 "$TEST_DIR/bin/logoscore" -c "pilot.echo hello" 2>&1 || true
+timeout 10 "$LOGOSCORE" -m "$MODULES_DIR" -l pilot \
+    -c "pilot.echo(hello)" --quit-on-finish 2>&1 || true
 
 echo ""
 echo "=== Demo complete ==="

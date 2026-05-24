@@ -6,6 +6,8 @@
 #include <random>
 #include <QString>
 #include <QVariant>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 static std::string genGroupId() {
     std::random_device rd;
@@ -18,8 +20,11 @@ static std::string genGroupId() {
 std::string PilotImpl::messagingSend(const std::string& recipient, const std::string& message) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
-    std::string payload = "{\"from\": \"" + agentNpk_ + "\", \"message\": \"" + message + "\"}";
-    std::vector<uint8_t> plainBytes(payload.begin(), payload.end());
+    QJsonObject payload;
+    payload["from"] = QString::fromStdString(agentNpk_);
+    payload["message"] = QString::fromStdString(message);
+    std::string payloadStr = QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> plainBytes(payloadStr.begin(), payloadStr.end());
     ECIESCiphertext encrypted = eciesEncrypt(recipient, plainBytes);
     std::string encPayload = eciesSerialize(encrypted);
 
@@ -33,7 +38,11 @@ std::string PilotImpl::messagingSend(const std::string& recipient, const std::st
         QString::fromStdString(topic),
         QString::fromStdString(encPayload));
 
-    return "{\"sent\": true, \"recipient\": \"" + recipient + "\", \"encrypted\": true}";
+    QJsonObject result;
+    result["sent"] = true;
+    result["recipient"] = QString::fromStdString(recipient);
+    result["encrypted"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
 }
 
 bool PilotImpl::messagingJoin(const std::string& groupId) {
@@ -66,8 +75,12 @@ std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
     if (subResult.isNull())
         return "{\"error\": \"failed to create group topic\"}";
 
-    std::string invite = "{\"type\": \"group_invite\", \"group_id\": \"" + groupId +
-        "\", \"topic\": \"" + topic + "\", \"from\": \"" + agentNpk_ + "\"}";
+    QJsonObject invite;
+    invite["type"] = QString("group_invite");
+    invite["group_id"] = QString::fromStdString(groupId);
+    invite["topic"] = QString::fromStdString(topic);
+    invite["from"] = QString::fromStdString(agentNpk_);
+    std::string inviteStr = QJsonDocument(invite).toJson(QJsonDocument::Compact).toStdString();
 
     std::string members = membersJson;
     if (!members.empty() && members.front() == '[') members = members.substr(1);
@@ -85,8 +98,11 @@ std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
         delivery->invokeRemoteMethod(
             "delivery_module", "send",
             QString::fromStdString(memberTopic),
-            QString::fromStdString(invite));
+            QString::fromStdString(inviteStr));
     }
 
-    return "{\"group_id\": \"" + groupId + "\", \"topic\": \"" + topic + "\"}";
+    QJsonObject result;
+    result["group_id"] = QString::fromStdString(groupId);
+    result["topic"] = QString::fromStdString(topic);
+    return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
 }
