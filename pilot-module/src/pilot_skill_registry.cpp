@@ -1,5 +1,8 @@
 #include "pilot_skill.h"
-#include <sstream>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QString>
 
 void SkillRegistry::registerSkill(std::unique_ptr<PilotSkill> skill) {
     std::string n = skill->name();
@@ -7,48 +10,46 @@ void SkillRegistry::registerSkill(std::unique_ptr<PilotSkill> skill) {
 }
 
 std::string SkillRegistry::listSkills() const {
-    std::ostringstream json;
-    json << "{\"skills\": [";
-    bool first = true;
+    QJsonArray arr;
     for (const auto& [name, skill] : skills_) {
-        if (!first) json << ",";
-        first = false;
-        json << "{"
-             << "\"name\": \"" << skill->name() << "\","
-             << "\"category\": \"" << skill->category() << "\","
-             << "\"description\": \"" << skill->description() << "\","
-             << "\"price_lez\": " << skill->priceLez()
-             << "}";
+        QJsonObject obj;
+        obj["name"] = QString::fromStdString(skill->name());
+        obj["category"] = QString::fromStdString(skill->category());
+        obj["description"] = QString::fromStdString(skill->description());
+        obj["price_lez"] = static_cast<double>(skill->priceLez());
+        arr.append(obj);
     }
-    json << "], \"count\": " << skills_.size() << "}";
-    return json.str();
+    QJsonObject root;
+    root["skills"] = arr;
+    root["count"] = static_cast<int>(skills_.size());
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string SkillRegistry::listSkillsForCard() const {
-    std::ostringstream json;
-    json << "[";
-    bool first = true;
+    QJsonArray arr;
+    QJsonArray jsonModes;
+    jsonModes.append(QString("application/json"));
     for (const auto& [name, skill] : skills_) {
-        if (!first) json << ",";
-        first = false;
         std::string id = name;
         for (auto& c : id) if (c == '.') c = '-';
-        json << "{"
-             << "\"id\": \"" << id << "\","
-             << "\"name\": \"" << skill->name() << "\","
-             << "\"description\": \"" << skill->description() << "\","
-             << "\"inputModes\": [\"application/json\"],"
-             << "\"outputModes\": [\"application/json\"]"
-             << "}";
+        QJsonObject obj;
+        obj["id"] = QString::fromStdString(id);
+        obj["name"] = QString::fromStdString(skill->name());
+        obj["description"] = QString::fromStdString(skill->description());
+        obj["inputModes"] = jsonModes;
+        obj["outputModes"] = jsonModes;
+        arr.append(obj);
     }
-    json << "]";
-    return json.str();
+    return QJsonDocument(arr).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string SkillRegistry::dispatch(const std::string& name, const std::string& argsJson) {
     auto it = skills_.find(name);
-    if (it == skills_.end())
-        return "{\"error\": \"unknown skill: " + name + "\"}";
+    if (it == skills_.end()) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString("unknown skill: " + name);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
     return it->second->execute(argsJson);
 }
 

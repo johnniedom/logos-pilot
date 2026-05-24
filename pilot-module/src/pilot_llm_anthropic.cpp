@@ -50,7 +50,9 @@ public:
         if (reply->error() != QNetworkReply::NoError) {
             std::string err = reply->errorString().toStdString();
             reply->deleteLater();
-            return "{\"error\": \"" + err + "\"}";
+            QJsonObject errObj;
+            errObj["error"] = QString::fromStdString(err);
+            return QJsonDocument(errObj).toJson(QJsonDocument::Compact).toStdString();
         }
 
         QByteArray responseData = reply->readAll();

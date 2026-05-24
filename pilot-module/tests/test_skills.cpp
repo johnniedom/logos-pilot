@@ -45,7 +45,7 @@ LOGOS_TEST(registry_list_skills_returns_json) {
     ));
     std::string list = reg.listSkills();
     LOGOS_ASSERT_CONTAINS(list, "wallet.balance");
-    LOGOS_ASSERT_CONTAINS(list, "\"count\": 1");
+    LOGOS_ASSERT_CONTAINS(list, "\"count\":1");
 }
 
 LOGOS_TEST(registry_list_skills_for_card_format) {
@@ -62,7 +62,7 @@ LOGOS_TEST(registry_list_skills_for_card_format) {
 LOGOS_TEST(builtin_skills_registers_21) {
     PilotImpl impl;
     std::string skills = impl.metaSkills();
-    LOGOS_ASSERT_CONTAINS(skills, "\"count\": 21");
+    LOGOS_ASSERT_CONTAINS(skills, "\"count\":21");
 }
 
 LOGOS_TEST(dispatch_skill_works_on_echo_equivalent) {

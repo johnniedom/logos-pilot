@@ -9,6 +9,10 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <QString>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 PilotImpl::PilotImpl()
     : llm_(std::make_unique<NoOpProvider>()),
@@ -104,8 +108,15 @@ void PilotImpl::initDependencyModules() {
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (delivery) {
-        std::string cfg = "{\"clusterId\":2,\"shards\":[0,1,2,3,4,5,6,7],"
-            "\"staticNodes\":[\"" + wakuAddr + "\"]}";
+        QJsonArray shards;
+        for (int i = 0; i < 8; i++) shards.append(i);
+        QJsonArray staticNodes;
+        staticNodes.append(QString::fromStdString(wakuAddr));
+        QJsonObject cfgObj;
+        cfgObj["clusterId"] = 2;
+        cfgObj["shards"] = shards;
+        cfgObj["staticNodes"] = staticNodes;
+        std::string cfg = QJsonDocument(cfgObj).toJson(QJsonDocument::Compact).toStdString();
         delivery->invokeRemoteMethod("delivery_module", "createNode",
             QString::fromStdString(cfg));
         delivery->invokeRemoteMethod("delivery_module", "start");
@@ -168,14 +179,22 @@ std::string PilotImpl::buildLLMSystemPrompt() {
 std::string PilotImpl::processOwnerMessage(const std::string& message) {
     if (message.empty()) return "{\"action\": \"none\"}";
 
-    // Slash commands bypass LLM
     if (message[0] == '/') {
-        return "{\"action\": \"command\", \"params\": {\"raw\": \"" + message + "\"}}";
+        QJsonObject params;
+        params["raw"] = QString::fromStdString(message);
+        QJsonObject cmd;
+        cmd["action"] = QString("command");
+        cmd["params"] = params;
+        return QJsonDocument(cmd).toJson(QJsonDocument::Compact).toStdString();
     }
 
     if (!llm_ || !llm_->isConfigured()) {
-        return "{\"action\": \"reply\", \"params\": {\"text\": "
-               "\"I'm in command-only mode (no LLM configured). Use /help for available commands.\"}}";
+        QJsonObject params;
+        params["text"] = QString("I'm in command-only mode (no LLM configured). Use /help for available commands.");
+        QJsonObject reply;
+        reply["action"] = QString("reply");
+        reply["params"] = params;
+        return QJsonDocument(reply).toJson(QJsonDocument::Compact).toStdString();
     }
 
     std::string systemPrompt = buildLLMSystemPrompt();
@@ -183,8 +202,12 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     std::string response = llm_->complete(systemPrompt, messages);
 
     if (response.empty()) {
-        return "{\"action\": \"reply\", \"params\": {\"text\": "
-               "\"I couldn't process that. Use /help for available commands.\"}}";
+        QJsonObject params;
+        params["text"] = QString("I couldn't process that. Use /help for available commands.");
+        QJsonObject reply;
+        reply["action"] = QString("reply");
+        reply["params"] = params;
+        return QJsonDocument(reply).toJson(QJsonDocument::Compact).toStdString();
     }
 
     return response;

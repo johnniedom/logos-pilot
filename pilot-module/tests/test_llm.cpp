@@ -51,5 +51,5 @@ LOGOS_TEST(process_owner_message_freetext_without_llm) {
 LOGOS_TEST(meta_status_shows_llm_none_by_default) {
     PilotImpl impl;
     std::string status = impl.metaStatus();
-    LOGOS_ASSERT_CONTAINS(status, "\"llm\": \"none\"");
+    LOGOS_ASSERT_CONTAINS(status, "\"llm\":\"none\"");
 }

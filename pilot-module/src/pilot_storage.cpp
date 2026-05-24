@@ -3,7 +3,6 @@
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include <sqlite3.h>
-#include <sstream>
 #include <fstream>
 #include <chrono>
 #include <cstring>
@@ -12,6 +11,9 @@
 #include <QVariantMap>
 #include <QByteArray>
 #include "logos_types.h"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 static std::string currentTs() {
     auto now = std::chrono::system_clock::now();
@@ -22,8 +24,11 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
 
     std::ifstream file(path, std::ios::binary);
-    if (!file.is_open())
-        return "{\"error\": \"cannot open file: " + path + "\"}";
+    if (!file.is_open()) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString("cannot open file: " + path);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
 
     std::string content((std::istreambuf_iterator<char>(file)),
                          std::istreambuf_iterator<char>());
@@ -88,7 +93,11 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    return "{\"cid\": \"" + cid + "\", \"label\": \"" + label + "\", \"encrypted\": true}";
+    QJsonObject result;
+    result["cid"] = QString::fromStdString(cid);
+    result["label"] = QString::fromStdString(label);
+    result["encrypted"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::storageDownload(const std::string& cid, const std::string& path) {
@@ -121,8 +130,11 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     std::string downloadedData;
     if (result.canConvert<LogosResult>()) {
         LogosResult lr = result.value<LogosResult>();
-        if (!lr.success)
-            return "{\"error\": \"download failed: " + lr.error.toString().toStdString() + "\"}";
+        if (!lr.success) {
+            QJsonObject err;
+            err["error"] = QString::fromStdString("download failed: " + lr.error.toString().toStdString());
+            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        }
         downloadedData = lr.value.toString().toStdString();
     }
 
@@ -145,7 +157,11 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
                   static_cast<std::streamsize>(decrypted.size()));
     outFile.close();
 
-    return "{\"path\": \"" + path + "\", \"cid\": \"" + cid + "\", \"decrypted\": true}";
+    QJsonObject res;
+    res["path"] = QString::fromStdString(path);
+    res["cid"] = QString::fromStdString(cid);
+    res["decrypted"] = true;
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::storageList() {
@@ -156,22 +172,19 @@ std::string PilotImpl::storageList() {
         "SELECT cid, label, timestamp FROM stored_files ORDER BY timestamp DESC;",
         -1, &stmt, nullptr);
 
-    std::ostringstream json;
-    json << "{\"files\": [";
-    bool first = true;
+    QJsonArray arr;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!first) json << ",";
-        first = false;
-        json << "{"
-             << "\"cid\": \"" << sqlite3_column_text(stmt, 0) << "\","
-             << "\"label\": \"" << sqlite3_column_text(stmt, 1) << "\","
-             << "\"timestamp\": \"" << sqlite3_column_text(stmt, 2) << "\""
-             << "}";
+        QJsonObject obj;
+        obj["cid"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        obj["label"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+        obj["timestamp"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
+        arr.append(obj);
     }
-    json << "]}";
     sqlite3_finalize(stmt);
 
-    return json.str();
+    QJsonObject root;
+    root["files"] = arr;
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::storageShare(const std::string& cid, const std::string& recipientNpk) {
@@ -190,7 +203,10 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
     std::string keyHex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     sqlite3_finalize(stmt);
 
-    std::string sharePayload = "{\"cid\": \"" + cid + "\", \"key\": \"" + keyHex + "\"}";
+    QJsonObject shareObj;
+    shareObj["cid"] = QString::fromStdString(cid);
+    shareObj["key"] = QString::fromStdString(keyHex);
+    std::string sharePayload = QJsonDocument(shareObj).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(sharePayload.begin(), sharePayload.end());
     ECIESCiphertext encrypted = eciesEncrypt(recipientNpk, plainBytes);
     std::string encPayload = eciesSerialize(encrypted);
@@ -205,5 +221,10 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
         QString::fromStdString(topic),
         QString::fromStdString(encPayload));
 
-    return "{\"shared\": true, \"cid\": \"" + cid + "\", \"recipient\": \"" + recipientNpk + "\", \"encrypted\": true}";
+    QJsonObject result;
+    result["shared"] = true;
+    result["cid"] = QString::fromStdString(cid);
+    result["recipient"] = QString::fromStdString(recipientNpk);
+    result["encrypted"] = true;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
 }

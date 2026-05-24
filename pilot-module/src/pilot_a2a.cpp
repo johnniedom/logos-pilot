@@ -7,6 +7,10 @@
 #include <random>
 #include <QString>
 #include <QVariant>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QByteArray>
 
 static std::string genUuid() {
     std::random_device rd;
@@ -26,105 +30,94 @@ std::string PilotImpl::agentCard() {
 
     std::string inbox = "/pilot/1/inbox-" + agentNpk_ + "/proto";
 
-    std::ostringstream card;
-    card << "{"
-         << "\"name\": \"Pilot Agent\","
-         << "\"description\": \"Sovereign AI agent on LEZ with wallet, storage, and messaging\","
-         << "\"url\": \"waku:" << inbox << "\","
-         << "\"version\": \"1.0.0\","
-         << "\"documentationUrl\": \"https://github.com/johnniedom/pilot\","
-         << "\"capabilities\": {"
-         << "  \"streaming\": true,"
-         << "  \"pushNotifications\": true,"
-         << "  \"stateTransitionHistory\": true"
-         << "},"
-         << "\"defaultInputModes\": [\"application/json\"],"
-         << "\"defaultOutputModes\": [\"application/json\"],"
-         << "\"skills\": ["
-         << "  {"
-         << "    \"id\": \"wallet-balance\","
-         << "    \"name\": \"Wallet Balance\","
-         << "    \"description\": \"Returns the agent's current shielded token balance\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"wallet-send\","
-         << "    \"name\": \"Wallet Send\","
-         << "    \"description\": \"Sends LEZ tokens to a recipient, subject to spending threshold\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"storage-upload\","
-         << "    \"name\": \"Storage Upload\","
-         << "    \"description\": \"Encrypts and uploads a file to Logos Storage\","
-         << "    \"inputModes\": [\"application/json\", \"application/octet-stream\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"storage-download\","
-         << "    \"name\": \"Storage Download\","
-         << "    \"description\": \"Retrieves and decrypts a file from Logos Storage\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\", \"application/octet-stream\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"storage-share\","
-         << "    \"name\": \"Storage Share\","
-         << "    \"description\": \"Shares access to a stored file with another Logos identity\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"messaging-send\","
-         << "    \"name\": \"Messaging Send\","
-         << "    \"description\": \"Sends an encrypted message to a Logos address\","
-         << "    \"inputModes\": [\"application/json\", \"text/plain\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"program-query\","
-         << "    \"name\": \"Program Query\","
-         << "    \"description\": \"Reads state from a LEZ program\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"program-call\","
-         << "    \"name\": \"Program Call\","
-         << "    \"description\": \"Submits a transaction to a LEZ program\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  },"
-         << "  {"
-         << "    \"id\": \"program-deploy\","
-         << "    \"name\": \"Program Deploy\","
-         << "    \"description\": \"Deploys a compiled LEZ program binary to the network\","
-         << "    \"inputModes\": [\"application/json\"],"
-         << "    \"outputModes\": [\"application/json\"]"
-         << "  }"
-         << "],"
-         << "\"authentication\": {"
-         << "  \"schemes\": [\"ecies\"],"
-         << "  \"credentials\": \"npk:" << agentNpk_ << "\""
-         << "},"
-         << "\"_logos\": {"
-         << "  \"npk\": \"" << agentNpk_ << "\","
-         << "  \"inbox_topic\": \"" << inbox << "\","
-         << "  \"transport\": \"waku\","
-         << "  \"pricing\": {"
-         << "    \"storage-upload\": 10,"
-         << "    \"storage-download\": 5,"
-         << "    \"storage-share\": 5,"
-         << "    \"messaging-send\": 1,"
-         << "    \"program-call\": 10,"
-         << "    \"program-deploy\": 100"
-         << "  },"
-         << "  \"payment\": \"lez\","
-         << "  \"payment_timing\": \"on-acceptance\""
-         << "}"
-         << "}";
+    QJsonObject card;
+    card["name"] = QString("Pilot Agent");
+    card["description"] = QString("Sovereign AI agent on LEZ with wallet, storage, and messaging");
+    card["url"] = QString::fromStdString("waku:" + inbox);
+    card["version"] = QString("1.0.0");
+    card["documentationUrl"] = QString("https://github.com/johnniedom/pilot");
+
+    QJsonObject capabilities;
+    capabilities["streaming"] = true;
+    capabilities["pushNotifications"] = true;
+    capabilities["stateTransitionHistory"] = true;
+    card["capabilities"] = capabilities;
+
+    QJsonArray defaultModes;
+    defaultModes.append(QString("application/json"));
+    card["defaultInputModes"] = defaultModes;
+    card["defaultOutputModes"] = defaultModes;
+
+    QJsonArray jsonMode;
+    jsonMode.append(QString("application/json"));
+    QJsonArray jsonOctetIn;
+    jsonOctetIn.append(QString("application/json"));
+    jsonOctetIn.append(QString("application/octet-stream"));
+    QJsonArray jsonOctetOut;
+    jsonOctetOut.append(QString("application/json"));
+    jsonOctetOut.append(QString("application/octet-stream"));
+    QJsonArray textJsonIn;
+    textJsonIn.append(QString("application/json"));
+    textJsonIn.append(QString("text/plain"));
+
+    auto mkSkill = [&](const char* id, const char* name, const char* desc,
+                       const QJsonArray& in, const QJsonArray& out) {
+        QJsonObject s;
+        s["id"] = QString(id);
+        s["name"] = QString(name);
+        s["description"] = QString(desc);
+        s["inputModes"] = in;
+        s["outputModes"] = out;
+        return s;
+    };
+
+    QJsonArray skills;
+    skills.append(mkSkill("wallet-balance", "Wallet Balance",
+        "Returns the agent's current shielded token balance", jsonMode, jsonMode));
+    skills.append(mkSkill("wallet-send", "Wallet Send",
+        "Sends LEZ tokens to a recipient, subject to spending threshold", jsonMode, jsonMode));
+    skills.append(mkSkill("storage-upload", "Storage Upload",
+        "Encrypts and uploads a file to Logos Storage", jsonOctetIn, jsonMode));
+    skills.append(mkSkill("storage-download", "Storage Download",
+        "Retrieves and decrypts a file from Logos Storage", jsonMode, jsonOctetOut));
+    skills.append(mkSkill("storage-share", "Storage Share",
+        "Shares access to a stored file with another Logos identity", jsonMode, jsonMode));
+    skills.append(mkSkill("messaging-send", "Messaging Send",
+        "Sends an encrypted message to a Logos address", textJsonIn, jsonMode));
+    skills.append(mkSkill("program-query", "Program Query",
+        "Reads state from a LEZ program", jsonMode, jsonMode));
+    skills.append(mkSkill("program-call", "Program Call",
+        "Submits a transaction to a LEZ program", jsonMode, jsonMode));
+    skills.append(mkSkill("program-deploy", "Program Deploy",
+        "Deploys a compiled LEZ program binary to the network", jsonMode, jsonMode));
+    card["skills"] = skills;
+
+    QJsonObject auth;
+    QJsonArray schemes;
+    schemes.append(QString("ecies"));
+    auth["schemes"] = schemes;
+    auth["credentials"] = QString::fromStdString("npk:" + agentNpk_);
+    card["authentication"] = auth;
+
+    QJsonObject logos;
+    logos["npk"] = QString::fromStdString(agentNpk_);
+    logos["inbox_topic"] = QString::fromStdString(inbox);
+    logos["transport"] = QString("waku");
+
+    QJsonObject pricing;
+    pricing["storage-upload"] = 10;
+    pricing["storage-download"] = 5;
+    pricing["storage-share"] = 5;
+    pricing["messaging-send"] = 1;
+    pricing["program-call"] = 10;
+    pricing["program-deploy"] = 100;
+    logos["pricing"] = pricing;
+
+    logos["payment"] = QString("lez");
+    logos["payment_timing"] = QString("on-acceptance");
+    card["_logos"] = logos;
+
+    std::string cardStr = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
 
     if (logosAPI_) {
         auto* delivery = logosAPI_->getClient("delivery_module");
@@ -132,11 +125,11 @@ std::string PilotImpl::agentCard() {
             delivery->invokeRemoteMethod(
                 "delivery_module", "send",
                 QString("/pilot/1/discovery/proto"),
-                QString::fromStdString(card.str()));
+                QString::fromStdString(cardStr));
         }
     }
 
-    return card.str();
+    return cardStr;
 }
 
 std::string PilotImpl::agentDiscover(const std::string& topic) {
@@ -156,17 +149,28 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
         return "{\"error\": \"subscribe failed\"}";
 
     auto* waku = logosAPI_->getClient("waku_module");
-    if (!waku)
-        return "{\"agents\": [], \"note\": \"waku module unavailable\"}";
+    if (!waku) {
+        QJsonObject res;
+        res["agents"] = QJsonArray();
+        res["note"] = QString("waku module unavailable");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
 
     QVariant storeResult = waku->invokeRemoteMethod(
         "waku_module", "storeQuery",
         QString::fromStdString(discoveryTopic));
 
-    if (storeResult.isNull())
-        return "{\"agents\": [], \"note\": \"store query failed, listening for live cards\"}";
+    if (storeResult.isNull()) {
+        QJsonObject res;
+        res["agents"] = QJsonArray();
+        res["note"] = QString("store query failed, listening for live cards");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
 
-    return "{\"agents\": " + storeResult.toString().toStdString() + "}";
+    QJsonObject res;
+    QJsonDocument agentsDoc = QJsonDocument::fromJson(storeResult.toString().toUtf8());
+    res["agents"] = agentsDoc.isArray() ? QJsonValue(agentsDoc.array()) : QJsonValue(storeResult.toString());
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::agentTask(const std::string& agentAddress, const std::string& skill, const std::string& paramsJson) {
@@ -184,32 +188,42 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     if (subResult.isNull())
         return "{\"error\": \"failed to subscribe to reply topic\"}";
 
-    std::ostringstream request;
-    request << "{"
-            << "\"jsonrpc\": \"2.0\","
-            << "\"method\": \"tasks/send\","
-            << "\"id\": \"" << taskId << "\","
-            << "\"params\": {"
-            << "  \"id\": \"" << taskId << "\","
-            << "  \"message\": {"
-            << "    \"role\": \"user\","
-            << "    \"parts\": [{"
-            << "      \"type\": \"text\","
-            << "      \"text\": " << paramsJson
-            << "    }]"
-            << "  },"
-            << "  \"metadata\": {"
-            << "    \"skill\": \"" << skill << "\""
-            << "  }"
-            << "},"
-            << "\"_logos\": {"
-            << "  \"sender_npk\": \"" << agentNpk_ << "\","
-            << "  \"reply_topic\": \"" << replyTopic << "\","
-            << "  \"timestamp\": \"" << nowTimestamp() << "\""
-            << "}"
-            << "}";
+    QJsonDocument paramsDoc = QJsonDocument::fromJson(QByteArray::fromStdString(paramsJson));
+    QJsonValue textValue = paramsDoc.isObject() ? QJsonValue(paramsDoc.object()) :
+        (paramsDoc.isArray() ? QJsonValue(paramsDoc.array()) :
+         QJsonValue(QString::fromStdString(paramsJson)));
 
-    std::string requestStr = request.str();
+    QJsonObject textPart;
+    textPart["type"] = QString("text");
+    textPart["text"] = textValue;
+    QJsonArray parts;
+    parts.append(textPart);
+
+    QJsonObject message;
+    message["role"] = QString("user");
+    message["parts"] = parts;
+
+    QJsonObject metadata;
+    metadata["skill"] = QString::fromStdString(skill);
+
+    QJsonObject params;
+    params["id"] = QString::fromStdString(taskId);
+    params["message"] = message;
+    params["metadata"] = metadata;
+
+    QJsonObject logosExt;
+    logosExt["sender_npk"] = QString::fromStdString(agentNpk_);
+    logosExt["reply_topic"] = QString::fromStdString(replyTopic);
+    logosExt["timestamp"] = QString::fromStdString(nowTimestamp());
+
+    QJsonObject request;
+    request["jsonrpc"] = QString("2.0");
+    request["method"] = QString("tasks/send");
+    request["id"] = QString::fromStdString(taskId);
+    request["params"] = params;
+    request["_logos"] = logosExt;
+
+    std::string requestStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(requestStr.begin(), requestStr.end());
     ECIESCiphertext encrypted = eciesEncrypt(agentAddress, plainBytes);
     std::string encPayload = eciesSerialize(encrypted);
@@ -220,11 +234,15 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
         QString::fromStdString(inboxTopic),
         QString::fromStdString(encPayload));
 
-    return "{"
-        "\"id\": \"" + taskId + "\","
-        "\"status\": {\"state\": \"submitted\"},"
-        "\"_logos\": {\"reply_topic\": \"" + replyTopic + "\"}"
-        "}";
+    QJsonObject status;
+    status["state"] = QString("submitted");
+    QJsonObject logosReply;
+    logosReply["reply_topic"] = QString::fromStdString(replyTopic);
+    QJsonObject result;
+    result["id"] = QString::fromStdString(taskId);
+    result["status"] = status;
+    result["_logos"] = logosReply;
+    return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std::string& taskId) {
@@ -241,21 +259,21 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     if (result.isNull())
         return "{\"error\": \"subscribe failed\"}";
 
-    std::ostringstream request;
-    request << "{"
-            << "\"jsonrpc\": \"2.0\","
-            << "\"method\": \"tasks/sendSubscribe\","
-            << "\"id\": \"" << genUuid() << "\","
-            << "\"params\": {"
-            << "  \"id\": \"" << taskId << "\""
-            << "},"
-            << "\"_logos\": {"
-            << "  \"sender_npk\": \"" << agentNpk_ << "\","
-            << "  \"timestamp\": \"" << nowTimestamp() << "\""
-            << "}"
-            << "}";
+    QJsonObject rpcParams;
+    rpcParams["id"] = QString::fromStdString(taskId);
 
-    std::string reqStr = request.str();
+    QJsonObject logosExt;
+    logosExt["sender_npk"] = QString::fromStdString(agentNpk_);
+    logosExt["timestamp"] = QString::fromStdString(nowTimestamp());
+
+    QJsonObject request;
+    request["jsonrpc"] = QString("2.0");
+    request["method"] = QString("tasks/sendSubscribe");
+    request["id"] = QString::fromStdString(genUuid());
+    request["params"] = rpcParams;
+    request["_logos"] = logosExt;
+
+    std::string reqStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> subPlain(reqStr.begin(), reqStr.end());
     ECIESCiphertext subEnc = eciesEncrypt(agentAddress, subPlain);
     std::string subPayload = eciesSerialize(subEnc);
@@ -266,7 +284,11 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
         QString::fromStdString(inboxTopic),
         QString::fromStdString(subPayload));
 
-    return "{\"subscribed\": true, \"task_id\": \"" + taskId + "\", \"topic\": \"" + taskTopic + "\"}";
+    QJsonObject res;
+    res["subscribed"] = true;
+    res["task_id"] = QString::fromStdString(taskId);
+    res["topic"] = QString::fromStdString(taskTopic);
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& taskId) {
@@ -275,21 +297,21 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return false;
 
-    std::ostringstream request;
-    request << "{"
-            << "\"jsonrpc\": \"2.0\","
-            << "\"method\": \"tasks/cancel\","
-            << "\"id\": \"" << genUuid() << "\","
-            << "\"params\": {"
-            << "  \"id\": \"" << taskId << "\""
-            << "},"
-            << "\"_logos\": {"
-            << "  \"sender_npk\": \"" << agentNpk_ << "\","
-            << "  \"timestamp\": \"" << nowTimestamp() << "\""
-            << "}"
-            << "}";
+    QJsonObject rpcParams;
+    rpcParams["id"] = QString::fromStdString(taskId);
 
-    std::string cancelStr = request.str();
+    QJsonObject logosExt;
+    logosExt["sender_npk"] = QString::fromStdString(agentNpk_);
+    logosExt["timestamp"] = QString::fromStdString(nowTimestamp());
+
+    QJsonObject request;
+    request["jsonrpc"] = QString("2.0");
+    request["method"] = QString("tasks/cancel");
+    request["id"] = QString::fromStdString(genUuid());
+    request["params"] = rpcParams;
+    request["_logos"] = logosExt;
+
+    std::string cancelStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> cancelPlain(cancelStr.begin(), cancelStr.end());
     ECIESCiphertext cancelEnc = eciesEncrypt(agentAddress, cancelPlain);
     std::string cancelPayload = eciesSerialize(cancelEnc);
@@ -323,10 +345,19 @@ std::string PilotImpl::programQuery(const std::string& programId, const std::str
         QString::fromStdString(programId),
         QString::fromStdString(paramsJson));
 
-    if (result.isNull())
-        return "{\"error\": \"query failed — wallet-ffi does not yet support program queries\", \"program\": \"" + programId + "\"}";
+    if (result.isNull()) {
+        QJsonObject err;
+        err["error"] = QString("query failed — wallet-ffi does not yet support program queries");
+        err["program"] = QString::fromStdString(programId);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
 
-    return "{\"program\": \"" + programId + "\", \"result\": " + result.toString().toStdString() + "}";
+    QJsonObject res;
+    res["program"] = QString::fromStdString(programId);
+    QJsonDocument resultDoc = QJsonDocument::fromJson(result.toString().toUtf8());
+    res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
+        (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::programCall(const std::string& programId, const std::string& instruction, const std::string& paramsJson) {
@@ -337,7 +368,11 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
     if (estimatedCost > spendLimitPerTx_) {
         std::string reqId = createSpendRequest(programId, estimatedCost,
             "program.call: " + instruction);
-        return "{\"status\": \"held\", \"request_id\": \"" + reqId + "\", \"message\": \"Program call requires approval\"}";
+        QJsonObject res;
+        res["status"] = QString("held");
+        res["request_id"] = QString::fromStdString(reqId);
+        res["message"] = QString("Program call requires approval");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
@@ -350,11 +385,20 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         QString::fromStdString(instruction),
         QString::fromStdString(paramsJson));
 
-    if (result.isNull())
-        return "{\"error\": \"call failed — wallet-ffi does not yet support program calls\", \"program\": \"" + programId + "\"}";
+    if (result.isNull()) {
+        QJsonObject err;
+        err["error"] = QString("call failed — wallet-ffi does not yet support program calls");
+        err["program"] = QString::fromStdString(programId);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
 
-    return "{\"program\": \"" + programId + "\", \"instruction\": \"" + instruction +
-        "\", \"result\": " + result.toString().toStdString() + "}";
+    QJsonObject res;
+    res["program"] = QString::fromStdString(programId);
+    res["instruction"] = QString::fromStdString(instruction);
+    QJsonDocument resultDoc = QJsonDocument::fromJson(result.toString().toUtf8());
+    res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
+        (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::programDeploy(const std::string& binaryPath) {
@@ -366,6 +410,10 @@ std::string PilotImpl::programDeploy(const std::string& binaryPath) {
     sendToOwner("Program deployment requested:\nBinary: " + binaryPath +
         "\nEstimated cost: 100 LEZ\n/approve " + reqId + "\n/reject " + reqId);
 
-    return "{\"status\": \"held\", \"request_id\": \"" + reqId +
-        "\", \"message\": \"Deployment requires owner approval\", \"binary\": \"" + binaryPath + "\"}";
+    QJsonObject res;
+    res["status"] = QString("held");
+    res["request_id"] = QString::fromStdString(reqId);
+    res["message"] = QString("Deployment requires owner approval");
+    res["binary"] = QString::fromStdString(binaryPath);
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }

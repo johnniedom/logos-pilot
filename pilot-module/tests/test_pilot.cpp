@@ -94,13 +94,13 @@ LOGOS_TEST(meta_skills_lists_all_skills) {
     LOGOS_ASSERT_CONTAINS(result, "program.query");
     LOGOS_ASSERT_CONTAINS(result, "meta.skills");
     LOGOS_ASSERT_CONTAINS(result, "meta.status");
-    LOGOS_ASSERT_CONTAINS(result, "\"count\": 21");
+    LOGOS_ASSERT_CONTAINS(result, "\"count\":21");
 }
 
 LOGOS_TEST(meta_status_shows_not_initialized) {
     PilotImpl impl;
     std::string result = impl.metaStatus();
-    LOGOS_ASSERT_CONTAINS(result, "\"initialized\": false");
+    LOGOS_ASSERT_CONTAINS(result, "\"initialized\":false");
 }
 
 LOGOS_TEST(establish_owner_channel_fails_without_api) {

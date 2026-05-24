@@ -10,6 +10,9 @@
 #include <cstdlib>
 #include <QString>
 #include <QVariant>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
@@ -109,14 +112,14 @@ bool PilotImpl::initWallet() {
 
     std::ofstream configFile(configPath);
     if (configFile.is_open()) {
-        configFile << "{\n"
-                   << "  \"sequencer_addr\": \"" << sequencerAddr << "\",\n"
-                   << "  \"seq_poll_timeout\": \"30s\",\n"
-                   << "  \"seq_tx_poll_max_blocks\": 15,\n"
-                   << "  \"seq_poll_max_retries\": 10,\n"
-                   << "  \"seq_block_poll_max_amount\": 100,\n"
-                   << "  \"initial_accounts\": []\n"
-                   << "}\n";
+        QJsonObject walletCfg;
+        walletCfg["sequencer_addr"] = QString::fromStdString(sequencerAddr);
+        walletCfg["seq_poll_timeout"] = QString("30s");
+        walletCfg["seq_tx_poll_max_blocks"] = 15;
+        walletCfg["seq_poll_max_retries"] = 10;
+        walletCfg["seq_block_poll_max_amount"] = 100;
+        walletCfg["initial_accounts"] = QJsonArray();
+        configFile << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();
         configFile.close();
     }
 
@@ -208,7 +211,10 @@ std::string PilotImpl::walletBalance() {
     if (result.isNull())
         return "{\"error\": \"balance query failed\"}";
 
-    return "{\"balance\": \"" + result.toString().toStdString() + "\", \"account\": \"" + agentAccountId_ + "\"}";
+    QJsonObject obj;
+    obj["balance"] = result.toString();
+    obj["account"] = QString::fromStdString(agentAccountId_);
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::walletHistory() {
@@ -222,22 +228,19 @@ std::string PilotImpl::walletHistory() {
         -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return "{\"error\": \"query failed\"}";
 
-    std::ostringstream json;
-    json << "{\"transactions\": [";
-    bool first = true;
+    QJsonArray arr;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!first) json << ",";
-        first = false;
-        json << "{"
-             << "\"id\": \"" << sqlite3_column_text(stmt, 0) << "\","
-             << "\"recipient\": \"" << sqlite3_column_text(stmt, 1) << "\","
-             << "\"amount\": " << sqlite3_column_int64(stmt, 2) << ","
-             << "\"state\": \"" << sqlite3_column_text(stmt, 3) << "\","
-             << "\"created_at\": \"" << sqlite3_column_text(stmt, 4) << "\""
-             << "}";
+        QJsonObject tx;
+        tx["id"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        tx["recipient"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+        tx["amount"] = static_cast<double>(sqlite3_column_int64(stmt, 2));
+        tx["state"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)));
+        tx["created_at"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
+        arr.append(tx);
     }
-    json << "]}";
     sqlite3_finalize(stmt);
 
-    return json.str();
+    QJsonObject root;
+    root["transactions"] = arr;
+    return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
