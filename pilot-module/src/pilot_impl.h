@@ -89,6 +89,7 @@ private:
     std::string agentAccountId_;
     std::string ownerChannelId_;
     std::string ownerNpk_;
+    std::string ownerName_;
     std::string agentEciesPub_;
     std::string agentEciesPriv_;
     std::string llmProvider_;
@@ -98,4 +99,5 @@ private:
     int64_t spendPeriodSeconds_ = 86400;
     std::string dataDir_;
     bool initialized_ = false;
+    std::vector<std::pair<std::string,std::string>> chatHistory_;
 };

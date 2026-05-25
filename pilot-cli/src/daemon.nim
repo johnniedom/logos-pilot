@@ -1,85 +1,123 @@
-import os, osproc, strutils, times
+import os, osproc, strutils, times, json
 import rpc, format
 
-proc readPid(cfg: Config): int =
-  let pidFile = cfg.dataDir / "daemon.pid"
-  if fileExists(pidFile):
+proc readPidFromState(cfg: Config): int =
+  let stateFile = cfg.configDir / "daemon" / "state.json"
+  if fileExists(stateFile):
     try:
-      return parseInt(readFile(pidFile).strip())
+      let j = parseJson(readFile(stateFile))
+      return j["pid"].getInt()
     except: discard
   return 0
 
-proc writePid(cfg: Config, pid: int) =
-  createDir(cfg.dataDir)
-  writeFile(cfg.dataDir / "daemon.pid", $pid & "\n")
-
-proc removePid(cfg: Config) =
-  let pidFile = cfg.dataDir / "daemon.pid"
-  if fileExists(pidFile):
-    removeFile(pidFile)
-
 proc isProcessAlive(pid: int): bool =
   if pid <= 0: return false
-  try:
-    discard execProcess("kill", args = ["-0", $pid],
-                        options = {poUsePath})
-    return true
-  except: return false
+  return dirExists("/proc/" & $pid)
 
 proc isDaemonRunning*(cfg: Config): bool =
-  let raw = daemonCallRaw(cfg, "status", @["--json"])
-  return raw.contains("\"running\"")
+  try:
+    let raw = execProcess("bash", args = ["-c",
+      "timeout 3 " & quoteShell(cfg.logoscore) &
+      " --config-dir " & quoteShell(cfg.configDir) & " status --json"],
+      options = {poUsePath, poStdErrToStdOut}).strip()
+    return raw.contains("\"running\"")
+  except:
+    return false
 
 proc cleanStaleDaemon*(cfg: Config) =
-  let pid = readPid(cfg)
+  let pid = readPidFromState(cfg)
   if pid > 0 and not isProcessAlive(pid):
-    info("Cleaning stale daemon state...")
-    discard daemonCallRaw(cfg, "stop")
-    removePid(cfg)
     let daemonDir = cfg.configDir / "daemon"
     if dirExists(daemonDir):
       removeDir(daemonDir)
+  discard execProcess("bash", args = ["-c",
+    "pkill -9 -f logos_host_qt 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
+    options = {poUsePath})
 
 proc startDaemon*(cfg: Config): bool =
+  if cfg.logoscore == "" or cfg.logoscore == "logoscore":
+    fail("logoscore binary not found in nix store")
+    return false
   createDir(cfg.dataDir)
   cleanStaleDaemon(cfg)
 
-  let p = startProcess(cfg.logoscore,
-    args = ["--config-dir", cfg.configDir, "-D", "-m", cfg.modulePath],
-    options = {poUsePath})
+  let logFile = cfg.dataDir / "daemon.log"
+  let scriptFile = cfg.dataDir / ".start-daemon.sh"
 
-  let pid = p.processID
-  writePid(cfg, pid)
+  # setsid detaches the daemon into its own session so it survives
+  # the parent bash exit (required when launched from Nim execProcess).
+  writeFile(scriptFile,
+    "#!/bin/bash\n" &
+    "setsid " & quoteShell(cfg.logoscore) &
+    " --config-dir " & quoteShell(cfg.configDir) &
+    " -D -m " & quoteShell(cfg.modulePath) &
+    " > " & quoteShell(logFile) & " 2>&1 &\n")
+  inclFilePermissions(scriptFile, {fpUserExec})
+  discard execCmd("bash " & quoteShell(scriptFile))
 
-  # poll until responding (max 15s)
-  for i in 0 ..< 15:
-    sleep(1000)
-    if isDaemonRunning(cfg):
-      break
+  # Daemon writes its own PID to state.json — poll for it instead of $!
+  var pid = 0
+  for i in 0 ..< 10:
+    sleep(500)
+    pid = readPidFromState(cfg)
+    if pid > 0: break
 
-  if not isProcessAlive(pid):
-    fail("Daemon failed to start")
-    removePid(cfg)
+  if pid <= 0:
+    fail("Daemon did not start — check " & logFile)
     return false
 
-  # load modules
-  for m in MODULES.split(','):
-    discard daemonCallRaw(cfg, "load-module", @[m])
+  if not isProcessAlive(pid):
+    fail("Daemon died immediately — check " & logFile)
+    return false
 
-  # wait for pilot module to respond (max 10s)
+  # Poll until RPC responds (max 15s)
+  for i in 0 ..< 15:
+    spinTick("Starting daemon", i)
+    if isDaemonRunning(cfg):
+      break
+    sleep(1000)
+
+  # Load modules (15s timeout each)
+  for m in MODULES.split(','):
+    spinTick("Loading " & m, 15)
+    discard execProcess("bash", args = ["-c",
+      "timeout 15 " & quoteShell(cfg.logoscore) &
+      " --config-dir " & quoteShell(cfg.configDir) & " load-module " & m],
+      options = {poUsePath, poStdErrToStdOut})
+
+  # Wait for pilot echo (max 10s)
   for i in 0 ..< 5:
-    let resp = daemonCall(cfg, "echo", @["ready"])
+    spinTick("Waiting for pilot", 20 + i)
+    let resp = try:
+      execProcess("bash", args = ["-c",
+        "timeout 5 " & quoteShell(cfg.logoscore) &
+        " --config-dir " & quoteShell(cfg.configDir) &
+        " call pilot echo ready"],
+        options = {poUsePath, poStdErrToStdOut}).strip()
+    except: ""
     if resp.contains("ready"):
-      discard daemonCall(cfg, "initialize", @[cfg.dataDir])
+      spinTick("Initializing", 25 + i)
+      discard execProcess("bash", args = ["-c",
+        "timeout 30 " & quoteShell(cfg.logoscore) &
+        " --config-dir " & quoteShell(cfg.configDir) &
+        " call pilot initialize " & quoteShell(cfg.dataDir)],
+        options = {poUsePath, poStdErrToStdOut})
+      clearLine()
       return true
     sleep(2000)
 
+  clearLine()
   warn("Daemon started but pilot module not responding yet")
   return true
 
 proc stopDaemon*(cfg: Config) =
-  discard daemonCallRaw(cfg, "stop")
-  removePid(cfg)
+  discard execProcess("bash", args = ["-c",
+    "timeout 5 " & quoteShell(cfg.logoscore) &
+    " --config-dir " & quoteShell(cfg.configDir) & " stop"],
+    options = {poUsePath, poStdErrToStdOut})
+  discard execProcess("bash", args = ["-c",
+    "pkill -f logos_host_qt 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
+    options = {poUsePath})
 
 proc recordStartTime*(cfg: Config) =
   createDir(cfg.dataDir)

@@ -35,16 +35,19 @@ proc loadConfig*(): Config =
 
   result.logoscore = getEnv("LOGOSCORE")
   if result.logoscore == "":
+    result.logoscore = findBinary("logoscore", "*logoscore-cli-bin*")
+  if result.logoscore == "":
     result.logoscore = findBinary("logoscore", "*logoscore-cli*")
   if result.logoscore == "":
     result.logoscore = "logoscore"
 
   result.logosHost = getEnv("LOGOS_HOST_PATH")
   if result.logosHost == "":
-    let dir = findDir("*-logos-liblogos")
-    if dir != "":
-      result.logosHost = dir / "bin" / "logos_host"
-      putEnv("LOGOS_HOST_PATH", result.logosHost)
+    result.logosHost = findBinary("logos_host", "*liblogos-bin*")
+  if result.logosHost == "":
+    result.logosHost = findBinary("logos_host", "*liblogos*")
+  if result.logosHost != "":
+    putEnv("LOGOS_HOST_PATH", result.logosHost)
 
 proc extractDaemonResult*(raw: string): string =
   if raw.contains("\"status\":\"ok\""):
@@ -76,15 +79,19 @@ proc pilotCall*(cfg: Config, methodExpr: string): string =
             "-c", fullCmd, "--quit-on-finish"],
     options = {poUsePath, poStdErrToStdOut})
 
-proc daemonCall*(cfg: Config, meth: string, args: seq[string] = @[]): string =
-  var cmdArgs = @["--config-dir", cfg.configDir, "call", "pilot", meth]
-  cmdArgs.add(args)
-  let raw = execProcess(cfg.logoscore, args = cmdArgs,
+proc daemonCall*(cfg: Config, meth: string, args: seq[string] = @[], timeoutSec = 10): string =
+  var shellArgs = "timeout " & $timeoutSec & " " & quoteShell(cfg.logoscore) &
+    " --config-dir " & quoteShell(cfg.configDir) & " call pilot " & meth
+  for a in args:
+    shellArgs &= " " & quoteShell(a)
+  let raw = execProcess("bash", args = ["-c", shellArgs],
                         options = {poUsePath, poStdErrToStdOut})
   result = extractDaemonResult(raw)
 
 proc daemonCallRaw*(cfg: Config, subcmd: string, args: seq[string] = @[]): string =
-  var cmdArgs = @["--config-dir", cfg.configDir, subcmd]
-  cmdArgs.add(args)
-  result = execProcess(cfg.logoscore, args = cmdArgs,
+  var shellArgs = "timeout 10 " & quoteShell(cfg.logoscore) &
+    " --config-dir " & quoteShell(cfg.configDir) & " " & subcmd
+  for a in args:
+    shellArgs &= " " & quoteShell(a)
+  result = execProcess("bash", args = ["-c", shellArgs],
                        options = {poUsePath, poStdErrToStdOut}).strip()

@@ -659,3 +659,71 @@ bool ok = !result.isNull()
 | Discovery topic 5 segments | Waku requires 4 segments | `/pilot/1/discovery-X/proto` |
 | Waku subscribe fails | Missing clusterId/shards | Added `clusterId:2, shards:[0..7]` |
 | Waku peer port wrong | Container port 60000 vs host 30303 | Fixed to host-mapped port |
+
+---
+
+## Integration Findings — 2026-05-25
+
+End-to-end deployment testing. All findings below were verified against live daemon with sequencer running.
+
+### Qt Remote Objects Connection Timing
+
+**Critical finding:** After `load-module`, the Qt Remote Objects replica needs 1-5 seconds to establish the connection. Calling `invokeRemoteMethod` before `isConnected()` returns true causes **SIGSEGV** in `libQt6RemoteObjects.so` (null deref at offset 0x60).
+
+```
+dmesg: .logoscore-wrap[28190]: segfault at 60 ip 000072ea8536ed19 sp 00007ffdf07e2990
+  error 4 in libQt6RemoteObjects.so.6.9.2[72ea852e6000+ec000]
+```
+
+**Resolution:** Poll `client->isConnected()` in 250ms intervals (max 5s) before any `invokeRemoteMethod` call. Applied to `initDependencyModules()` and `initWallet()`.
+
+### Daemon Process Lifecycle
+
+| Issue | Root cause | Resolution |
+|-------|-----------|-----------|
+| Storage module crash on restart | Stale `logos_host_qt` holding LevelDB lock at `~/.cache/storage/dht/providers/LOCK` | Kill all `logos_host_qt` processes + remove lock before daemon start |
+| Wrong PID from `$!` with setsid | `setsid cmd &` — `$!` captures setsid wrapper PID | Read PID from `daemon/state.json` instead |
+| Daemon dies on parent exit | Non-interactive bash kills process group on exit | Launch with `setsid` to create new session |
+| Initialize timeout | 10s insufficient for wallet → sequencer round-trip | Increased to 30s; wallet connection alone takes 1-5s |
+
+### LLM Integration Findings
+
+| Issue | Root cause | Resolution |
+|-------|-----------|-----------|
+| API key not reaching module | `putEnv()` in CLI; module runs in separate `logos_host_qt` process | Store via `metaConfigure("llm.api_key", key)` → `setenv()` inside module process |
+| LLM error silently swallowed | Error JSON `{"error":"..."}` passes `response.empty()` check | Check for `"error"` substring in response |
+| Google Gemini "server replied: " | Google Cloud API keys incompatible with Generative Language API endpoint | Use keys from aistudio.google.com |
+| Config lost on daemon restart | `loadIdentity()` didn't restore `llm.api_key` from SQLite | Added `llm.api_key` restoration with correct env var mapping per provider |
+
+### Nim CLI Terminal Findings
+
+| Issue | Root cause | Resolution |
+|-------|-----------|-----------|
+| Spaces between characters while typing | Linenoise bug #168 — ANSI escape codes in prompt break cursor calculation | Remove ANSI from prompt; use plain ASCII `> ` |
+| Backspace erases prompt | Writing prompt via `stdout.write` separately from `readLineFromStdin("")` | Pass prompt string directly to `readLineFromStdin` |
+| Multi-byte UTF-8 prompt (`❯`) | Linenoise miscalculates display width of multi-byte chars | Use ASCII-only prompt character |
+
+### Nix Store Discovery
+
+| Depth | What's found | Performance (WSL, 28K entries) |
+|-------|-------------|-------------------------------|
+| `-maxdepth 1` | Top-level package dirs only | <1s |
+| `-maxdepth 2` | Package contents (lib/, share/) but NOT bin/ | ~2s |
+| `-maxdepth 3` | Binaries at `<hash>/bin/<name>` | ~4s |
+| `-maxdepth 4` | Deep nested files | ~14s |
+
+Correct depth for binary discovery is **3**. Pattern: `find /nix/store -maxdepth 3 -name <binary> -path "*<package-pattern>*" -type f`.
+
+### End-to-End Validation
+
+Successfully tested full deploy → chat flow:
+
+```
+pilot deploy → daemon start → modules load → wallet creates account on sequencer
+            → identity persisted → LLM configured → agent card published
+
+pilot chat   → daemon connects → identity restored → LLM responds
+            → conversation memory (20 turns) → slash commands formatted
+```
+
+44 unit tests passing. All modules load without segfault when `isConnected()` guard is in place.

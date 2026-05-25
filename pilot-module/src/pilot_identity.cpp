@@ -8,6 +8,7 @@
 #include <chrono>
 #include <fstream>
 #include <cstdlib>
+#include <thread>
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
@@ -76,10 +77,25 @@ bool PilotImpl::loadIdentity() {
                 else if (key == "spend_limit_per_period") spendLimitPerPeriod_ = std::stoll(val);
                 else if (key == "spend_period_seconds") spendPeriodSeconds_ = std::stoll(val);
                 else if (key == "owner.npk") ownerNpk_ = val;
+                else if (key == "owner.name") ownerName_ = val;
                 else if (key == "ecies.pub") agentEciesPub_ = val;
                 else if (key == "ecies.priv") agentEciesPriv_ = val;
                 else if (key == "llm.provider") llmProvider_ = val;
                 else if (key == "llm.model") llmModel_ = val;
+                else if (key == "llm.api_key") {
+                    if (llmProvider_ == "anthropic")
+                        setenv("ANTHROPIC_API_KEY", val.c_str(), 1);
+                    else if (llmProvider_ == "deepseek")
+                        setenv("DEEPSEEK_API_KEY", val.c_str(), 1);
+                    else if (llmProvider_ == "google")
+                        setenv("GOOGLE_API_KEY", val.c_str(), 1);
+                    else if (llmProvider_ == "openrouter")
+                        setenv("OPENROUTER_API_KEY", val.c_str(), 1);
+                    else if (llmProvider_ == "groq")
+                        setenv("GROQ_API_KEY", val.c_str(), 1);
+                    else
+                        setenv("OPENAI_API_KEY", val.c_str(), 1);
+                }
             }
         }
         if (stmt) sqlite3_finalize(stmt);
@@ -96,6 +112,10 @@ bool PilotImpl::initWallet() {
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
     if (!wallet) return false;
+
+    for (int i = 0; i < 20 && !wallet->isConnected(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    if (!wallet->isConnected()) { qWarning() << "[pilot] initWallet: wallet not connected"; return false; }
 
     std::string configPath = dataDir_ + "/wallet_config.json";
     std::string storagePath = dataDir_ + "/wallet_storage";

@@ -1,7 +1,99 @@
-import strutils, json, rdstdin, os
+import strutils, json, rdstdin, os, osproc, times, streams
 import rpc, daemon, format
 
 var gCfg: Config
+
+proc daemonCallWithSpinner(cfg: Config, meth: string, args: seq[string] = @[], timeoutSec = 10, label = "Thinking"): string =
+  var shellArgs = "timeout " & $timeoutSec & " " & quoteShell(cfg.logoscore) &
+    " --config-dir " & quoteShell(cfg.configDir) & " call pilot " & meth
+  for a in args:
+    shellArgs &= " " & quoteShell(a)
+  let p = startProcess("bash", args = @["-c", shellArgs],
+                       options = {poUsePath, poStdErrToStdOut})
+  var frame = 0
+  while p.running:
+    spinTick(label, frame)
+    inc frame
+    sleep(120)
+  clearLine()
+  let raw = p.outputStream.readAll()
+  let exitCode = p.waitForExit()
+  p.close()
+  return extractDaemonResult(raw)
+
+proc formatJson(raw: string): string =
+  try:
+    let j = parseJson(raw)
+    if j.kind != JObject: return raw
+
+    # Skills list
+    if j.hasKey("skills") and j.hasKey("count"):
+      var lines: seq[string]
+      lines.add(BOLD & "  Skills (" & $j["count"].getInt() & ")" & RESET)
+      lines.add("")
+      var lastCat = ""
+      for s in j["skills"]:
+        let cat = s["category"].getStr()
+        if cat != lastCat:
+          lines.add("  " & CYAN & BOLD & cat.toUpperAscii() & RESET)
+          lastCat = cat
+        let price = s["price_lez"].getInt()
+        let priceStr = if price > 0: DIM & " (" & $price & " LEZ)" & RESET else: ""
+        lines.add("    " & s["name"].getStr() & priceStr)
+        lines.add("    " & DIM & s["description"].getStr() & RESET)
+      return lines.join("\n")
+
+    # Balance
+    if j.hasKey("balance") and j.hasKey("account"):
+      let bal = j["balance"].getStr("")
+      let balStr = if bal == "": "0" else: bal
+      return "  " & DIM & "Account  " & RESET & truncStr(j["account"].getStr(), 24) &
+             "\n  " & DIM & "Balance  " & RESET & BOLD & balStr & " LEZ" & RESET
+
+    # Status
+    if j.hasKey("initialized") and j.hasKey("npk"):
+      var lines: seq[string]
+      lines.add(BOLD & "  Agent Status" & RESET)
+      lines.add("  " & DIM & "Initialized  " & RESET & (if j["initialized"].getBool(): GREEN & "yes" & RESET else: RED & "no" & RESET))
+      lines.add("  " & DIM & "Account      " & RESET & truncStr(j["account"].getStr(), 24))
+      if j["llm"].kind == JObject:
+        lines.add("  " & DIM & "LLM          " & RESET & j["llm"]["provider"].getStr() & " / " & j["llm"]["model"].getStr())
+      else:
+        lines.add("  " & DIM & "LLM          " & RESET & "none")
+      return lines.join("\n")
+
+    # Pending spends
+    if j.hasKey("pending") and j["pending"].kind == JArray:
+      if j["pending"].len == 0:
+        return "  No pending spend requests"
+      var lines: seq[string]
+      lines.add(BOLD & "  Pending Spends" & RESET)
+      for s in j["pending"]:
+        lines.add("  " & s["id"].getStr("?") & "  " & $s["amount"].getInt() & " LEZ → " & truncStr(s["recipient"].getStr(""), 16) & "  " & DIM & s["reason"].getStr("") & RESET)
+      return lines.join("\n")
+
+    # Transaction history
+    if j.hasKey("history") and j["history"].kind == JArray:
+      if j["history"].len == 0:
+        return "  No transactions yet"
+      var lines: seq[string]
+      lines.add(BOLD & "  Transaction History" & RESET)
+      for tx in j["history"]:
+        lines.add("  " & tx["type"].getStr("?") & "  " & $tx["amount"].getInt() & " LEZ  " & DIM & tx["timestamp"].getStr("") & RESET)
+      return lines.join("\n")
+
+    # File list
+    if j.hasKey("files") and j["files"].kind == JArray:
+      if j["files"].len == 0:
+        return "  No stored files"
+      var lines: seq[string]
+      lines.add(BOLD & "  Stored Files" & RESET)
+      for f in j["files"]:
+        lines.add("  " & f["label"].getStr("?") & "  " & DIM & truncStr(f["cid"].getStr(""), 24) & RESET)
+      return lines.join("\n")
+
+  except: discard
+  return raw
 
 const HELP_TEXT = """
   """ & BOLD & "Commands" & RESET & """
@@ -29,18 +121,20 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/help":
     return HELP_TEXT
   of "/balance":
-    return daemonCall(cfg, "walletBalance")
+    return formatJson(daemonCall(cfg, "walletBalance"))
   of "/history":
-    return daemonCall(cfg, "walletHistory")
+    return formatJson(daemonCall(cfg, "walletHistory"))
   of "/skills":
-    return daemonCall(cfg, "metaSkills")
+    return formatJson(daemonCall(cfg, "metaSkills"))
   of "/status":
-    return daemonCall(cfg, "metaStatus")
+    return formatJson(daemonCall(cfg, "metaStatus"))
   of "/files":
-    return daemonCall(cfg, "storageList")
+    return formatJson(daemonCall(cfg, "storageList"))
+  of "/pending":
+    return formatJson(daemonCall(cfg, "getPendingSpends"))
   of "/discover":
     let topic = if parts.len > 1: parts[1] else: "pilot"
-    return daemonCall(cfg, "agentDiscover", @[topic])
+    return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @[topic], timeoutSec = 20, label = "Discovering agents"))
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient> <amount> <reason>" & RESET
@@ -76,7 +170,7 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "reply":
     return action{"params", "text"}.getStr("")
   of "balance":
-    return daemonCall(cfg, "walletBalance")
+    return formatJson(daemonCall(cfg, "walletBalance"))
   of "send":
     let p = action.getOrDefault("params")
     if not p.isNil and p.kind == JObject:
@@ -94,16 +188,17 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
         @[p.getOrDefault("path").getStr(""),
           p.getOrDefault("label").getStr("")])
   of "skills":
-    return daemonCall(cfg, "metaSkills")
+    return formatJson(daemonCall(cfg, "metaSkills"))
   of "status":
-    return daemonCall(cfg, "metaStatus")
+    return formatJson(daemonCall(cfg, "metaStatus"))
   of "discover":
-    return daemonCall(cfg, "agentDiscover", @["pilot"])
+    return formatJson(daemonCall(cfg, "agentDiscover", @["pilot"]))
   of "none":
     return ""
   else:
-    return DIM & "  (unhandled: " & act & ")" & RESET
-  return ""
+    let text = action{"params", "text"}.getStr("")
+    if text != "": return text
+    return $action
 
 proc cleanup() {.noconv.} =
   echo ""
@@ -130,9 +225,21 @@ proc runRepl*(cfg: Config, dataDir: string) =
 
   let accountId = daemonCall(gCfg, "getAccountId")
 
+  var ownerName = daemonCall(gCfg, "metaConfigure", @["owner.name", ""])
+  if ownerName == "" or ownerName == "true":
+    stdout.write(DIM & "  Your name: " & RESET)
+    stdout.flushFile()
+    var nameInput: string
+    discard readLineFromStdin("", nameInput)
+    ownerName = nameInput.strip()
+    if ownerName != "":
+      discard daemonCall(gCfg, "metaConfigure", @["owner.name", ownerName])
+
   ok("Agent online")
   if accountId != "":
     kv("Account", truncStr(accountId, 24))
+  if ownerName != "":
+    echo DIM & "  Welcome back, " & RESET & BOLD & ownerName & RESET
   echo DIM & "  Type /help for commands, or just chat." & RESET
   blankLine()
 
@@ -141,7 +248,7 @@ proc runRepl*(cfg: Config, dataDir: string) =
   while true:
     var line: string
     try:
-      let prompt = GREEN & "❯ " & RESET
+      let prompt = "> "
       let readOk = readLineFromStdin(prompt, line)
       if not readOk:
         cleanup()
@@ -158,12 +265,12 @@ proc runRepl*(cfg: Config, dataDir: string) =
     if line.startsWith("/"):
       response = dispatchSlash(gCfg, line)
     else:
+      let raw = daemonCallWithSpinner(gCfg, "processOwnerMessage", @[line], timeoutSec = 30)
       try:
-        let raw = daemonCall(gCfg, "processOwnerMessage", @[line])
         let j = parseJson(raw)
         response = dispatchAction(gCfg, j)
       except JsonParsingError:
-        response = daemonCall(gCfg, "processOwnerMessage", @[line])
+        response = raw
       except:
         response = RED & "  error: " & getCurrentExceptionMsg() & RESET
 
@@ -172,4 +279,4 @@ proc runRepl*(cfg: Config, dataDir: string) =
       return
 
     if response != "":
-      echo response
+      echo CYAN & "  pilot " & RESET & DIM & "│ " & RESET & response.replace("\n", "\n        " & DIM & "│ " & RESET)

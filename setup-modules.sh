@@ -37,7 +37,10 @@ ls $MODULES_DIR/
 echo ""
 
 # Find logoscore + logos_host
-LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli*" -type f 2>/dev/null | head -1)
+LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f 2>/dev/null | head -1)
+if [ -z "$LOGOSCORE" ]; then
+  LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli*" -type f 2>/dev/null | head -1)
+fi
 LOGOS_HOST=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d 2>/dev/null | head -1)/bin/logos_host
 
 echo "=== Smoke test ==="
