@@ -51,11 +51,28 @@ bool PilotImpl::metaConfigure(const std::string& key, const std::string& value) 
         spendPeriodSeconds_ = std::stoll(value);
     } else if (key == "owner.npk") {
         ownerNpk_ = value;
+    } else if (key == "owner.name") {
+        ownerName_ = value;
+        if (value.empty()) return true;
     } else if (key == "llm.provider") {
         llmProvider_ = value;
         initLLM();
     } else if (key == "llm.model") {
         llmModel_ = value;
+        initLLM();
+    } else if (key == "llm.api_key") {
+        if (llmProvider_ == "anthropic")
+            setenv("ANTHROPIC_API_KEY", value.c_str(), 1);
+        else if (llmProvider_ == "openai")
+            setenv("OPENAI_API_KEY", value.c_str(), 1);
+        else if (llmProvider_ == "deepseek")
+            setenv("DEEPSEEK_API_KEY", value.c_str(), 1);
+        else if (llmProvider_ == "google")
+            setenv("GOOGLE_API_KEY", value.c_str(), 1);
+        else if (llmProvider_ == "openrouter")
+            setenv("OPENROUTER_API_KEY", value.c_str(), 1);
+        else if (llmProvider_ == "groq")
+            setenv("GROQ_API_KEY", value.c_str(), 1);
         initLLM();
     }
 

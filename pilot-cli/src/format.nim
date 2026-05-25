@@ -66,8 +66,15 @@ proc tableHeader*(cols: varargs[tuple[text: string, width: int]]) =
     rule &= repeat("─", col.width)
   echo DIM & rule & RESET
 
+const SPIN_FRAMES* = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
 proc spinner*(msg: string) =
   stdout.write DIM & "⠋ " & RESET & msg & "\r"
+  stdout.flushFile()
+
+proc spinTick*(msg: string, frame: int) =
+  let ch = SPIN_FRAMES[frame mod SPIN_FRAMES.len]
+  stdout.write "\e[2K" & DIM & ch & " " & RESET & msg & "\r"
   stdout.flushFile()
 
 proc clearLine*() =

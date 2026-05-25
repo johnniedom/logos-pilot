@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <thread>
+#include <chrono>
 #include <QString>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -90,11 +92,18 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
     }
 }
 
+static bool waitForConnection(LogosAPIClient* client, int maxMs = 5000) {
+    if (!client) return false;
+    for (int elapsed = 0; elapsed < maxMs && !client->isConnected(); elapsed += 250)
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    return client->isConnected();
+}
+
 void PilotImpl::initDependencyModules() {
     if (!logosAPI_) return;
 
     auto* storage = logosAPI_->getClient("storage_module");
-    if (storage) {
+    if (waitForConnection(storage)) {
         storage->invokeRemoteMethod("storage_module", "init",
             QString("{\"nat\":\"none\"}"));
         storage->invokeRemoteMethod("storage_module", "start");
@@ -107,7 +116,7 @@ void PilotImpl::initDependencyModules() {
         wakuAddr = "/ip4/127.0.0.1/tcp/30303";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
-    if (delivery) {
+    if (waitForConnection(delivery)) {
         QJsonArray shards;
         for (int i = 0; i < 8; i++) shards.append(i);
         QJsonArray staticNodes;
@@ -150,29 +159,33 @@ void PilotImpl::initLLM() {
 }
 
 std::string PilotImpl::buildLLMSystemPrompt() {
+    std::string skillsList;
+    if (registry_) skillsList = registry_->listSkills();
+
     std::string prompt =
-        "You are the Pilot agent's reasoning layer. "
-        "Parse owner messages into structured actions.\n\n"
-        "Available commands:\n"
-        "/approve <id> - approve a pending spend request\n"
-        "/reject <id> - reject a pending spend request\n"
-        "/balance - check wallet balance\n"
-        "/history - view transaction history\n"
-        "/send <recipient> <amount> <reason> - send LEZ tokens\n"
-        "/upload <path> <label> - upload a file\n"
-        "/download <cid> <path> - download a file\n"
-        "/files - list stored files\n"
-        "/skills - list available skills\n"
-        "/status - agent status\n"
-        "/discover - discover peer agents\n\n"
+        "You are Pilot, a sovereign AI agent on the Logos network. "
+        "You help your owner manage their wallet, files, messaging, and interact with other agents.\n\n"
+        "You have 21 module skills across 6 categories:\n"
+        "- WALLET: balance, send, history\n"
+        "- STORAGE: upload, download, list, share (encrypted file storage)\n"
+        "- MESSAGING: send, join, create_group (encrypted messaging)\n"
+        "- AGENT: card, discover, task, subscribe, cancel (A2A protocol)\n"
+        "- PROGRAM: query, call, deploy (LEZ smart contracts)\n"
+        "- META: status, skills, configure\n\n"
+        "Owner slash commands you can dispatch:\n"
+        "/balance, /history, /send <to> <amt> <reason>, /approve <id>, /reject <id>,\n"
+        "/upload <path> <label>, /download <cid> <path>, /files,\n"
+        "/skills, /status, /discover, /help\n\n"
         "Current state:\n"
+        "- Owner: " + (ownerName_.empty() ? "unknown" : ownerName_) + "\n"
         "- NPK: " + agentNpk_ + "\n"
         "- Account: " + agentAccountId_ + "\n"
         "- Initialized: " + (initialized_ ? "yes" : "no") + "\n\n"
-        "Respond with ONLY a JSON object:\n"
+        "When the owner asks you to perform an action, respond with ONLY a JSON object:\n"
         "{\"action\": \"<command_name>\", \"params\": {<relevant params>}}\n"
-        "If the message is casual/unclear, respond:\n"
-        "{\"action\": \"reply\", \"params\": {\"text\": \"<your response>\"}}\n";
+        "When the owner asks a question or chats casually, respond naturally:\n"
+        "{\"action\": \"reply\", \"params\": {\"text\": \"<your response>\"}}\n"
+        "Be concise, helpful, and accurate about your capabilities.\n";
     return prompt;
 }
 
@@ -198,12 +211,24 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     }
 
     std::string systemPrompt = buildLLMSystemPrompt();
-    std::vector<LLMMessage> messages = {{"user", message}};
+    chatHistory_.push_back({"user", message});
+    if (chatHistory_.size() > 40)
+        chatHistory_.erase(chatHistory_.begin(), chatHistory_.begin() + 2);
+
+    std::vector<LLMMessage> messages;
+    for (const auto& [role, content] : chatHistory_)
+        messages.push_back({role, content});
+
     std::string response = llm_->complete(systemPrompt, messages);
 
-    if (response.empty()) {
+    if (!response.empty() && response.find("\"error\"") == std::string::npos)
+        chatHistory_.push_back({"assistant", response});
+
+    if (response.empty() || response.find("\"error\"") != std::string::npos) {
+        std::string errDetail = response;
+        if (errDetail.empty()) errDetail = "LLM returned empty response";
         QJsonObject params;
-        params["text"] = QString("I couldn't process that. Use /help for available commands.");
+        params["text"] = QString::fromStdString("LLM error: " + errDetail + ". Use /help for available commands.");
         QJsonObject reply;
         reply["action"] = QString("reply");
         reply["params"] = params;

@@ -102,6 +102,166 @@ git add -A && git commit -m "wip"
 nix build
 ```
 
+## Inter-Module Communication (Qt Remote Objects)
+
+### Connection readiness
+
+Modules run in separate `logos_host_qt` processes. They communicate via Qt Remote Objects replicas. After `load-module`, the replica connection takes time to establish. Calling `invokeRemoteMethod` before the replica is ready causes a **segfault** (SIGSEGV in `libQt6RemoteObjects.so` at offset 0x60).
+
+**Always check `isConnected()` before calling `invokeRemoteMethod`:**
+
+```cpp
+#include "logos_api_client.h"
+#include <thread>
+#include <chrono>
+
+auto* wallet = logosAPI_->getClient("lez_wallet_module");
+if (!wallet) return false;
+
+// Wait for replica connection (max 5s)
+for (int i = 0; i < 20 && !wallet->isConnected(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+if (!wallet->isConnected()) {
+    qWarning() << "wallet module not connected";
+    return false;
+}
+
+// Now safe to call
+QVariant result = wallet->invokeRemoteMethod("lez_wallet_module", "open", configPath, storagePath);
+```
+
+### Available `LogosAPIClient` methods
+
+From the SDK headers (`logos_api_client.h`):
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `isConnected()` | `bool` | Whether the Qt Remote Objects replica is connected |
+| `reconnect()` | `bool` | Attempt to re-establish the connection |
+| `invokeRemoteMethod(obj, method, args...)` | `QVariant` | Synchronous RPC call (up to 5 arg overloads) |
+| `invokeRemoteMethodAsync(obj, method, args..., callback)` | `void` | Async RPC with callback |
+| `requestObject(objectName)` | `LogosObject*` | Get a handle for event subscriptions |
+| `onEvent(object, eventName, callback)` | `void` | Register an event listener |
+| `getToken(moduleName)` | `QString` | Get capability token for a module |
+
+### The `onInit` hook
+
+The code generator produces `onInit(QVariant)` which hides the base class's `onInit(LogosAPI*)`. To receive the `LogosAPI*` pointer, inject an override via `sed` in `flake.nix` `preConfigure`:
+
+```bash
+sed -i '/^private:/i\    void onInit(LogosAPI* api) override {\n        m_impl.logosAPI_ = api;\n    }\n' \
+  ./generated_code/pilot_qt_glue.h
+```
+
+This runs at build time. The framework calls `onInit` after module load, passing the API pointer.
+
+## Daemon Process Management
+
+### Module host processes
+
+Each loaded module runs in its own `logos_host_qt` process. Killing `logoscore` does NOT kill the module hosts — they become orphans holding locks and sockets.
+
+**Proper cleanup:**
+
+```bash
+# Kill everything
+pkill -9 -f logos_host_qt
+pkill -9 -f logoscore
+
+# Remove stale locks
+rm -f ~/.cache/storage/dht/providers/LOCK
+rm -rf /tmp/pilot-data/.logoscore/daemon
+```
+
+### LevelDB lock contention
+
+The `storage_module` uses LevelDB at `~/.cache/storage/dht/providers/`. If a previous `logos_host_qt` process holds the lock, the new storage_module crashes:
+
+```
+ERR Failed to initialize discovery datastore
+    path=~/.cache/storage/dht/providers
+    err="IO error: lock .../LOCK: Resource temporarily unavailable"
+[critical] Module process crashed: storage_module
+```
+
+**Fix:** Kill stale `logos_host_qt` processes and remove the lock file before starting a new daemon.
+
+### Daemon PID tracking
+
+The daemon writes its PID to `<config-dir>/daemon/state.json`. When using `setsid` to detach the daemon (required when launching from a non-interactive shell), `$!` captures the `setsid` wrapper PID, not the daemon PID. Read from `state.json` instead:
+
+```json
+{
+    "pid": 36685,
+    "instance_id": "e986e5400bf4",
+    "started_at": "2026-05-25T16:11:41Z",
+    "version": 2
+}
+```
+
+### Timeouts for inter-module initialization
+
+When calling `initialize()` on a module that depends on other modules (e.g., pilot → wallet → sequencer), allow sufficient time:
+
+| Operation | Typical time | Recommended timeout |
+|-----------|-------------|-------------------|
+| Qt RO replica connection | 1-5s | 5s poll loop |
+| Wallet `create_new` (talks to sequencer) | 3-8s | 15s |
+| Full `initialize()` (connection + wallet + keys) | 5-15s | 30s |
+| Delivery module startup (NAT detection + peer discovery) | 8-12s | 15s |
+| LLM API call (Gemini/OpenAI/etc.) | 2-15s | 30s |
+
+### Nix store binary discovery
+
+Binaries are at depth 3: `/nix/store/<hash>/bin/<name>`. Use `-maxdepth 3` for `find`:
+
+```bash
+# logoscore CLI (NOT the old liblogos build binary)
+find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f 2>/dev/null | head -1
+
+# logos_host
+find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f 2>/dev/null | head -1
+
+# lgpm
+find /nix/store -maxdepth 3 -name lgpm -path "*/bin/*" -type f 2>/dev/null | head -1
+```
+
+**Warning:** `-maxdepth 4` scans 28K+ entries in WSL and takes ~14 seconds. `-maxdepth 2` misses binaries. `-maxdepth 3` is the correct depth.
+
+## LLM Integration
+
+### Provider configuration
+
+API keys must be passed to the module process, not just set in the calling process. Use `metaConfigure`:
+
+```bash
+logoscore call pilot metaConfigure llm.provider anthropic
+logoscore call pilot metaConfigure llm.api_key sk-ant-...
+logoscore call pilot metaConfigure llm.model claude-sonnet-4-6-20250514
+```
+
+The module stores these in SQLite and restores them on restart via `loadIdentity()`.
+
+### Supported providers
+
+All providers except Anthropic route through the OpenAI-compatible chat completions endpoint:
+
+| Provider | Base URL | Default model | Auth |
+|----------|----------|---------------|------|
+| Anthropic | `api.anthropic.com` (native) | claude-sonnet-4-6 | `x-api-key` header |
+| OpenAI | `api.openai.com/v1` | gpt-4o | `Bearer` token |
+| DeepSeek | `api.deepseek.com` (no `/v1`) | deepseek-chat | `Bearer` token |
+| Google Gemini | `generativelanguage.googleapis.com/v1beta/openai` | gemini-2.5-flash | `Bearer` token |
+| OpenRouter | `openrouter.ai/api/v1` | anthropic/claude-sonnet-4-6 | `Bearer` token |
+| Groq | `api.groq.com/openai/v1` | llama-3.3-70b-versatile | `Bearer` token |
+
+**Google Gemini gotcha:** API keys from Google Cloud Console may not work. Use keys from **aistudio.google.com** which work immediately with the Generative Language API.
+
+### Cross-process environment variables
+
+`putEnv()` in the CLI process does NOT affect the `logos_host_qt` module process. To pass env vars to the module, use `metaConfigure("llm.api_key", key)` which calls `setenv()` inside the module process and stores the key in SQLite for restart persistence.
+
 ## Linking SQLite
 
 If your module uses SQLite, declaring it in `metadata.json` under `find_packages` is NOT enough. You must also link it in CMakeLists.txt:

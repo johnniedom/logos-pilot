@@ -2,9 +2,12 @@
 #include "pilot_crypto.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "logos_mode.h"
 #include <sstream>
 #include <chrono>
 #include <random>
+
+static const Timeout RPC_TIMEOUT(15000);
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
@@ -121,11 +124,11 @@ std::string PilotImpl::agentCard() {
 
     if (logosAPI_) {
         auto* delivery = logosAPI_->getClient("delivery_module");
-        if (delivery) {
+        if (delivery && delivery->isConnected()) {
             delivery->invokeRemoteMethod(
                 "delivery_module", "send",
                 QString("/pilot/1/discovery/proto"),
-                QString::fromStdString(cardStr));
+                QString::fromStdString(cardStr), RPC_TIMEOUT);
         }
     }
 
@@ -142,23 +145,25 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
 
+    if (!delivery->isConnected()) return "{\"error\": \"delivery module not connected\"}";
+
     QVariant subResult = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
-        QString::fromStdString(discoveryTopic));
+        QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
     if (subResult.isNull())
         return "{\"error\": \"subscribe failed\"}";
 
     auto* waku = logosAPI_->getClient("waku_module");
-    if (!waku) {
+    if (!waku || !waku->isConnected()) {
         QJsonObject res;
         res["agents"] = QJsonArray();
-        res["note"] = QString("waku module unavailable");
+        res["note"] = QString("waku module unavailable — discovery requires waku_module");
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
     QVariant storeResult = waku->invokeRemoteMethod(
         "waku_module", "storeQuery",
-        QString::fromStdString(discoveryTopic));
+        QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
 
     if (storeResult.isNull()) {
         QJsonObject res;
