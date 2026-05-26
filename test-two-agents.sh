@@ -95,7 +95,7 @@ for m in capability_module lez_wallet_module delivery_module chat_module pilot; 
   cp -r $MODULES/$m $MODULES_B/$m 2>/dev/null
 done
 
-PILOT_TCP_PORT=60001 setsid $LOGOSCORE $CFG_B -D -m $MODULES_B > $AGENT_B/daemon.log 2>&1 &
+PILOT_TCP_PORT=60001 PILOT_WAKU_MODE=Edge setsid $LOGOSCORE $CFG_B -D -m $MODULES_B > $AGENT_B/daemon.log 2>&1 &
 sleep 5
 
 if ! cat $AGENT_B/.logoscore/daemon/state.json 2>/dev/null | grep -q '"pid"'; then
