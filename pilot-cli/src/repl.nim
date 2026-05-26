@@ -241,6 +241,21 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
       return daemonCall(cfg, "storageUpload",
         @[p.getOrDefault("path").getStr(""),
           p.getOrDefault("label").getStr("")])
+  of "files":
+    return formatJson(daemonCall(cfg, "storageList"))
+  of "history":
+    return formatJson(daemonCall(cfg, "walletHistory"))
+  of "download":
+    let p = action.getOrDefault("params")
+    if not p.isNil and p.kind == JObject:
+      return formatJson(daemonCall(cfg, "storageDownload",
+        @[p.getOrDefault("cid").getStr(p.getOrDefault("label").getStr("")),
+          p.getOrDefault("path").getStr("/tmp/download")]))
+  of "reject":
+    let id = action{"params", "id"}.getStr("")
+    if id != "": return daemonCall(cfg, "rejectSpend", @[id])
+  of "pending":
+    return formatJson(daemonCall(cfg, "getPendingSpends"))
   of "skills":
     return formatJson(daemonCall(cfg, "metaSkills"))
   of "status":
