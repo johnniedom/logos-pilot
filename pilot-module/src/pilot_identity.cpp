@@ -10,6 +10,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <thread>
+#include <functional>
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
@@ -150,11 +151,13 @@ bool PilotImpl::initWallet() {
         configFile.close();
     }
 
+    std::string walletName = "pilot_" + std::to_string(
+        std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
     QVariant createResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
-        QString("pilot_agent"), Timeout(15000));
+        QString::fromStdString(walletName), Timeout(15000));
     return !createResult.isNull() && createResult.toInt() == 0;
 }
 
