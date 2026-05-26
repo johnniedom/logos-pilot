@@ -1,127 +1,170 @@
 # Pilot Agent — Owner Guide
 
-## Interacting With Your Agent
+## Getting Started
 
-After deployment, you communicate with your agent through two channels:
-
-### 1. Terminal Chat (`pilot chat`)
+After deploying your agent (`pilot deploy`), start chatting:
 
 ```bash
-pilot chat
+./pilot-cli/result/bin/pilot chat
 ```
 
-A REPL where you type natural language or slash commands. The LLM interprets natural language and dispatches the right skill.
+The agent asks your name on first use and remembers it. Type naturally or use slash commands.
 
-### 2. Basecamp Chat (Owner Channel)
+## Talking to Your Agent
 
-Open Basecamp → Chat tab → your agent's conversation. Same commands work here — messages go through end-to-end encrypted chat_module.
+The agent understands natural language. Ask it things like:
 
-## Commands
+```
+> what's my balance?
+> upload this file to storage
+> what files do I have?
+> send 50 LEZ to <address> for hosting
+> discover other agents
+> what can you do?
+```
 
-### Wallet
-| Command | Description |
+The agent dispatches the right action and summarizes the result. If something fails, it tells you what went wrong and suggests a fix.
+
+## Slash Commands
+
+For direct control, use slash commands — they bypass the LLM and go straight to the module:
+
+| Command | What it does |
 |---------|-------------|
-| `/balance` | Show current LEZ balance |
-| `/history` | Recent transaction history |
-| `/send <address> <amount> <reason>` | Send LEZ tokens |
+| `/balance` | Shows wallet balance |
+| `/history` | Shows transaction history |
+| `/send <to> <amount> <reason>` | Sends LEZ tokens |
+| `/approve <id>` | Approves a pending spend request |
+| `/reject <id>` | Rejects a pending spend request |
+| `/upload <path> <label>` | Encrypts and uploads a file |
+| `/download <label-or-cid> <path>` | Downloads and decrypts a file |
+| `/files` | Lists all stored files with CIDs |
+| `/skills` | Lists all 21 agent skills |
+| `/status` | Shows agent status, LLM config, account |
+| `/discover` | Discovers other agents on the network |
+| `/help` | Shows all commands |
+| `/quit` | Exits the chat |
 
-### Storage
-| Command | Description |
-|---------|-------------|
-| `/upload <path> <label>` | Encrypt and upload a file |
-| `/download <cid> <path>` | Download and decrypt a file |
-| `/files` | List all stored files |
+## File Management
 
-### Spending Approval
-| Command | Description |
-|---------|-------------|
-| `/approve <id>` | Approve a pending spend request |
-| `/reject <id>` | Reject a pending spend request |
-
-### Agent Management
-| Command | Description |
-|---------|-------------|
-| `/status` | Agent status (balance, LLM, channels) |
-| `/skills` | List all available skills |
-| `/discover` | Find peer agents on the network |
-
-### Natural Language (requires LLM)
-
-If an LLM provider is configured, you can speak naturally:
+### Upload
 
 ```
-you › what's my balance?
-pilot › Your balance is 150 LEZ
-
-you › upload my-report.pdf as quarterly report
-pilot › Encrypting and uploading... ✓ Stored as CID: bafy2bza...
-
-you › yeah go ahead
-pilot › Approved. Executing transfer of 10 LEZ to abc123...
+> /upload /path/to/document.pdf my-document
+  pilot │   Uploaded  my-document
+        │   CID  zDvZRwzm3EEJ...
+        │   Encrypted  yes
 ```
 
-The agent parses your intent and maps it to the appropriate command.
+Files are encrypted with AES-256-GCM before upload. The encryption key is stored locally in your agent's database.
 
-## Spending Approval Flow
-
-When the agent needs to spend more than the per-transaction limit:
+### List Files
 
 ```
-pilot › Spend request created:
-        ID: a3f7b2c1
-        Recipient: abc123...
-        Amount: 250 LEZ
-        Reason: Program deployment
-        
-        /approve a3f7b2c1
-        /reject a3f7b2c1
+> /files
+  pilot │   Stored Files
+        │   my-document
+        │     CID  zDvZRwzm3EEJDkF2Em...
+        │   contract-draft
+        │     CID  zDvZRwzkz4tYVp8VBp...
 ```
 
-- Below threshold → executes automatically, you're notified after
-- Above threshold → held, you must approve or reject
-- No response → expires after timeout (funds stay safe)
+### Download
 
-### Configuring Limits
-
-```bash
-pilot configure spending.per_transaction_limit 200
-pilot configure spending.per_period_limit 1000
-pilot configure spending.period_seconds 86400    # 24 hours
+By label (recommended):
 ```
+> /download my-document /tmp/my-document.pdf
+  pilot │   Downloaded  /tmp/my-document.pdf
+        │   Decrypted  yes
+```
+
+By CID:
+```
+> /download zDvZRwzm3EEJDkF2Em... /tmp/file.pdf
+```
+
+WSL users: files on the Windows desktop are at `/mnt/c/Users/<name>/Desktop/`.
+
+## Wallet
+
+### Check Balance
+
+```
+> /balance
+  pilot │   Account  91996446eb22...
+        │   Balance  1000 LEZ
+```
+
+### Send Tokens
+
+Below your spending threshold — executes immediately:
+```
+> /send <recipient> 50 payment for services
+  pilot │   Transfer sent
+        │   Amount  50 LEZ
+```
+
+Above your threshold — held for your approval:
+```
+> /send <recipient> 500 large purchase
+  pilot │   Spend request created
+        │   ID  a1b2c3d4
+        │   State  HELD
+
+> /approve a1b2c3d4
+```
+
+### Spending Limits
+
+The agent enforces per-transaction and per-period limits. Configure via:
+```
+> /status    # see current limits
+```
+
+Default: 100 LEZ per transaction, 500 LEZ per period (24 hours).
+
+## Agent Discovery
+
+Find other agents on the network:
+```
+> /discover
+  pilot │   Agents (0)
+        │   No agents found — subscribed for live cards
+```
+
+Your agent publishes its own Agent Card during deploy. Other agents can discover you the same way.
 
 ## LLM Configuration
 
-### During Deployment
-
-The `pilot deploy` wizard lets you choose with arrow keys:
-- Claude (Anthropic)
-- OpenAI / GPT
-- Gemini (Google)
-- Local (Ollama / LM Studio)
-- OpenRouter
-
-### After Deployment
-
+The LLM provider is selected during `pilot deploy`. To change it, redeploy:
 ```bash
-pilot configure llm.provider anthropic
-pilot configure llm.model claude-sonnet-4-6
-
-# Or via environment variables
-export ANTHROPIC_API_KEY=sk-...
-export PILOT_LLM_PROVIDER=anthropic
-export PILOT_LLM_MODEL=claude-sonnet-4-6
+./pilot-cli/result/bin/pilot deploy
 ```
 
-### Without LLM
+Supported providers: Anthropic (Claude), OpenAI (GPT), DeepSeek, Google (Gemini), OpenRouter, Groq.
 
-The agent works in command-only mode if no LLM is configured. All slash commands work — you just can't use natural language.
+The API key and provider are stored in your agent's database and restored automatically on every chat session.
 
-## Verification
+## Important: Protect Your Data
 
-Generate an evidence report for evaluators or your own records:
+Your agent's database (`pilot.db`) contains:
 
-```bash
-pilot verify
-```
+- Your identity (NPK keypair)
+- Wallet connection
+- File encryption keys
+- LLM API key
+- Owner configuration
 
-Outputs: agent address, balance, skill status (21/21), peer count, transaction history, and machine-parseable JSON.
+Never delete `pilot.db`. If lost, uploaded files cannot be decrypted and your identity is gone.
+
+Safe to delete:
+- `.logoscore/daemon/` — daemon state, recreated on start
+- `daemon.log` — logs
+
+## Tips
+
+- Slash commands are faster than natural language for actions — no LLM round-trip
+- The first storage or messaging command takes 2-3 seconds (module init)
+- The agent remembers your conversation (20 turns) — refer to previous messages naturally
+- If the agent seems stuck, Ctrl+C and restart `pilot chat`
+- Check `/status` to verify LLM, account, and initialization state

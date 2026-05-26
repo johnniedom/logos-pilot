@@ -1,216 +1,197 @@
 # Pilot Agent — Deployment Guide
 
-Ref: [logoscore CLI](https://github.com/logos-co/logos-logoscore-cli) | [Basecamp](https://github.com/logos-co/logos-basecamp) | [Module Builder](https://github.com/logos-co/logos-module-builder)
-
 ## Prerequisites
 
 - Linux (x86_64) or WSL2
 - [Nix](https://nixos.org/download.html) with flakes enabled
+- Docker (for sequencer + Waku node)
 - An LLM API key (optional — agent works without it in command-only mode)
 
-## Quick Start (5 minutes)
+## Step 1: Start Infrastructure
 
 ```bash
-# 1. Clone
-git clone https://github.com/johnniedom/pilot.git
-cd pilot
+# Terminal 1: Start the LEZ sequencer
+./run-sequencer.sh
 
-# 2. Build module
-cd pilot-module && git init && git add -A
-nix build --extra-experimental-features 'nix-command flakes'
-
-# 3. Build logoscore CLI
-nix build 'github:logos-co/logos-logoscore-cli' \
-  --extra-experimental-features 'nix-command flakes' -o logoscore-cli
-
-# 4. Deploy
-export PATH="$PWD/logoscore-cli/bin:$PWD/../pilot-cli:$PATH"
-pilot deploy --testnet
+# Terminal 2: Start the Waku node
+docker-compose up -d
 ```
 
-The wizard walks you through identity generation, LLM selection, owner binding, and funding.
+Verify both are running:
+```bash
+curl -s http://localhost:8080/        # sequencer — should return 404 (alive)
+docker ps                              # should show pilot-nwaku + sequencer
+```
 
-## Step-by-Step
-
-### 1. Build the Module
+## Step 2: Build
 
 ```bash
+# Build the C++ module
 cd pilot-module
+git init && git add -A
 nix build --extra-experimental-features 'nix-command flakes'
-```
 
-Output: `result/lib/pilot_plugin.so` (37 methods, ~2.5 MB)
+# Run unit tests (44/44)
+nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
-Verify with unit tests:
-```bash
-nix build .#unit-tests -L   # 44 tests
-```
-
-### 2. Get logoscore
-
-```bash
-nix build 'github:logos-co/logos-logoscore-cli' \
-  --extra-experimental-features 'nix-command flakes' -o logoscore-cli
-```
-
-Output: `logoscore-cli/bin/logoscore`
-
-### 3. Install Module as LGX Package
-
-logoscore discovers modules via the LGX package manager — bare `.so` files won't be found.
-
-```bash
 # Build LGX package
 nix build .#lgx --extra-experimental-features 'nix-command flakes' -o result-lgx
 
-# Find lgpm
-LGPM=$(find /nix/store -maxdepth 3 -name "lgpm" -path "*/bin/*" 2>/dev/null | head -1)
-
-# Install into a modules directory
-mkdir -p /tmp/pilot/modules
-$LGPM install --file result-lgx/logos-pilot-module-lib.lgx \
-  --modules-dir /tmp/pilot/modules --allow-unsigned
+# Build the CLI
+cd ../pilot-cli
+git init && git add -A
+nix build --extra-experimental-features 'nix-command flakes'
+cd ..
 ```
 
-### 4. Set LOGOS_HOST_PATH
-
-logoscore spawns each module in a subprocess via `logos_host`. You must tell it where to find the binary:
+## Step 3: Install Modules
 
 ```bash
-export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d | head -1)/bin/logos_host
+./setup-modules.sh
 ```
 
-### 5. Test Headlessly (Inline Mode)
+This installs pilot + all dependency modules (wallet, delivery, storage, chat, capability) from the nix cache into `/tmp/pilot-logoscore/modules/`.
+
+## Step 4: Deploy
 
 ```bash
-logoscore-cli/bin/logoscore \
-  -m /tmp/pilot/modules -l pilot \
-  -c "pilot.echo(hello)" --quit-on-finish
-# Output: Method call successful. Result: echo: hello
+./pilot-cli/result/bin/pilot deploy
 ```
 
-### 6. Run as Daemon
+The wizard walks you through:
+
+1. **Agent Identity** — creates a shielded wallet account on the sequencer, generates NPK/ISK keypair
+2. **LLM Provider** — arrow-key selector: Anthropic, OpenAI, DeepSeek, Google Gemini, OpenRouter, Groq, or skip
+3. **Model Selection** — 2-3 models per provider (e.g., claude-sonnet-4-6, gpt-4.1, deepseek-v4-pro)
+4. **API Key** — enter your key (stored in SQLite, restored on restart)
+5. **Owner Identity** — your secp256k1 public key (optional — skip for testing)
+6. **Agent Card** — published to the Waku discovery topic
+
+## Step 5: Chat
 
 ```bash
-# Start daemon
-logoscore-cli/bin/logoscore -D -m /tmp/pilot/modules
-
-# In another terminal
-logoscore-cli/bin/logoscore load-module pilot
-logoscore-cli/bin/logoscore call pilot echo "hello world"
-logoscore-cli/bin/logoscore call pilot metaSkills
-logoscore-cli/bin/logoscore call pilot metaStatus
+./pilot-cli/result/bin/pilot chat
 ```
 
-### 5. Deploy with the Wizard
+First time asks your name (stored permanently). Then:
+
+```
+Pilot Chat
+──────────────────────────────────────────────────
+✓ Agent online
+  Account       91996446eb22...
+  Welcome back, Johnnie
+  Type /help for commands, or just chat.
+
+> hello
+  pilot │ Hey Johnnie, ready to help. What do you need?
+
+> /upload /mnt/c/Users/johnn/Desktop/doc.pdf my-doc
+  pilot │   Uploaded  my-doc
+        │   CID  zDvZRwzm3EEJDkF2Em...
+        │   Encrypted  yes
+
+> /files
+  pilot │   Stored Files
+        │   my-doc
+        │     CID  zDvZRwzm3EEJDkF2Em...
+
+> /download my-doc /tmp/doc.pdf
+  pilot │   Downloaded  /tmp/doc.pdf
+        │   Decrypted  yes
+
+> /balance
+  pilot │   Account  91996446eb22...
+        │   Balance  1000 LEZ
+
+> what can you do?
+  pilot │ I can manage your wallet, encrypt and store files, send messages,
+        │ discover other agents, and execute on-chain transactions. 21 skills total.
+```
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/balance` | Check wallet balance |
+| `/history` | Transaction history |
+| `/send <to> <amount> <reason>` | Send LEZ tokens |
+| `/approve <id>` | Approve pending spend |
+| `/reject <id>` | Reject pending spend |
+| `/upload <path> <label>` | Upload encrypted file |
+| `/download <cid-or-label> <path>` | Download and decrypt file |
+| `/files` | List stored files |
+| `/skills` | List all 21 skills |
+| `/status` | Agent status |
+| `/discover` | Discover peer agents |
+| `/help` | Show commands |
+| `/quit` | Exit |
+
+## Step 6: Run Tests
 
 ```bash
-pilot deploy --testnet
+# Unit tests (44)
+cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
+
+# Single-agent integration (28) — needs sequencer
+cd .. && ./test-phases.sh
+
+# Two-agent Docker (14) — needs sequencer + Docker
+pkill -9 -f logos_host_qt; pkill -9 -f logoscore
+rm -f ~/.cache/storage/dht/providers/LOCK
+./test-two-agents-docker.sh
 ```
 
-Steps:
-1. **Agent Identity** — generates keypair via `lez_wallet_module.createAccountPrivate()`
-2. **LLM Provider** — arrow-key selector (Claude, OpenAI, Gemini, Local, OpenRouter)
-3. **Owner Identity** — enter your Logos address from Basecamp > Settings
-4. **Funding** — send LEZ to the displayed agent address
-5. **Deploy** — publishes Agent Card, opens owner channel
-
-### 6. Chat with Your Agent
-
-```bash
-pilot chat
-```
-
-### 7. Install in Basecamp (GUI)
-
-For the full desktop experience with the 4-tab QML UI:
-
-```bash
-# Build portable package
-nix build .#lgx-portable --extra-experimental-features 'nix-command flakes'
-
-# Install via lgpm
-lgpm install --file result/logos-pilot-module-lib.lgx \
-  --modules-dir ~/.local/share/Logos/LogosBasecamp/modules \
-  --allow-unsigned
-
-# Launch Basecamp
-LogosBasecamp
-```
-
-Or run Basecamp directly with the module:
-
-```bash
-nix build 'github:logos-co/logos-basecamp' \
-  --extra-experimental-features 'nix-command flakes' -o basecamp
-
-mkdir -p /tmp/pilot-data/modules
-cp result/lib/pilot_plugin.so /tmp/pilot-data/modules/
-
-./basecamp/bin/LogosBasecamp --user-dir /tmp/pilot-data
-```
-
-## Network Infrastructure
-
-### LEZ Status (as of 2026-05-20)
-
-The LEZ (L2) does **not** have public endpoints yet. It is deployed on internal staging only (v0.2.0-rc3).
-
-The Logos L1 testnet is live but requires Discord credentials for faucet access:
-- Dashboard: `https://testnet.blockchain.logos.co/web/`
-- Faucet: `https://testnet.blockchain.logos.co/web/faucet/`
-- Explorer: `https://testnet.blockchain.logos.co/web/explorer/`
-- Credentials: request via [Discord](https://discord.com/channels/973324189794697286/1468535289604735038)
-
-### Local Development (Required for Now)
-
-Until LEZ has public endpoints, run a local sequencer using the pre-built Docker image:
-
-```bash
-# Pull the pre-built image (~1 GB download, ~2 minutes)
-docker pull ghcr.io/logos-blockchain/logos-blockchain:devnet
-
-# Run the sequencer
-docker run --rm -p 8080:8080 \
-  -e SEQUENCER_LISTEN_ADDR=0.0.0.0:8080 \
-  -e SEQUENCER_DB_PATH=/data/sequencer.db \
-  -e SEQUENCER_SIGNING_KEY_PATH=/data/sequencer.key \
-  -e SEQUENCER_INITIAL_BALANCE=1000 \
-  -v sequencer-data:/data \
-  --entrypoint /usr/bin/logos-blockchain-demo-sequencer \
-  ghcr.io/logos-blockchain/logos-blockchain:devnet
-
-# Verify it's running (in another terminal)
-curl http://localhost:8080
-```
-
-> **Note:** Building from source (`docker compose up` in the `logos-execution-zone` repo) is NOT recommended — the full LEZ sequencer images are pushed to a private registry and the source build requires significant resources. The demo sequencer in the devnet image provides the same functionality needed for Pilot.
-
-Once running, `pilot deploy --testnet` connects to `localhost:8080`. When LEZ launches publicly, this becomes a config change (URL swap only).
+Expected: 86/86 pass.
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PILOT_LLM_PROVIDER` | LLM provider (`anthropic`, `openai`) | auto-detect |
-| `PILOT_LLM_MODEL` | Model identifier | `claude-sonnet-4-6` / `gpt-4o` |
-| `ANTHROPIC_API_KEY` | Claude API key | — |
-| `OPENAI_API_KEY` | OpenAI-compatible API key | — |
-| `OPENAI_BASE_URL` | Custom endpoint (Ollama, LM Studio) | `https://api.openai.com/v1` |
-| `PILOT_DATA_DIR` | Persistent data directory | `/tmp/pilot-data` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PILOT_DATA_DIR` | `/tmp/pilot-data` | Agent data directory (SQLite, wallet, logs) |
+| `PILOT_SEQUENCER_ADDR` | `http://127.0.0.1:8080` | LEZ sequencer endpoint |
+| `PILOT_WAKU_ADDR` | `/ip4/127.0.0.1/tcp/30303` | Waku static peer |
+| `PILOT_TCP_PORT` | `60000` | Waku relay TCP port |
+| `PILOT_WAKU_MODE` | `Core` | `Core` (full relay) or `Edge` (lightweight) |
+| `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` for WSL |
+| `ANTHROPIC_API_KEY` | — | Anthropic Claude API key |
+| `OPENAI_API_KEY` | — | OpenAI API key |
+| `DEEPSEEK_API_KEY` | — | DeepSeek API key |
+| `GOOGLE_API_KEY` | — | Google Gemini API key (from aistudio.google.com) |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key |
+| `GROQ_API_KEY` | — | Groq API key |
 
-## Verification
+## Data Persistence
 
-```bash
-pilot verify
-```
+All agent data lives in `PILOT_DATA_DIR` (default `/tmp/pilot-data/`):
 
-Generates a human-readable + JSON evidence report: identity, balance, all 21 skills status, peer agents, transaction history.
+| File | Contains | Delete safely? |
+|------|----------|---------------|
+| `pilot.db` | Identity, encryption keys, files, config, LLM settings | NO — loses keys |
+| `.logoscore/daemon/` | Daemon state (PID, tokens) | Yes — recreated on start |
+| `daemon.log` | Module logs | Yes |
+| `wallet_config.json` | Sequencer connection config | Yes — recreated |
+| `wallet_storage/` | Wallet persistent storage | NO — loses wallet |
 
 ## Troubleshooting
 
-**Module fails to load:** Check dependencies in `metadata.json`. The module requires `lez_wallet_module`, `delivery_module`, `storage_module`, `chat_module` to be available.
+**Module fails to load:** Run `./setup-modules.sh` to reinstall all modules.
 
-**LLM not responding:** Verify API key is set (`echo $ANTHROPIC_API_KEY`). Check `pilot status` for LLM configuration.
+**Daemon won't start:** Kill stale processes:
+```bash
+pkill -9 -f logos_host_qt; pkill -9 -f logoscore
+rm -f ~/.cache/storage/dht/providers/LOCK
+rm -rf /tmp/pilot-data/.logoscore/daemon
+```
 
-**Spending approval not received:** Ensure owner channel is established (`/status` shows `owner_channel` is non-empty). Check chat_module is running.
+**LLM not responding:** Check API key is configured:
+```
+> /status
+```
+Look for `LLM` field. If "none", redeploy with `pilot deploy`.
+
+**Upload works but download fails:** The first download initializes the storage module (2-3 seconds). If it times out, try again — subsequent downloads are instant.
+
+**Agent freezes on first message:** The delivery module takes 30-60 seconds to connect to the Waku network on first use. Use slash commands (`/balance`, `/files`) while it warms up — these don't need delivery.
+
+**"unknown CID" on download:** Make sure you're using the CID from `/files`, or download by label: `/download my-label /tmp/file.pdf`.
