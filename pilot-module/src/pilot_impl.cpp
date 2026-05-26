@@ -133,9 +133,14 @@ void PilotImpl::initDependencyModules() {
         staticNodes.append(QString::fromStdString(wakuAddr));
         QJsonObject cfgObj;
         cfgObj["preset"] = QString("logos.dev");
-        cfgObj["mode"] = QString("Core");
+        if (const char* modeEnv = std::getenv("PILOT_WAKU_MODE"))
+            cfgObj["mode"] = QString(modeEnv);
+        else
+            cfgObj["mode"] = QString("Core");
         if (const char* tcpEnv = std::getenv("PILOT_TCP_PORT"))
             cfgObj["tcpPort"] = std::atoi(tcpEnv);
+        if (const char* natEnv = std::getenv("PILOT_NAT"))
+            cfgObj["nat"] = QString(natEnv);
         std::string cfg = QJsonDocument(cfgObj).toJson(QJsonDocument::Compact).toStdString();
         delivery->invokeRemoteMethod("delivery_module", "createNode",
             QString::fromStdString(cfg), Timeout(15000));
