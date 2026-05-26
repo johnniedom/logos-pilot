@@ -22,7 +22,7 @@ static std::string currentTs() {
 
 std::string PilotImpl::storageUpload(const std::string& path, const std::string& label) {
     if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
-    initDependencyModules();
+    initStorageModule();
 
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -103,7 +103,7 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
 
 std::string PilotImpl::storageDownload(const std::string& cid, const std::string& path) {
     if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
-    initDependencyModules();
+    initStorageModule();
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
@@ -206,7 +206,7 @@ std::string PilotImpl::storageList() {
 
 std::string PilotImpl::storageShare(const std::string& cid, const std::string& recipientNpk) {
     if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
-    initDependencyModules();
+    initStorageModule();
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,

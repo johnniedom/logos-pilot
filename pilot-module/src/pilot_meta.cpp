@@ -25,6 +25,7 @@ std::string PilotImpl::metaStatus() {
     root["npk"] = QString::fromStdString(agentNpk_);
     root["account"] = QString::fromStdString(agentAccountId_);
     root["owner_channel"] = QString::fromStdString(ownerChannelId_);
+    root["owner_name"] = QString::fromStdString(ownerName_);
     root["balance"] = QJsonDocument::fromJson(QByteArray::fromStdString(balance)).object();
     root["pending"] = QJsonDocument::fromJson(QByteArray::fromStdString(pending)).object();
 

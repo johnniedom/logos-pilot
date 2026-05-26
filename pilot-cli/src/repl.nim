@@ -92,6 +92,45 @@ proc formatJson(raw: string): string =
         lines.add("  " & f["label"].getStr("?") & "  " & DIM & truncStr(f["cid"].getStr(""), 24) & RESET)
       return lines.join("\n")
 
+    # Upload result
+    if j.hasKey("cid") and j.hasKey("label") and j.hasKey("encrypted"):
+      return GREEN & "  Uploaded" & RESET & "  " & j["label"].getStr() &
+             "\n  " & DIM & "CID  " & RESET & j["cid"].getStr() &
+             "\n  " & DIM & "Encrypted  " & RESET & "yes"
+
+    # Download result
+    if j.hasKey("path") and j.hasKey("decrypted"):
+      return GREEN & "  Downloaded" & RESET & "  " & j["path"].getStr() &
+             "\n  " & DIM & "Decrypted  " & RESET & "yes"
+
+    # Download in progress
+    if j.hasKey("status") and j["status"].getStr() == "downloading":
+      return YELLOW & "  Downloading..." & RESET & "  " & j["cid"].getStr("") &
+             "\n  " & DIM & "File will be available when download completes" & RESET
+
+    # Share result
+    if j.hasKey("shared") and j.hasKey("recipient"):
+      return GREEN & "  Shared" & RESET & "  " & j["cid"].getStr() &
+             "\n  " & DIM & "Recipient  " & RESET & truncStr(j["recipient"].getStr(), 24)
+
+    # Send result
+    if j.hasKey("sent") and j.hasKey("recipient"):
+      return GREEN & "  Message sent" & RESET &
+             "\n  " & DIM & "To  " & RESET & truncStr(j["recipient"].getStr(), 24) &
+             "\n  " & DIM & "Encrypted  " & RESET & "yes"
+
+    # Wallet send result
+    if j.hasKey("tx_hash"):
+      return GREEN & "  Transfer sent" & RESET &
+             "\n  " & DIM & "TX  " & RESET & truncStr(j["tx_hash"].getStr(), 24) &
+             "\n  " & DIM & "Amount  " & RESET & $j["amount"].getInt(0) & " LEZ"
+
+    # Spend request created
+    if j.hasKey("request_id") and j.hasKey("state"):
+      return YELLOW & "  Spend request created" & RESET &
+             "\n  " & DIM & "ID  " & RESET & j["request_id"].getStr() &
+             "\n  " & DIM & "State  " & RESET & j["state"].getStr()
+
   except: discard
   return raw
 
@@ -225,13 +264,18 @@ proc runRepl*(cfg: Config, dataDir: string) =
 
   let accountId = daemonCall(gCfg, "getAccountId")
 
-  var ownerName = daemonCall(gCfg, "metaConfigure", @["owner.name", ""])
-  if ownerName == "" or ownerName == "true":
+  var ownerName = ""
+  let statusRaw = daemonCall(gCfg, "metaStatus")
+  try:
+    let sj = parseJson(statusRaw)
+    ownerName = sj.getOrDefault("owner_name").getStr("")
+  except: discard
+
+  if ownerName == "":
     stdout.write(DIM & "  Your name: " & RESET)
     stdout.flushFile()
-    var nameInput: string
-    discard readLineFromStdin("", nameInput)
-    ownerName = nameInput.strip()
+    var ownerInput = stdin.readLine()
+    ownerName = ownerInput.strip()
     if ownerName != "":
       discard daemonCall(gCfg, "metaConfigure", @["owner.name", ownerName])
 
@@ -240,6 +284,7 @@ proc runRepl*(cfg: Config, dataDir: string) =
     kv("Account", truncStr(accountId, 24))
   if ownerName != "":
     echo DIM & "  Welcome back, " & RESET & BOLD & ownerName & RESET
+
   echo DIM & "  Type /help for commands, or just chat." & RESET
   blankLine()
 

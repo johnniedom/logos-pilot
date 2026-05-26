@@ -12,7 +12,7 @@ static const Timeout OWNER_TIMEOUT(15000);
 
 bool PilotImpl::establishOwnerChannel() {
     if (!logosAPI_ || agentNpk_.empty()) return false;
-    initDependencyModules();
+    initDeliveryModule();
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery || !delivery->isConnected()) return false;
