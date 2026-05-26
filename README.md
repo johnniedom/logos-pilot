@@ -172,7 +172,7 @@ All commands run from `pilot-module/`. Nix flakes must be enabled.
 nix --extra-experimental-features "nix-command flakes" build          # Module binary (.so)
 nix --extra-experimental-features "nix-command flakes" build .#lgx    # Installable package (.lgx)
 nix --extra-experimental-features "nix-command flakes" build .#install       # Module + manifest for logoscore
-nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (20/20)
+nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (44/44)
 nix --extra-experimental-features "nix-command flakes" build .#include       # Module headers (for dependents)
 ```
 
@@ -308,11 +308,130 @@ logoscore call pilot agentCard
 logoscore call pilot agentTask targetNpk wallet-balance "{}"
 ```
 
+## CLI (Pilot Chat)
+
+The Nim-based CLI provides deploy, chat, and management commands:
+
+```bash
+# Build the CLI
+cd pilot-cli && nix build --extra-experimental-features 'nix-command flakes'
+
+# Deploy an agent (creates identity, configures LLM, publishes Agent Card)
+./result/bin/pilot deploy
+
+# Chat with your agent (starts daemon, LLM-powered conversation)
+./result/bin/pilot chat
+
+# Check agent status
+./result/bin/pilot status
+```
+
+Deploy walks you through:
+1. Agent identity creation on the sequencer
+2. LLM provider selection (Anthropic, OpenAI, DeepSeek, Google, OpenRouter, Groq)
+3. Model selection per provider
+4. Owner key binding
+5. Agent Card publication
+
+Chat features:
+- Conversation memory (20 turns)
+- Slash commands (`/balance`, `/send`, `/skills`, `/status`, `/discover`, `/help`)
+- Natural language → action dispatch via LLM
+- Formatted output for skills, balance, status
+- Animated spinner during LLM calls
+
+## Testing (86/86)
+
+### Prerequisites
+
+```bash
+# Terminal 1: Start the sequencer
+./run-sequencer.sh
+
+# Terminal 2: Start the Waku node
+docker-compose up -d
+```
+
+### Suite 1: Unit Tests (44 tests)
+
+Tests crypto, skill registry, LLM factory, and core module behavior. No runtime needed.
+
+```bash
+cd pilot-module
+nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
+# Expected: 44 passed (< 100ms)
+```
+
+### Suite 2: Single-Agent Integration (28 tests)
+
+Tests all 28 methods across phases 1-5 against a live sequencer.
+
+```bash
+# Requires: sequencer running on port 8080, modules installed
+./setup-modules.sh   # one-time: installs all modules from nix cache
+./test-phases.sh     # runs all 28 tests
+```
+
+Tests cover:
+- Phase 1: Identity + Wallet (initialize, NPK, account, balance, history)
+- Phase 2: Owner Channel (establish, get ID, send)
+- Phase 3: Spending FSM (limits, create/approve/reject, send)
+- Phase 4: Storage (upload, list, download, share)
+- Phase 4: Messaging (send, join, create group)
+- Phase 5: A2A (card, discover, task, subscribe, cancel)
+- Meta: skills, status, configure
+
+### Suite 3: Two-Agent Integration (14 tests)
+
+Tests cross-agent communication with Agent A on host and Agent B in Docker.
+
+```bash
+# Requires: sequencer + Waku node running, Docker available
+./test-two-agents-docker.sh   # runs all 14 tests
+```
+
+Tests cover:
+- Both agents create unique identities on the sequencer
+- Agent A publishes Agent Card, Agent B discovers it via Waku store
+- Bidirectional encrypted messaging (A→B and B→A)
+- Storage upload + encrypted file key sharing
+- Full A2A task lifecycle (send task, subscribe, cancel)
+- Cross-agent wallet transfer
+
+Docker setup (no installation required):
+- Agent B runs in `ubuntu:22.04` container with `/nix/store` mounted read-only
+- Isolated network namespace eliminates port conflicts
+- `host.docker.internal` bridges to host sequencer and Waku node
+
+### Running All Suites
+
+```bash
+# 1. Unit tests
+cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
+
+# 2. Single-agent (sequencer must be running)
+cd .. && ./test-phases.sh
+
+# 3. Two-agent Docker (sequencer + Waku must be running)
+pkill -9 -f logos_host_qt; pkill -9 -f logoscore   # clean up suite 2
+rm -f ~/.cache/storage/dht/providers/LOCK
+./test-two-agents-docker.sh
+```
+
+| Suite | Tests | Time |
+|-------|-------|------|
+| Unit tests | 44 | ~8 min (build) + <1s (run) |
+| Single-agent | 28 | ~3 min |
+| Two-agent Docker | 14 | ~3 min |
+| **Total** | **86** | **~14 min** |
+
 ## Known Limitations
 
-- `chat_module` has empty callMethod dispatch — owner channel uses `delivery_module` with ECIES encryption instead
+- **Storage download is async** — `downloadChunks` returns a session ID; data arrives via events. Synchronous callers get a "downloading" status.
+- **Two storage modules can't coexist** — global LevelDB cache at `~/.cache/storage/`. Multi-agent needs separate machines or Docker.
+- **NAT detection in WSL** — delivery module spends 12s probing for UPnP/NAT-PMP gateways that don't exist. Set `PILOT_NAT=extip:127.0.0.1` to skip.
+- **Qt RO Timeout doesn't cancel FFI** — `Timeout(15000)` returns null to caller but the remote C call keeps running.
 - `programCall`/`programQuery` — wallet-ffi v0.1 does not expose program methods (LEZ v0.2.0-rc3 feature)
-- Storage download requires peer network — local-only node can upload but not serve data back
 - RISC0 proof generation requires `RISC0_DEV_MODE=0` only when a SPEL guest binary exists
 
 ## License
