@@ -200,7 +200,7 @@ proc dispatchSlash(cfg: Config, input: string): string =
             cid = f["cid"].getStr()
             break
       except: discard
-    return formatJson(daemonCall(cfg, "storageDownload", @[cid, parts[2]]))
+    return formatJson(daemonCallWithSpinner(cfg, "storageDownload", @[cid, parts[2]], timeoutSec = 45, label = "Downloading"))
   of "/approve":
     if parts.len < 2:
       return RED & "  usage: /approve <id>" & RESET
