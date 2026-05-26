@@ -100,5 +100,6 @@ private:
     int64_t spendPeriodSeconds_ = 86400;
     std::string dataDir_;
     bool initialized_ = false;
+    bool depsInitialized_ = false;
     std::vector<std::pair<std::string,std::string>> chatHistory_;
 };
