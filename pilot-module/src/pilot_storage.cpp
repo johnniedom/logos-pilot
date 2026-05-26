@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 #include <fstream>
 #include <chrono>
+#include <thread>
 #include <cstring>
 #include <QString>
 #include <QVariant>
@@ -140,9 +141,16 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
         downloadedData = lr.value.toString().toStdString();
     }
 
+    // Poll for async download to complete (max 30s)
+    for (int i = 0; i < 60; i++) {
+        std::ifstream check(tmpPath, std::ios::binary | std::ios::ate);
+        if (check.is_open() && check.tellg() > 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
     std::ifstream encFile(tmpPath, std::ios::binary);
-    if (!encFile.is_open() && downloadedData.empty())
-        return "{\"error\": \"download failed: no data returned\"}";
+    if (!encFile.is_open())
+        return "{\"error\": \"download timed out — file not received from network\"}";
     std::string encContent((std::istreambuf_iterator<char>(encFile)),
                             std::istreambuf_iterator<char>());
     encFile.close();
@@ -150,13 +158,8 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
 
     AESKey fileKey = aesKeyFromHex(keyHex);
     std::vector<uint8_t> encBytes(encContent.begin(), encContent.end());
-    if (encBytes.empty()) {
-        QJsonObject res;
-        res["status"] = QString("downloading");
-        res["cid"] = QString::fromStdString(cid);
-        res["note"] = QString("download is async — file will be available via storageDownloadDone event");
-        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
-    }
+    if (encBytes.empty())
+        return "{\"error\": \"download failed — empty file received\"}";
 
     std::vector<uint8_t> decrypted;
     try {
