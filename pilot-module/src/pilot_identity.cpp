@@ -21,7 +21,6 @@ bool PilotImpl::initialize(const std::string& dataDir) {
 
     initDatabase(dataDir);
     initLLM();
-    initDependencyModules();
 
     if (loadIdentity()) {
         initialized_ = true;

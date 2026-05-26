@@ -3,6 +3,7 @@
 #include "pilot_skill.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "logos_mode.h"
 #include "logos_object.h"
 #include "pilot_crypto.h"
 #include <sqlite3.h>
@@ -107,13 +108,15 @@ static bool waitForConnection(LogosAPIClient* client, int maxMs = 5000) {
 }
 
 void PilotImpl::initDependencyModules() {
-    if (!logosAPI_) return;
+    if (!logosAPI_ || depsInitialized_) return;
+    depsInitialized_ = true;
 
     auto* storage = logosAPI_->getClient("storage_module");
     if (waitForConnection(storage)) {
         storage->invokeRemoteMethod("storage_module", "init",
-            QString("{\"nat\":\"none\"}"));
-        storage->invokeRemoteMethod("storage_module", "start");
+            QString("{\"nat\":\"none\"}"), Timeout(10000));
+        storage->invokeRemoteMethod("storage_module", "start",
+            QVariantList{}, Timeout(10000));
     }
 
     std::string wakuAddr;
@@ -128,14 +131,19 @@ void PilotImpl::initDependencyModules() {
         for (int i = 0; i < 8; i++) shards.append(i);
         QJsonArray staticNodes;
         staticNodes.append(QString::fromStdString(wakuAddr));
+        int discPort = 9000;
+        if (const char* dpEnv = std::getenv("PILOT_DISC_PORT"))
+            discPort = std::atoi(dpEnv);
         QJsonObject cfgObj;
         cfgObj["clusterId"] = 2;
         cfgObj["shards"] = shards;
         cfgObj["staticNodes"] = staticNodes;
+        cfgObj["disc-port"] = discPort;
         std::string cfg = QJsonDocument(cfgObj).toJson(QJsonDocument::Compact).toStdString();
         delivery->invokeRemoteMethod("delivery_module", "createNode",
-            QString::fromStdString(cfg));
-        delivery->invokeRemoteMethod("delivery_module", "start");
+            QString::fromStdString(cfg), Timeout(15000));
+        delivery->invokeRemoteMethod("delivery_module", "start",
+            QVariantList{}, Timeout(15000));
 
         LogosObject* deliveryObj = delivery->requestObject("delivery_module");
         if (deliveryObj) {
