@@ -262,6 +262,112 @@ All providers except Anthropic route through the OpenAI-compatible chat completi
 
 `putEnv()` in the CLI process does NOT affect the `logos_host_qt` module process. To pass env vars to the module, use `metaConfigure("llm.api_key", key)` which calls `setenv()` inside the module process and stores the key in SQLite for restart persistence.
 
+## Lazy Dependency Initialization
+
+`initDependencyModules()` configures storage_module (`init` + `start`) and delivery_module (`createNode` + `start`). This can block for 30+ seconds (delivery NAT detection + peer dialing).
+
+**Do NOT call in `initialize()`.** Identity creation only needs the wallet module. Call `initDependencyModules()` lazily on first use:
+
+```cpp
+std::string PilotImpl::storageUpload(...) {
+    if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
+    initDependencyModules();  // runs once, skips if depsInitialized_
+    // ... rest of method
+}
+```
+
+Methods that need lazy init: `storageUpload`, `storageDownload`, `storageShare`, `messagingSend`, `establishOwnerChannel`.
+
+The `depsInitialized_` flag ensures it only runs once. Subsequent calls skip immediately.
+
+## Running Two Agents Locally
+
+Two agents on the same machine require network isolation because:
+- `storage_module` uses a global LevelDB cache (`~/.cache/storage/`) — only one instance per machine
+- `delivery_module` binds TCP port 60000 — two Core-mode nodes conflict
+
+### Docker approach (recommended)
+
+Agent A runs on the host. Agent B runs in a Docker container with its own network namespace.
+
+```bash
+# Prepare modules for Agent B (no storage_module)
+MODULES_B=/tmp/pilot-logoscore/modules-b
+mkdir -p $MODULES_B
+for m in capability_module lez_wallet_module delivery_module chat_module pilot; do
+  cp -r /tmp/pilot-logoscore/modules/$m $MODULES_B/$m
+done
+
+# Start Agent B in Docker
+docker run --rm -d \
+  --name pilot-agent-b \
+  -v /nix/store:/nix/store:ro \
+  -v $MODULES_B:/modules:ro \
+  -v /tmp/agent-b:/data \
+  -e LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f | head -1) \
+  -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:8080 \
+  -e PILOT_WAKU_ADDR=/ip4/host.docker.internal/tcp/30303 \
+  --add-host=host.docker.internal:host-gateway \
+  ubuntu:22.04 \
+  $(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f | head -1) \
+  --config-dir /data/.logoscore -D -m /modules
+
+# Load modules
+LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f | head -1)
+for m in capability_module lez_wallet_module delivery_module pilot; do
+  docker exec pilot-agent-b $LOGOSCORE --config-dir /data/.logoscore load-module $m
+done
+
+# Initialize
+docker exec pilot-agent-b $LOGOSCORE --config-dir /data/.logoscore call pilot initialize /data
+
+# Interact
+docker exec pilot-agent-b $LOGOSCORE --config-dir /data/.logoscore call pilot getAgentNpk
+```
+
+Key points:
+- `/nix/store` mounted read-only — no Nix installation needed in container
+- `ubuntu:22.04` provides compatible glibc for Nix binaries
+- `host.docker.internal` reaches the host's sequencer and Waku node
+- Agent B gets its own port 60000 (isolated network namespace)
+
+### Environment variables for multi-agent
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PILOT_TCP_PORT` | 60000 | Waku relay TCP port |
+| `PILOT_WAKU_MODE` | Core | `Core` (full relay) or `Edge` (lightweight) |
+| `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` to skip detection in WSL |
+| `PILOT_WAKU_ADDR` | /ip4/127.0.0.1/tcp/30303 | Static Waku peer address |
+| `PILOT_SEQUENCER_ADDR` | http://127.0.0.1:8080 | LEZ sequencer endpoint |
+
+### Running the two-agent test
+
+Prerequisites: sequencer running (`./run-sequencer.sh`), Waku node running (`docker-compose up -d`), modules installed (`./setup-modules.sh`).
+
+```bash
+# Full automated test
+./test-two-agents-docker.sh
+
+# Expected: 14/14 pass
+```
+
+## Running Tests
+
+### Test suites
+
+```bash
+# Unit tests (44 tests, no runtime needed)
+cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
+
+# Single-agent integration (28 tests, needs sequencer)
+./run-sequencer.sh  # in another terminal
+./test-phases.sh
+
+# Two-agent integration (14 tests, needs sequencer + Docker)
+./test-two-agents-docker.sh
+```
+
 ## Linking SQLite
 
 If your module uses SQLite, declaring it in `metadata.json` under `find_packages` is NOT enough. You must also link it in CMakeLists.txt:
