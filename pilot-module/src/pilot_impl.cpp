@@ -131,14 +131,11 @@ void PilotImpl::initDependencyModules() {
         for (int i = 0; i < 8; i++) shards.append(i);
         QJsonArray staticNodes;
         staticNodes.append(QString::fromStdString(wakuAddr));
-        int discPort = 9000;
-        if (const char* dpEnv = std::getenv("PILOT_DISC_PORT"))
-            discPort = std::atoi(dpEnv);
         QJsonObject cfgObj;
-        cfgObj["clusterId"] = 2;
-        cfgObj["shards"] = shards;
-        cfgObj["staticNodes"] = staticNodes;
-        cfgObj["disc-port"] = discPort;
+        cfgObj["preset"] = QString("logos.dev");
+        cfgObj["mode"] = QString("Core");
+        if (const char* tcpEnv = std::getenv("PILOT_TCP_PORT"))
+            cfgObj["tcpPort"] = std::atoi(tcpEnv);
         std::string cfg = QJsonDocument(cfgObj).toJson(QJsonDocument::Compact).toStdString();
         delivery->invokeRemoteMethod("delivery_module", "createNode",
             QString::fromStdString(cfg), Timeout(15000));
