@@ -714,7 +714,7 @@ dmesg: .logoscore-wrap[28190]: segfault at 60 ip 000072ea8536ed19 sp 00007ffdf07
 
 Correct depth for binary discovery is **3**. Pattern: `find /nix/store -maxdepth 3 -name <binary> -path "*<package-pattern>*" -type f`.
 
-### End-to-End Validation
+### End-to-End Validation (Single Agent)
 
 Successfully tested full deploy → chat flow:
 
@@ -727,3 +727,181 @@ pilot chat   → daemon connects → identity restored → LLM responds
 ```
 
 44 unit tests passing. All modules load without segfault when `isConnected()` guard is in place.
+
+---
+
+## Integration Findings — 2026-05-26 (Phase 6)
+
+Full phase integration testing and two-agent cross-network testing.
+
+### Single-Agent Phase Testing (28/28)
+
+Ran `test-phases.sh` against a live sequencer. All 28 methods pass across all phases.
+
+| Phase | Methods | Result |
+|-------|---------|--------|
+| Phase 1: Identity + Wallet | initialize, getAgentNpk, getAccountId, walletBalance, walletHistory | 5/5 |
+| Phase 2: Owner Channel | establishOwnerChannel, getOwnerChannelId, sendToOwner | 3/3 |
+| Phase 3: Spending FSM | setSpendingLimits, createSpendRequest, getPendingSpends, approveSpend, walletSend | 5/5 |
+| Phase 4: Storage | storageUpload, storageList, storageDownload, storageShare | 4/4 |
+| Phase 4: Messaging | messagingSend, messagingJoin, messagingCreateGroup | 3/3 |
+| Phase 5: A2A Transport | agentCard, agentDiscover, agentTask, agentSubscribe, agentCancel | 5/5 |
+| Meta | metaSkills, metaStatus, metaConfigure | 3/3 |
+
+### Bugs Found During Phase Testing
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| `storageDownload` "Chunk size cannot be zero or negative" | Wrong argument order: `downloadChunks(cid, true, 0, path)` — third arg is chunkSize, not offset | Changed to `downloadChunks(cid, false, 65536, path)` |
+| `storageShare` crashes module with `std::stoi` | `eciesEncrypt` received full JSON NPK instead of hex viewing key | Extract `viewing_public_key` from JSON; validate hex in `hexToBytes` |
+| `agentDiscover` empty/timeout | Called non-existent `waku_module`; delivery_module wraps Waku | Route `storeQuery` through `delivery_module`; add SQLite agent cache |
+| `agentTask/Subscribe/Cancel` crash daemon | No `isConnected()` check, no RPC timeout; blocking call freezes module | Added `isConnected()` + `Timeout(15000)` on all A2A delivery calls |
+| `initialize` returns false (null = 0 bug) | `wallet->open()` returns null on timeout; `QVariant::toInt()` on null = 0, treated as success | Check `!openResult.isNull()` before trusting `toInt()` |
+| `hexToBytes` crash on non-hex input | `std::stoi` throws on `{`, `"`, etc. from JSON strings | Validate all chars are hex before parsing; return empty on invalid |
+| `eciesEncrypt` crash on invalid key | Empty bytes from bad hex passed to OpenSSL | Throw `std::invalid_argument`; callers catch and return error JSON |
+| `processOwnerMessage` silent LLM failure | LLM returned `{"error":"..."}` which passed `response.empty()` check | Check for `"error"` in response; show actual error message |
+| All ECIES callers crash on JSON keys | NPK stored as raw wallet JSON, not extracted hex key | Added `agentViewingKey_` field; extract `viewing_public_key` from JSON everywhere |
+
+### NPK Key Format
+
+The wallet module's `get_private_account_keys` returns JSON:
+```json
+{
+  "nullifier_public_key": "72246aacf616...",   // on-chain identity hash
+  "viewing_public_key": "0230d6a870e141..."    // secp256k1 compressed pubkey for encryption
+}
+```
+
+`nullifier_public_key` = identity (used for on-chain lookups)
+`viewing_public_key` = encryption key (used for ECIES encrypt/decrypt)
+
+All ECIES operations must use `viewing_public_key`. The full JSON must never be passed directly to `eciesEncrypt`.
+
+### Lazy Dependency Initialization
+
+`initDependencyModules()` configures storage_module and delivery_module (createNode + start). Originally called during `initialize()`, this blocked for 2+ minutes when delivery did NAT detection.
+
+**Solution:** Removed from `initialize()`. Added `depsInitialized_` flag. Called lazily on first use by: `storageUpload`, `storageDownload`, `storageShare`, `messagingSend`, `establishOwnerChannel`.
+
+Benefits:
+- `initialize()` returns in <5 seconds (wallet only)
+- Delivery module initializes on first messaging/A2A call
+- `depsInitialized_` prevents re-initialization
+
+### Storage Module API Corrections
+
+The storage module uses a three-phase upload and async download:
+
+**Upload (synchronous):**
+```
+uploadInit(label) → sessionId
+uploadChunk(sessionId, QByteArray) → void
+uploadFinalize(sessionId) → cid
+```
+
+**Download (asynchronous):**
+```
+downloadChunks(cid, local=false, chunkSize=65536, filepath="") → sessionId
+// Data delivered via storageDownloadProgress / storageDownloadDone events
+```
+
+`downloadChunks` returns immediately with a session ID. The actual data arrives via events. Our synchronous handler checks if the file was written; if empty, returns `{"status":"downloading"}`.
+
+### Delivery Module Configuration
+
+The delivery module wraps Waku (liblogosdelivery). Key `createNode` config fields:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `preset` | string | `""` | `"logos.dev"` auto-configures cluster 2 + bootstrap nodes |
+| `mode` | string | `"noMode"` | `"Core"` (full relay) or `"Edge"` (lightweight client) |
+| `tcpPort` | uint16 | `60000` | P2P TCP listen port |
+| `clusterId` | uint16 | `0` | Network cluster ID |
+| `logLevel` | string | `"INFO"` | Log verbosity |
+
+**NAT detection:** Core mode runs UPnP (8s) + NAT-PMP (4s) detection. In WSL/Docker where there's no real NAT gateway, this wastes 12+ seconds. Use `"nat": "extip:127.0.0.1"` to skip detection (note: `"none"` is NOT valid for delivery, unlike storage).
+
+**Port conflicts:** Two delivery modules on the same machine both bind TCP 60000. Solutions:
+- Different `tcpPort` per agent via `PILOT_TCP_PORT` env var
+- Docker container with isolated network namespace
+- Edge mode for second agent (no relay port binding)
+
+### Two-Agent Integration Testing (14/14)
+
+Ran `test-two-agents-docker.sh` with Agent A on host and Agent B in Docker container.
+
+**Architecture:**
+```
+┌─────────────────────────────┐     ┌─────────────────────────────┐
+│     WSL Host                │     │     Docker Container        │
+│                             │     │                             │
+│  Agent A (logoscore daemon) │◄───►│  Agent B (logoscore daemon) │
+│  - All modules loaded       │     │  - No storage_module        │
+│  - TCP 60000 (relay)        │     │  - Own TCP 60000 (isolated) │
+│  - Sequencer on :8080       │     │  - Reaches host via gateway │
+│                             │     │  - /nix/store mounted :ro   │
+└─────────────────────────────┘     └─────────────────────────────┘
+         │                                      │
+         └──────────┬───────────────────────────┘
+                    │
+         ┌──────────▼──────────┐
+         │   Waku Network      │
+         │  (pilot-nwaku:30303)│
+         │  + Logos Dev Peers  │
+         └─────────────────────┘
+```
+
+**Docker setup (no installation required):**
+- Mount `/nix/store` read-only — all Nix binaries available in container
+- `ubuntu:22.04` base image provides compatible glibc
+- `--add-host=host.docker.internal:host-gateway` for sequencer access
+- Separate modules directory without storage_module (LevelDB lock conflict)
+
+**Results:**
+
+| Test | Result | Notes |
+|------|--------|-------|
+| [A] initialize | PASS | Creates unique wallet + identity on sequencer |
+| [B] initialize | PASS | Different wallet name (hash of dataDir) → unique identity |
+| [A] getAgentNpk | PASS | e97a64fc... |
+| [B] getAgentNpk | PASS | eb2860c0... (different from A) |
+| [A] publishes Agent Card | PASS | Published to /pilot/1/discovery/proto |
+| [B] discovers agents | PASS | Found A's card via Waku store query (10s propagation wait) |
+| [A→B] messagingSend | PASS | Encrypted with B's viewing_public_key |
+| [B→A] messagingSend | PASS | Encrypted with A's viewing_public_key (Docker delivery has own port) |
+| [A] uploads file | PASS | Encrypted + stored via storage_module |
+| [A→B] shares file key | PASS | File key encrypted with B's viewing key, sent via delivery |
+| [B→A] sends task | PASS | JSON-RPC task request to A's inbox topic |
+| [B] subscribes to task | PASS | Subscribed to task status topic |
+| [B] cancels task | PASS | Cancel request sent + unsubscribed |
+| [A→B] walletSend | PASS | Token transfer via sequencer |
+
+### Platform Limitations Documented
+
+| Limitation | Impact | Workaround |
+|-----------|--------|-----------|
+| Storage module global LevelDB cache (`~/.cache/storage/`) | Two storage_modules can't coexist on same machine | Separate modules dir for Agent B without storage_module |
+| Delivery module TCP port 60000 hardcoded default | Two Core-mode delivery modules conflict | Docker for network isolation, or Edge mode + tcpPort override |
+| NAT detection (UPnP/NAT-PMP) in WSL | 12+ second delay on every delivery startup | `extip:127.0.0.1` NAT config skips detection |
+| `downloadChunks` is async | Synchronous callers can't get file data immediately | Return "downloading" status; file available via event |
+| Qt Remote Objects `Timeout` doesn't cancel in-flight FFI | Synchronous C calls run past the timeout | Set timeouts on all RPC calls; don't block initialize on slow modules |
+
+### Environment Variables for Multi-Agent Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PILOT_TCP_PORT` | 60000 | Waku relay TCP port |
+| `PILOT_WAKU_MODE` | Core | `Core` (full relay) or `Edge` (lightweight) |
+| `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` to skip detection |
+| `PILOT_WAKU_ADDR` | /ip4/127.0.0.1/tcp/30303 | Static Waku peer address |
+| `PILOT_SEQUENCER_ADDR` | http://127.0.0.1:8080 | LEZ sequencer endpoint |
+| `PILOT_DATA_DIR` | /tmp/pilot-data | Agent data directory |
+
+### Final Test Matrix
+
+| Suite | Tests | Pass | Fail |
+|-------|-------|------|------|
+| Unit tests (`nix build .#unit-tests`) | 44 | 44 | 0 |
+| Single-agent (`test-phases.sh`) | 28 | 28 | 0 |
+| Two-agent Docker (`test-two-agents-docker.sh`) | 14 | 14 | 0 |
+| **Total** | **86** | **86** | **0** |
