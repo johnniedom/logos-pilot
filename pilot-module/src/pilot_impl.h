@@ -86,6 +86,7 @@ private:
     std::unique_ptr<LLMProvider> llm_;
     std::unique_ptr<SkillRegistry> registry_;
     std::string agentNpk_;
+    std::string agentViewingKey_;
     std::string agentAccountId_;
     std::string ownerChannelId_;
     std::string ownerNpk_;

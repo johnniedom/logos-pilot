@@ -123,8 +123,8 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     QVariant result = storage->invokeRemoteMethod(
         "storage_module", "downloadChunks",
         QString::fromStdString(cid),
-        QVariant(true),
-        QVariant(0),
+        QVariant(false),
+        QVariant(65536),
         QString::fromStdString(tmpPath));
 
     std::string downloadedData;
@@ -148,7 +148,22 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
 
     AESKey fileKey = aesKeyFromHex(keyHex);
     std::vector<uint8_t> encBytes(encContent.begin(), encContent.end());
-    std::vector<uint8_t> decrypted = aesDecrypt(encBytes, fileKey);
+    if (encBytes.empty()) {
+        QJsonObject res;
+        res["status"] = QString("downloading");
+        res["cid"] = QString::fromStdString(cid);
+        res["note"] = QString("download is async — file will be available via storageDownloadDone event");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
+
+    std::vector<uint8_t> decrypted;
+    try {
+        decrypted = aesDecrypt(encBytes, fileKey);
+    } catch (const std::exception& e) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString(std::string("decryption failed: ") + e.what());
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
 
     std::ofstream outFile(path, std::ios::binary);
     if (!outFile.is_open())
@@ -203,13 +218,26 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
     std::string keyHex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     sqlite3_finalize(stmt);
 
+    std::string recipientKey = recipientNpk;
+    QJsonDocument recipientDoc = QJsonDocument::fromJson(QByteArray::fromStdString(recipientNpk));
+    if (recipientDoc.isObject() && recipientDoc.object().contains("viewing_public_key"))
+        recipientKey = recipientDoc.object()["viewing_public_key"].toString().toStdString();
+
     QJsonObject shareObj;
     shareObj["cid"] = QString::fromStdString(cid);
     shareObj["key"] = QString::fromStdString(keyHex);
     std::string sharePayload = QJsonDocument(shareObj).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(sharePayload.begin(), sharePayload.end());
-    ECIESCiphertext encrypted = eciesEncrypt(recipientNpk, plainBytes);
-    std::string encPayload = eciesSerialize(encrypted);
+
+    std::string encPayload;
+    try {
+        ECIESCiphertext encrypted = eciesEncrypt(recipientKey, plainBytes);
+        encPayload = eciesSerialize(encrypted);
+    } catch (const std::exception& e) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString(std::string("encryption failed: ") + e.what());
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
 
     std::string topic = "/pilot/1/inbox-" + recipientNpk + "/proto";
 

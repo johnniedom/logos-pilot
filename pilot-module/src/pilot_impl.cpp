@@ -81,6 +81,13 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS discovered_agents (
+            npk TEXT PRIMARY KEY,
+            card_json TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        );
     )SQL";
 
     char* errMsg = nullptr;
