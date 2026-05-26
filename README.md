@@ -6,33 +6,76 @@ A Logos Core module that runs an autonomous AI agent with native access to the f
 
 ## Quick Start
 
+Prerequisites: Nix with flakes enabled, Docker installed.
+
+### Step 1: Build everything
+
 ```bash
-# Prerequisites: Nix with flakes enabled
+# Build the C++ module + unit tests
 cd pilot-module
+nix build --extra-experimental-features 'nix-command flakes'
+nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
+nix build .#lgx --extra-experimental-features 'nix-command flakes' -o result-lgx
 
-# 1. Build the module
-nix --extra-experimental-features "nix-command flakes" build
-
-# 2. Verify the module loads (shows all 36 methods)
-lm result/lib/pilot_plugin.so
-
-# 3. Run unit tests (44/44)
-nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L
-
-# 4. Build the installable .lgx package
-nix --extra-experimental-features "nix-command flakes" build .#lgx
-# Output: result/logos-pilot-module-lib.lgx
-
-# 5. Install into Logos Basecamp
-lgpm install --file result/logos-pilot-module-lib.lgx --allow-unsigned
+# Build the CLI
+cd ../pilot-cli
+nix build --extra-experimental-features 'nix-command flakes'
+cd ..
 ```
 
-Or run the automated demo:
+### Step 2: Start infrastructure
 
 ```bash
-cd ..
-./demo.sh
+# Terminal 1: Start the LEZ sequencer
+./run-sequencer.sh
+
+# Terminal 2: Start the Waku node
+docker-compose up -d
 ```
+
+### Step 3: Install modules
+
+```bash
+# Installs pilot + all dependency modules from nix cache
+./setup-modules.sh
+```
+
+### Step 4: Deploy and chat
+
+```bash
+# Deploy: creates identity, selects LLM, publishes Agent Card
+./pilot-cli/result/bin/pilot deploy
+
+# Chat: starts daemon, LLM-powered conversation
+./pilot-cli/result/bin/pilot chat
+```
+
+### Step 5: Run all tests (86/86)
+
+```bash
+# Unit tests (44) — no runtime needed
+cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L && cd ..
+
+# Single-agent integration (28) — needs sequencer
+./test-phases.sh
+
+# Two-agent Docker (14) — needs sequencer + Docker
+pkill -9 -f logos_host_qt; pkill -9 -f logoscore
+rm -f ~/.cache/storage/dht/providers/LOCK
+./test-two-agents-docker.sh
+```
+
+### Scripts reference
+
+| Script | When to run | What it does |
+|--------|------------|--------------|
+| `run-sequencer.sh` | First | Starts LEZ sequencer in Docker on port 8080 |
+| `docker-compose up -d` | First | Starts Waku node on port 30303 |
+| `setup-modules.sh` | After build | Installs all modules from nix cache to `/tmp/pilot-logoscore/modules` |
+| `demo.sh` | Anytime | Automated demo: build + verify + smoke test |
+| `test-phases.sh` | After setup | 28 single-agent integration tests |
+| `test-two-agents-docker.sh` | After setup | 14 two-agent cross-network tests |
+| `install-basecamp.sh` | For GUI | Installs pilot into Logos Basecamp |
 
 ## What It Does
 
