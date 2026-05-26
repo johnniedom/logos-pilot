@@ -248,9 +248,18 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "download":
     let p = action.getOrDefault("params")
     if not p.isNil and p.kind == JObject:
+      var cid = p.getOrDefault("cid").getStr(p.getOrDefault("label").getStr(""))
+      if cid != "" and not cid.startsWith("z"):
+        let filesRaw = daemonCall(cfg, "storageList")
+        try:
+          let fj = parseJson(filesRaw)
+          for f in fj["files"]:
+            if f["label"].getStr() == cid:
+              cid = f["cid"].getStr()
+              break
+        except: discard
       return formatJson(daemonCall(cfg, "storageDownload",
-        @[p.getOrDefault("cid").getStr(p.getOrDefault("label").getStr("")),
-          p.getOrDefault("path").getStr("/tmp/download")]))
+        @[cid, p.getOrDefault("path").getStr("/tmp/download")]))
   of "reject":
     let id = action{"params", "id"}.getStr("")
     if id != "": return daemonCall(cfg, "rejectSpend", @[id])
