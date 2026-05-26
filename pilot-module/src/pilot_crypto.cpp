@@ -18,7 +18,16 @@ static std::string bytesToHex(const std::vector<uint8_t>& data) {
     return ss.str();
 }
 
+static bool isHexString(const std::string& s) {
+    if (s.empty() || s.size() % 2 != 0) return false;
+    for (char c : s)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return false;
+    return true;
+}
+
 static std::vector<uint8_t> hexToBytes(const std::string& hex) {
+    if (!isHexString(hex)) return {};
     std::vector<uint8_t> out;
     out.reserve(hex.size() / 2);
     for (size_t i = 0; i + 1 < hex.size(); i += 2) {
@@ -133,6 +142,8 @@ ECIESKeypair generateECIESKeypair() {
 ECIESCiphertext eciesEncrypt(const std::string& recipientNpk,
                               const std::vector<uint8_t>& plaintext) {
     std::vector<uint8_t> recipientPub = hexToBytes(recipientNpk);
+    if (recipientPub.empty())
+        throw std::invalid_argument("invalid recipient key: not a hex string");
 
     EVP_PKEY_CTX* paramCtx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
     EVP_PKEY_keygen_init(paramCtx);

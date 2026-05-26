@@ -3,17 +3,26 @@
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include "logos_mode.h"
+#include <sqlite3.h>
 #include <sstream>
 #include <chrono>
 #include <random>
 
-static const Timeout RPC_TIMEOUT(15000);
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QByteArray>
+
+static const Timeout RPC_TIMEOUT(15000);
+
+static std::string extractEncryptionKey(const std::string& addr) {
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(addr));
+    if (doc.isObject() && doc.object().contains("viewing_public_key"))
+        return doc.object()["viewing_public_key"].toString().toStdString();
+    return addr;
+}
 
 static std::string genUuid() {
     std::random_device rd;
@@ -142,39 +151,79 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
         ? "/pilot/1/discovery/proto"
         : "/pilot/1/discovery-" + topic + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
+    QJsonArray agents;
 
-    if (!delivery->isConnected()) return "{\"error\": \"delivery module not connected\"}";
-
-    QVariant subResult = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
-    if (subResult.isNull())
-        return "{\"error\": \"subscribe failed\"}";
-
-    auto* waku = logosAPI_->getClient("waku_module");
-    if (!waku || !waku->isConnected()) {
-        QJsonObject res;
-        res["agents"] = QJsonArray();
-        res["note"] = QString("waku module unavailable — discovery requires waku_module");
-        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    // 1. Check local cache first
+    if (db_) {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_,
+            "SELECT npk, card_json FROM discovered_agents WHERE topic = ? ORDER BY last_seen DESC;",
+            -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, discoveryTopic.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string cardStr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            QJsonDocument cardDoc = QJsonDocument::fromJson(QByteArray::fromStdString(cardStr));
+            if (cardDoc.isObject())
+                agents.append(cardDoc.object());
+        }
+        sqlite3_finalize(stmt);
     }
 
-    QVariant storeResult = waku->invokeRemoteMethod(
-        "waku_module", "storeQuery",
-        QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
+    // 2. Try network discovery via delivery_module
+    auto* delivery = logosAPI_->getClient("delivery_module");
+    if (delivery && delivery->isConnected()) {
+        delivery->invokeRemoteMethod(
+            "delivery_module", "subscribe",
+            QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
 
-    if (storeResult.isNull()) {
-        QJsonObject res;
-        res["agents"] = QJsonArray();
-        res["note"] = QString("store query failed, listening for live cards");
-        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+        QVariant storeResult = delivery->invokeRemoteMethod(
+            "delivery_module", "storeQuery",
+            QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
+
+        if (!storeResult.isNull()) {
+            QJsonDocument netDoc = QJsonDocument::fromJson(storeResult.toString().toUtf8());
+            QJsonArray netAgents = netDoc.isArray() ? netDoc.array() : QJsonArray();
+
+            // 3. Cache network results in SQLite
+            auto now = std::chrono::system_clock::now();
+            std::string ts = std::to_string(
+                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+
+            for (const auto& val : netAgents) {
+                if (!val.isObject()) continue;
+                QJsonObject agentCard = val.toObject();
+                QString npk = agentCard["name"].toString();
+                if (npk.isEmpty()) continue;
+
+                std::string cardJson = QJsonDocument(agentCard).toJson(QJsonDocument::Compact).toStdString();
+                if (db_) {
+                    sqlite3_stmt* ins = nullptr;
+                    sqlite3_prepare_v2(db_,
+                        "INSERT OR REPLACE INTO discovered_agents (npk, card_json, topic, last_seen) VALUES (?, ?, ?, ?);",
+                        -1, &ins, nullptr);
+                    sqlite3_bind_text(ins, 1, npk.toStdString().c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 2, cardJson.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 3, discoveryTopic.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 4, ts.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(ins);
+                    sqlite3_finalize(ins);
+                }
+
+                bool found = false;
+                for (const auto& existing : agents)
+                    if (existing.toObject()["name"] == agentCard["name"]) { found = true; break; }
+                if (!found)
+                    agents.append(agentCard);
+            }
+        }
     }
 
     QJsonObject res;
-    QJsonDocument agentsDoc = QJsonDocument::fromJson(storeResult.toString().toUtf8());
-    res["agents"] = agentsDoc.isArray() ? QJsonValue(agentsDoc.array()) : QJsonValue(storeResult.toString());
+    res["agents"] = agents;
+    res["count"] = agents.size();
+    res["topic"] = QString::fromStdString(discoveryTopic);
+    if (agents.isEmpty())
+        res["note"] = QString("no agents found — subscribed for live cards");
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
@@ -185,11 +234,11 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
+    if (!delivery || !delivery->isConnected()) return "{\"error\": \"delivery module unavailable\"}";
 
     QVariant subResult = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic));
+        QString::fromStdString(replyTopic), RPC_TIMEOUT);
     if (subResult.isNull())
         return "{\"error\": \"failed to subscribe to reply topic\"}";
 
@@ -230,14 +279,19 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
 
     std::string requestStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(requestStr.begin(), requestStr.end());
-    ECIESCiphertext encrypted = eciesEncrypt(agentAddress, plainBytes);
-    std::string encPayload = eciesSerialize(encrypted);
+    std::string encPayload;
+    try {
+        ECIESCiphertext encrypted = eciesEncrypt(extractEncryptionKey(agentAddress), plainBytes);
+        encPayload = eciesSerialize(encrypted);
+    } catch (const std::exception& e) {
+        return "{\"error\": \"encryption failed: " + std::string(e.what()) + "\"}";
+    }
 
-    std::string inboxTopic = "/pilot/1/inbox-" + agentAddress + "/proto";
+    std::string inboxTopic = "/pilot/1/inbox-" + extractEncryptionKey(agentAddress) + "/proto";
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(inboxTopic),
-        QString::fromStdString(encPayload));
+        QString::fromStdString(encPayload), RPC_TIMEOUT);
 
     QJsonObject status;
     status["state"] = QString("submitted");
@@ -256,11 +310,11 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     std::string taskTopic = "/pilot/1/task-" + taskId + "/proto";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
+    if (!delivery || !delivery->isConnected()) return "{\"error\": \"delivery module unavailable\"}";
 
     QVariant result = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
-        QString::fromStdString(taskTopic));
+        QString::fromStdString(taskTopic), RPC_TIMEOUT);
     if (result.isNull())
         return "{\"error\": \"subscribe failed\"}";
 
@@ -280,14 +334,19 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
 
     std::string reqStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> subPlain(reqStr.begin(), reqStr.end());
-    ECIESCiphertext subEnc = eciesEncrypt(agentAddress, subPlain);
-    std::string subPayload = eciesSerialize(subEnc);
+    std::string subPayload;
+    try {
+        ECIESCiphertext subEnc = eciesEncrypt(extractEncryptionKey(agentAddress), subPlain);
+        subPayload = eciesSerialize(subEnc);
+    } catch (const std::exception& e) {
+        return "{\"error\": \"encryption failed: " + std::string(e.what()) + "\"}";
+    }
 
-    std::string inboxTopic = "/pilot/1/inbox-" + agentAddress + "/proto";
+    std::string inboxTopic = "/pilot/1/inbox-" + extractEncryptionKey(agentAddress) + "/proto";
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(inboxTopic),
-        QString::fromStdString(subPayload));
+        QString::fromStdString(subPayload), RPC_TIMEOUT);
 
     QJsonObject res;
     res["subscribed"] = true;
@@ -300,7 +359,7 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
     if (!logosAPI_) return false;
 
     auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return false;
+    if (!delivery || !delivery->isConnected()) return false;
 
     QJsonObject rpcParams;
     rpcParams["id"] = QString::fromStdString(taskId);
@@ -318,23 +377,28 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
 
     std::string cancelStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> cancelPlain(cancelStr.begin(), cancelStr.end());
-    ECIESCiphertext cancelEnc = eciesEncrypt(agentAddress, cancelPlain);
-    std::string cancelPayload = eciesSerialize(cancelEnc);
+    std::string cancelPayload;
+    try {
+        ECIESCiphertext cancelEnc = eciesEncrypt(extractEncryptionKey(agentAddress), cancelPlain);
+        cancelPayload = eciesSerialize(cancelEnc);
+    } catch (const std::exception& e) {
+        return false;
+    }
 
-    std::string inboxTopic = "/pilot/1/inbox-" + agentAddress + "/proto";
+    std::string inboxTopic = "/pilot/1/inbox-" + extractEncryptionKey(agentAddress) + "/proto";
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(inboxTopic),
-        QString::fromStdString(cancelPayload));
+        QString::fromStdString(cancelPayload), RPC_TIMEOUT);
 
     std::string taskTopic = "/pilot/1/task-" + taskId + "/proto";
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
     delivery->invokeRemoteMethod(
         "delivery_module", "unsubscribe",
-        QString::fromStdString(taskTopic));
+        QString::fromStdString(taskTopic), RPC_TIMEOUT);
     delivery->invokeRemoteMethod(
         "delivery_module", "unsubscribe",
-        QString::fromStdString(replyTopic));
+        QString::fromStdString(replyTopic), RPC_TIMEOUT);
 
     return true;
 }
@@ -343,12 +407,12 @@ std::string PilotImpl::programQuery(const std::string& programId, const std::str
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
-    if (!wallet) return "{\"error\": \"wallet module unavailable\"}";
+    if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
         "lez_wallet_module", "queryProgram",
         QString::fromStdString(programId),
-        QString::fromStdString(paramsJson));
+        QString::fromStdString(paramsJson), RPC_TIMEOUT);
 
     if (result.isNull()) {
         QJsonObject err;
@@ -381,14 +445,14 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
     }
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
-    if (!wallet) return "{\"error\": \"wallet module unavailable\"}";
+    if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
         "lez_wallet_module", "callProgram",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(programId),
         QString::fromStdString(instruction),
-        QString::fromStdString(paramsJson));
+        QString::fromStdString(paramsJson), RPC_TIMEOUT);
 
     if (result.isNull()) {
         QJsonObject err;

@@ -3,6 +3,7 @@
 #include "pilot_crypto.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "logos_mode.h"
 #include <sqlite3.h>
 #include <sstream>
 #include <chrono>
@@ -53,6 +54,13 @@ bool PilotImpl::loadIdentity() {
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         agentNpk_ = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         agentAccountId_ = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+
+        QJsonDocument npkDoc = QJsonDocument::fromJson(QByteArray::fromStdString(agentNpk_));
+        if (npkDoc.isObject() && npkDoc.object().contains("viewing_public_key"))
+            agentViewingKey_ = npkDoc.object()["viewing_public_key"].toString().toStdString();
+        else
+            agentViewingKey_ = agentNpk_;
+
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -123,8 +131,8 @@ bool PilotImpl::initWallet() {
     QVariant openResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "open",
         QString::fromStdString(configPath),
-        QString::fromStdString(storagePath));
-    if (openResult.toInt() == 0) return true;
+        QString::fromStdString(storagePath), Timeout(15000));
+    if (!openResult.isNull() && openResult.toInt() == 0) return true;
 
     std::string sequencerAddr = "http://127.0.0.1:8080";
     if (const char* env = std::getenv("PILOT_SEQUENCER_ADDR"))
@@ -147,8 +155,8 @@ bool PilotImpl::initWallet() {
         "lez_wallet_module", "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
-        QString("pilot_agent"));
-    return createResult.toInt() == 0;
+        QString("pilot_agent"), Timeout(15000));
+    return !createResult.isNull() && createResult.toInt() == 0;
 }
 
 bool PilotImpl::createIdentity() {
@@ -171,6 +179,12 @@ bool PilotImpl::createIdentity() {
     if (keysResult.isNull()) return false;
 
     agentNpk_ = keysResult.toString().toStdString();
+
+    QJsonDocument npkDoc = QJsonDocument::fromJson(keysResult.toString().toUtf8());
+    if (npkDoc.isObject() && npkDoc.object().contains("viewing_public_key"))
+        agentViewingKey_ = npkDoc.object()["viewing_public_key"].toString().toStdString();
+    else
+        agentViewingKey_ = agentNpk_;
 
     ECIESKeypair kp = generateECIESKeypair();
     agentEciesPub_ = kp.publicKeyHex;

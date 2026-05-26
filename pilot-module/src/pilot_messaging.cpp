@@ -20,15 +20,28 @@ static std::string genGroupId() {
 std::string PilotImpl::messagingSend(const std::string& recipient, const std::string& message) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
+    std::string recipientKey = recipient;
+    QJsonDocument recipientDoc = QJsonDocument::fromJson(QByteArray::fromStdString(recipient));
+    if (recipientDoc.isObject() && recipientDoc.object().contains("viewing_public_key"))
+        recipientKey = recipientDoc.object()["viewing_public_key"].toString().toStdString();
+
     QJsonObject payload;
     payload["from"] = QString::fromStdString(agentNpk_);
     payload["message"] = QString::fromStdString(message);
     std::string payloadStr = QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(payloadStr.begin(), payloadStr.end());
-    ECIESCiphertext encrypted = eciesEncrypt(recipient, plainBytes);
-    std::string encPayload = eciesSerialize(encrypted);
 
-    std::string topic = "/pilot/1/inbox-" + recipient + "/proto";
+    std::string encPayload;
+    try {
+        ECIESCiphertext encrypted = eciesEncrypt(recipientKey, plainBytes);
+        encPayload = eciesSerialize(encrypted);
+    } catch (const std::exception& e) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString(std::string("encryption failed: ") + e.what());
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
+
+    std::string topic = "/pilot/1/inbox-" + recipientKey + "/proto";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
