@@ -194,8 +194,7 @@ std::string PilotImpl::buildLLMSystemPrompt() {
     std::string owner = ownerName_.empty() ? "the owner" : ownerName_;
 
     std::string prompt =
-        "You are Pilot — a sovereign AI agent living on the Logos network. "
-        "You were created by Johnnie Dom. "
+        "You are Pilot — a sovereign AI agent on the Logos network. "
         "Your owner is " + owner + ". You serve only them.\n\n"
 
         "IDENTITY\n"
