@@ -350,13 +350,27 @@ proc runRepl*(cfg: Config, dataDir: string) =
       response = dispatchSlash(gCfg, line)
     else:
       let raw = daemonCallWithSpinner(gCfg, "processOwnerMessage", @[line], timeoutSec = 30)
+      var wasAction = false
       try:
         let j = parseJson(raw)
+        let act = j.getOrDefault("action").getStr("reply")
+        if act != "reply" and act != "none":
+          wasAction = true
         response = dispatchAction(gCfg, j)
       except JsonParsingError:
         response = raw
       except:
         response = RED & "  error: " & getCurrentExceptionMsg() & RESET
+
+      if wasAction and response != "":
+        let feedback = daemonCall(gCfg, "processOwnerMessage",
+          @["[System: the action you dispatched returned this result] " & response], timeoutSec = 15)
+        try:
+          let fj = parseJson(feedback)
+          let text = fj{"params", "text"}.getStr("")
+          if text != "":
+            response = text
+        except: discard
 
     if response == "\x00QUIT":
       cleanup()
