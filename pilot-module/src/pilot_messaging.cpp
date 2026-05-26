@@ -19,7 +19,7 @@ static std::string genGroupId() {
 
 std::string PilotImpl::messagingSend(const std::string& recipient, const std::string& message) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
-    initDependencyModules();
+    initDeliveryModule();
 
     std::string recipientKey = recipient;
     QJsonDocument recipientDoc = QJsonDocument::fromJson(QByteArray::fromStdString(recipient));

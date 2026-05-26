@@ -107,9 +107,9 @@ static bool waitForConnection(LogosAPIClient* client, int maxMs = 5000) {
     return client->isConnected();
 }
 
-void PilotImpl::initDependencyModules() {
-    if (!logosAPI_ || depsInitialized_) return;
-    depsInitialized_ = true;
+void PilotImpl::initStorageModule() {
+    if (!logosAPI_ || storageInitialized_) return;
+    storageInitialized_ = true;
 
     auto* storage = logosAPI_->getClient("storage_module");
     if (waitForConnection(storage)) {
@@ -118,6 +118,11 @@ void PilotImpl::initDependencyModules() {
         storage->invokeRemoteMethod("storage_module", "start",
             QVariantList{}, Timeout(10000));
     }
+}
+
+void PilotImpl::initDeliveryModule() {
+    if (!logosAPI_ || deliveryInitialized_) return;
+    deliveryInitialized_ = true;
 
     std::string wakuAddr;
     if (const char* env = std::getenv("PILOT_WAKU_ADDR"))
@@ -167,6 +172,13 @@ void PilotImpl::initDependencyModules() {
                 });
         }
     }
+}
+
+void PilotImpl::initDependencyModules() {
+    if (depsInitialized_) return;
+    depsInitialized_ = true;
+    initStorageModule();
+    initDeliveryModule();
 }
 
 void PilotImpl::initLLM() {

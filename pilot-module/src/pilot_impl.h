@@ -76,6 +76,8 @@ public:
 private:
     void initDatabase(const std::string& dataDir);
     void initDependencyModules();
+    void initStorageModule();
+    void initDeliveryModule();
     bool initWallet();
     bool loadIdentity();
     bool createIdentity();
@@ -100,6 +102,8 @@ private:
     int64_t spendPeriodSeconds_ = 86400;
     std::string dataDir_;
     bool initialized_ = false;
+    bool storageInitialized_ = false;
+    bool deliveryInitialized_ = false;
     bool depsInitialized_ = false;
     std::vector<std::pair<std::string,std::string>> chatHistory_;
 };
