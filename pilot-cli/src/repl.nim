@@ -177,15 +177,15 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient> <amount> <reason>" & RESET
-    return daemonCall(cfg, "walletSend", @[parts[1], parts[2], parts[3]])
+    return formatJson(daemonCall(cfg, "walletSend", @[parts[1], parts[2], parts[3]]))
   of "/upload":
     if parts.len < 3:
       return RED & "  usage: /upload <path> <label>" & RESET
-    return daemonCall(cfg, "storageUpload", @[parts[1], parts[2]])
+    return formatJson(daemonCall(cfg, "storageUpload", @[parts[1], parts[2]]))
   of "/download":
     if parts.len < 3:
       return RED & "  usage: /download <cid> <path>" & RESET
-    return daemonCall(cfg, "storageDownload", @[parts[1], parts[2]])
+    return formatJson(daemonCall(cfg, "storageDownload", @[parts[1], parts[2]]))
   of "/approve":
     if parts.len < 2:
       return RED & "  usage: /approve <id>" & RESET
