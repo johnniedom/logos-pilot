@@ -26,6 +26,10 @@ proc formatJson(raw: string): string =
     let j = parseJson(raw)
     if j.kind != JObject: return raw
 
+    # Errors
+    if j.hasKey("error"):
+      return RED & "  Error: " & RESET & j["error"].getStr()
+
     # Skills list
     if j.hasKey("skills") and j.hasKey("count"):
       var lines: seq[string]
@@ -89,7 +93,8 @@ proc formatJson(raw: string): string =
       var lines: seq[string]
       lines.add(BOLD & "  Stored Files" & RESET)
       for f in j["files"]:
-        lines.add("  " & f["label"].getStr("?") & "  " & DIM & truncStr(f["cid"].getStr(""), 24) & RESET)
+        lines.add("  " & BOLD & f["label"].getStr("?") & RESET)
+        lines.add("    " & DIM & "CID  " & RESET & f["cid"].getStr(""))
       return lines.join("\n")
 
     # Upload result
@@ -184,8 +189,18 @@ proc dispatchSlash(cfg: Config, input: string): string =
     return formatJson(daemonCall(cfg, "storageUpload", @[parts[1], parts[2]]))
   of "/download":
     if parts.len < 3:
-      return RED & "  usage: /download <cid> <path>" & RESET
-    return formatJson(daemonCall(cfg, "storageDownload", @[parts[1], parts[2]]))
+      return RED & "  usage: /download <cid-or-label> <path>" & RESET
+    var cid = parts[1]
+    if not cid.startsWith("z"):
+      let filesRaw = daemonCall(cfg, "storageList")
+      try:
+        let fj = parseJson(filesRaw)
+        for f in fj["files"]:
+          if f["label"].getStr() == cid:
+            cid = f["cid"].getStr()
+            break
+      except: discard
+    return formatJson(daemonCall(cfg, "storageDownload", @[cid, parts[2]]))
   of "/approve":
     if parts.len < 2:
       return RED & "  usage: /approve <id>" & RESET

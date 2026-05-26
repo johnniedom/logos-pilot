@@ -214,7 +214,11 @@ std::string PilotImpl::buildLLMSystemPrompt() {
         "{\"action\": \"<command_name>\", \"params\": {<relevant params>}}\n"
         "When the owner asks a question or chats casually, respond naturally:\n"
         "{\"action\": \"reply\", \"params\": {\"text\": \"<your response>\"}}\n"
-        "Be concise, helpful, and accurate about your capabilities.\n";
+        "Rules for responses:\n"
+        "- Be concise — 1-3 sentences max unless the owner asks for detail\n"
+        "- Plain text only — no markdown, no **bold**, no `backticks`, no bullet lists\n"
+        "- Use the owner's name naturally when appropriate\n"
+        "- For errors, explain what went wrong and how to fix it in one sentence\n";
     return prompt;
 }
 
