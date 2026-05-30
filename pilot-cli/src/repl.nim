@@ -1,5 +1,5 @@
-import strutils, json, rdstdin, os, osproc, times, streams
-import rpc, daemon, format
+import strutils, json, rdstdin, os, osproc, times, streams, terminal
+import rpc, daemon, format, selector
 
 var gCfg: Config
 
@@ -51,29 +51,40 @@ proc formatJson(raw: string): string =
     if j.hasKey("balance") and j.hasKey("account"):
       let bal = j["balance"].getStr("")
       let balStr = if bal == "": "0" else: bal
-      return "  " & DIM & "Account  " & RESET & truncStr(j["account"].getStr(), 24) &
-             "\n  " & DIM & "Balance  " & RESET & BOLD & balStr & " LEZ" & RESET
+      return BOLD & "  Agent Wallet" & RESET &
+             "\n  " & DIM & "Balance      " & RESET & BOLD & balStr & " LEZ" & RESET &
+             "\n  " & DIM & "Per-tx limit " & RESET & "100 LEZ" &
+             "\n  " & DIM & "Period limit " & RESET & "500 LEZ / 24h" &
+             "\n" &
+             "\n  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
 
     # Status
     if j.hasKey("initialized") and j.hasKey("npk"):
       var lines: seq[string]
       lines.add(BOLD & "  Agent Status" & RESET)
-      lines.add("  " & DIM & "Initialized  " & RESET & (if j["initialized"].getBool(): GREEN & "yes" & RESET else: RED & "no" & RESET))
-      lines.add("  " & DIM & "Account      " & RESET & truncStr(j["account"].getStr(), 24))
+      lines.add("  " & DIM & "Initialized    " & RESET & (if j["initialized"].getBool(): GREEN & "yes" & RESET else: RED & "no" & RESET))
+      lines.add("  " & DIM & "Agent Account  " & RESET & truncStr(j["account"].getStr(), 24))
+      lines.add("  " & DIM & "Owner          " & RESET & j.getOrDefault("owner_name").getStr("—"))
       if j["llm"].kind == JObject:
-        lines.add("  " & DIM & "LLM          " & RESET & j["llm"]["provider"].getStr() & " / " & j["llm"]["model"].getStr())
+        lines.add("  " & DIM & "LLM            " & RESET & j["llm"]["provider"].getStr() & " / " & j["llm"]["model"].getStr())
       else:
-        lines.add("  " & DIM & "LLM          " & RESET & "none")
+        lines.add("  " & DIM & "LLM            " & RESET & "none")
       return lines.join("\n")
 
-    # Pending spends
+    # Pending spends — show with interactive marker
     if j.hasKey("pending") and j["pending"].kind == JArray:
       if j["pending"].len == 0:
         return "  No pending spend requests"
       var lines: seq[string]
-      lines.add(BOLD & "  Pending Spends" & RESET)
+      lines.add(BOLD & "  Pending Spends (" & $j["pending"].len & ")" & RESET)
       for s in j["pending"]:
-        lines.add("  " & s["id"].getStr("?") & "  " & $s["amount"].getInt() & " LEZ → " & truncStr(s["recipient"].getStr(""), 16) & "  " & DIM & s["reason"].getStr("") & RESET)
+        lines.add("")
+        lines.add("  " & YELLOW & BOLD & $s["amount"].getInt() & " LEZ" & RESET & " → " & truncStr(s["recipient"].getStr(""), 20))
+        if s["reason"].getStr("") != "":
+          lines.add("  " & DIM & s["reason"].getStr("") & RESET)
+        lines.add("  " & DIM & "ID: " & s["id"].getStr("?") & RESET)
+      lines.add("")
+      lines.add("  " & GREEN & "/approve <id>" & RESET & "  or  " & RED & "/reject <id>" & RESET)
       return lines.join("\n")
 
     # Transaction history
@@ -130,7 +141,11 @@ proc formatJson(raw: string): string =
              "\n  " & DIM & "TX  " & RESET & truncStr(j["tx_hash"].getStr(), 24) &
              "\n  " & DIM & "Amount  " & RESET & $j["amount"].getInt(0) & " LEZ"
 
-    # Spend request created
+    # Spend request held — needs approval (interactive prompt handled in REPL loop)
+    if j.hasKey("request_id") and j.hasKey("status") and j["status"].getStr() == "held":
+      return "\x01APPROVE:" & j["request_id"].getStr() & ":" & j.getOrDefault("message").getStr("")
+
+    # Spend request created (generic)
     if j.hasKey("request_id") and j.hasKey("state"):
       return YELLOW & "  Spend request created" & RESET &
              "\n  " & DIM & "ID  " & RESET & j["request_id"].getStr() &
@@ -320,9 +335,20 @@ proc runRepl*(cfg: Config, dataDir: string) =
 
   ok("Agent online")
   if accountId != "":
-    kv("Account", truncStr(accountId, 24))
+    kv("Agent Account", truncStr(accountId, 24))
   if ownerName != "":
-    echo DIM & "  Welcome back, " & RESET & BOLD & ownerName & RESET
+    echo DIM & "  Owner: " & RESET & BOLD & ownerName & RESET
+
+  # Show pending approvals on startup
+  var pendingCount = 0
+  try:
+    let pendRaw = daemonCall(gCfg, "getPendingSpends")
+    let pj = parseJson(pendRaw)
+    if pj.hasKey("pending") and pj["pending"].kind == JArray:
+      pendingCount = pj["pending"].len
+  except: discard
+  if pendingCount > 0:
+    echo YELLOW & BOLD & "  " & $pendingCount & " pending approval(s)" & RESET & DIM & " — type /pending to review" & RESET
 
   echo DIM & "  Type /help for commands, or just chat." & RESET
   blankLine()
@@ -375,6 +401,34 @@ proc runRepl*(cfg: Config, dataDir: string) =
     if response == "\x00QUIT":
       cleanup()
       return
+
+    # Interactive approval prompt
+    if response.startsWith("\x01APPROVE:"):
+      let parts = response[9..^1].split(":", maxsplit = 1)
+      let reqId = parts[0]
+      let msg = if parts.len > 1: parts[1] else: ""
+      echo ""
+      echo YELLOW & BOLD & "  Approval Required" & RESET
+      if msg != "":
+        echo "  " & DIM & msg & RESET
+      echo ""
+      let choice = arrowSelect("", @[
+        GREEN & "Approve" & RESET & " — execute this transaction",
+        RED & "Reject" & RESET & " — cancel and refund",
+        DIM & "Skip" & RESET & " — decide later (/pending)"
+      ])
+      if choice == 0:
+        let approveResult = daemonCall(gCfg, "approveSpend", @[reqId])
+        response = GREEN & BOLD & "  Transaction Approved" & RESET &
+                   "\n  " & DIM & "ID      " & RESET & reqId &
+                   "\n  " & DIM & "Status  " & RESET & GREEN & "executed" & RESET
+      elif choice == 1:
+        discard daemonCall(gCfg, "rejectSpend", @[reqId])
+        response = RED & BOLD & "  Transaction Rejected" & RESET &
+                   "\n  " & DIM & "ID      " & RESET & reqId &
+                   "\n  " & DIM & "Status  " & RESET & "cancelled — no tokens moved"
+      else:
+        response = DIM & "  Skipped — type /pending to review later" & RESET
 
     if response != "":
       echo CYAN & "  pilot " & RESET & DIM & "│ " & RESET & response.replace("\n", "\n        " & DIM & "│ " & RESET)

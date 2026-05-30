@@ -8,6 +8,7 @@
 #include <sstream>
 #include <chrono>
 #include <fstream>
+#include <sys/stat.h>
 #include <cstdlib>
 #include <thread>
 #include <functional>
@@ -119,46 +120,70 @@ bool PilotImpl::initWallet() {
     if (!logosAPI_) { qWarning() << "[pilot] initWallet: logosAPI_ is NULL"; return false; }
 
     auto* wallet = logosAPI_->getClient("lez_wallet_module");
-    if (!wallet) return false;
+    if (!wallet) { qWarning() << "[pilot] initWallet: getClient returned null"; return false; }
 
     for (int i = 0; i < 20 && !wallet->isConnected(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    if (!wallet->isConnected()) { qWarning() << "[pilot] initWallet: wallet not connected"; return false; }
+    if (!wallet->isConnected()) { qWarning() << "[pilot] initWallet: wallet not connected after 5s"; return false; }
 
+    qWarning() << "[pilot] initWallet: wallet connected, trying open...";
     std::string configPath = dataDir_ + "/wallet_config.json";
     std::string storagePath = dataDir_ + "/wallet_storage";
+
+    mkdir(storagePath.c_str(), 0755);
 
     QVariant openResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "open",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath), Timeout(15000));
+    qWarning() << "[pilot] initWallet: open result:" << openResult;
     if (!openResult.isNull() && openResult.toInt() == 0) return true;
 
     std::string sequencerAddr = "http://127.0.0.1:8080";
     if (const char* env = std::getenv("PILOT_SEQUENCER_ADDR"))
         sequencerAddr = env;
 
-    std::ofstream configFile(configPath);
-    if (configFile.is_open()) {
-        QJsonObject walletCfg;
-        walletCfg["sequencer_addr"] = QString::fromStdString(sequencerAddr);
-        walletCfg["seq_poll_timeout"] = QString("30s");
-        walletCfg["seq_tx_poll_max_blocks"] = 15;
-        walletCfg["seq_poll_max_retries"] = 10;
-        walletCfg["seq_block_poll_max_amount"] = 100;
-        walletCfg["initial_accounts"] = QJsonArray();
-        configFile << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();
-        configFile.close();
-    }
+    // Write config for create_new
+    auto writeConfig = [&]() {
+        std::ofstream cf(configPath, std::ios::trunc);
+        if (cf.is_open()) {
+            QJsonObject walletCfg;
+            walletCfg["sequencer_addr"] = QString::fromStdString(sequencerAddr);
+            walletCfg["seq_poll_timeout"] = QString("30s");
+            walletCfg["seq_tx_poll_max_blocks"] = 15;
+            walletCfg["seq_poll_max_retries"] = 10;
+            walletCfg["seq_block_poll_max_amount"] = 100;
+            walletCfg["initial_accounts"] = QJsonArray();
+            cf << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();
+            cf.close();
+        }
+    };
+
+    writeConfig();
 
     std::string walletName = "pilot_" + std::to_string(
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
+    qWarning() << "[pilot] initWallet: trying create_new with name" << walletName.c_str();
     QVariant createResult = wallet->invokeRemoteMethod(
         "lez_wallet_module", "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
         QString::fromStdString(walletName), Timeout(15000));
-    return !createResult.isNull() && createResult.toInt() == 0;
+    qWarning() << "[pilot] initWallet: create_new result:" << createResult;
+
+    // Rewrite config — create_new overwrites it with default port 3040
+    writeConfig();
+
+    if (!createResult.isNull() && createResult.toInt() == 0) {
+        // Reopen with correct sequencer address
+        QVariant reopenResult = wallet->invokeRemoteMethod(
+            "lez_wallet_module", "open",
+            QString::fromStdString(configPath),
+            QString::fromStdString(storagePath), Timeout(15000));
+        qWarning() << "[pilot] initWallet: reopen result:" << reopenResult;
+        return !reopenResult.isNull() && reopenResult.toInt() == 0;
+    }
+    return false;
 }
 
 bool PilotImpl::createIdentity() {

@@ -174,6 +174,82 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 rm -rf /tmp/pilot-data/.logoscore/daemon
 ```
 
+### CLI and Basecamp cannot run simultaneously
+
+Both the CLI daemon (`logoscore -D`) and Basecamp load the same modules into separate `logos_host` processes. They compete for the same Qt Remote Objects sockets and SQLite database locks. Running both at once causes one or both to crash.
+
+**Rule: one runtime at a time.**
+
+- Close Basecamp before running `pilot deploy` or `pilot chat`
+- Exit the CLI (`/quit` or Ctrl+C) before opening Basecamp
+
+Both runtimes share the same `pilot.db` at `PILOT_DATA_DIR` (default `/tmp/pilot-data`). Data set in the CLI (identity, LLM key, files, name) is available in Basecamp on next launch, and vice versa.
+
+**If deploy fails with "Identity generation failed"**, check for stale Basecamp processes:
+
+```bash
+# Check for lingering logos_host processes
+ps aux | grep logos_host
+
+# Kill everything
+pkill -9 -f logos_host
+pkill -9 -f logoscore
+sleep 2
+
+# Now deploy works
+./pilot-cli/result/bin/pilot deploy
+```
+
+### Module crash on cold start
+
+Modules sometimes crash on the first startup after a clean data wipe. This is a transient race condition in the Logos runtime — different modules crash each attempt (capability_module, chat_module, lez_wallet_module).
+
+**Fix:** Run `./setup-modules.sh` to do a clean reinstall with smoke test, then deploy:
+
+```bash
+./setup-modules.sh        # reinstalls all modules + runs echo test
+./pilot-cli/result/bin/pilot deploy
+```
+
+If deploy still fails, retry — the second or third attempt typically succeeds.
+
+### Wallet storage persistence
+
+The `lez_wallet_module` stores wallet state in `$PILOT_DATA_DIR/wallet_storage/`. If this directory is deleted but `pilot.db` still has the old account ID, the wallet module reports "Null wallet handle" and balance calls fail.
+
+**Fix:** Delete both together — never delete `wallet_storage/` without also deleting `pilot.db`:
+
+```bash
+rm -rf /tmp/pilot-data    # clean wipe, then redeploy
+./pilot-cli/result/bin/pilot deploy
+```
+
+### Basecamp module variant mismatch
+
+Nix builds produce modules with variant `linux-amd64-dev`. Basecamp expects `linux-amd64`. The `install-basecamp.sh` script auto-patches this, but if you install modules manually, fix the variant:
+
+```bash
+echo -n "linux-amd64" > ~/.local/share/Logos/LogosBasecamp/modules/pilot/variant
+sed -i 's/linux-amd64-dev/linux-amd64/g' ~/.local/share/Logos/LogosBasecamp/modules/pilot/manifest.json
+```
+
+### Basecamp QML cache
+
+After updating plugin QML files, clear the cache or changes won't appear:
+
+```bash
+rm -rf ~/.cache/Logos/LogosBasecamp/qmlcache
+```
+
+### Basecamp plugin discovery
+
+Basecamp requires three files for a QML plugin to appear in the sidebar:
+- `manifest.json` — full manifest with hashes
+- `metadata.json` — simplified metadata for the package manager
+- `variant` — platform string (`linux-amd64`)
+
+Missing any of these causes the plugin to silently not appear.
+
 ### LevelDB lock contention
 
 The `storage_module` uses LevelDB at `~/.cache/storage/dht/providers/`. If a previous `logos_host_qt` process holds the lock, the new storage_module crashes:
