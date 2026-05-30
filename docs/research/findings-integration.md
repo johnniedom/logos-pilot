@@ -61,6 +61,24 @@ docker run --rm -p 8080:8080 \
 
 **Verify:** `curl http://localhost:8080` (empty response = working)
 
+### Port Configuration (Critical)
+
+The `lez_wallet_module`'s wallet-ffi library has a hardcoded default sequencer address of `http://127.0.0.1:3040`. When `create_new` is called to create a wallet, wallet-ffi **overwrites** the config file with this default — regardless of what was written to the file beforehand.
+
+Our sequencer runs on port **8080**. This mismatch causes silent wallet failures on fresh deploys: the wallet is created successfully, but every subsequent operation talks to port 3040 where nothing is listening.
+
+**Fix (implemented in pilot_identity.cpp):** After calling `create_new`, immediately rewrite the config file with the correct `sequencer_addr`, then call `open` to reconnect with the right address.
+
+**For users on different ports:** Set `PILOT_SEQUENCER_ADDR` to match your sequencer:
+```bash
+export PILOT_SEQUENCER_ADDR=http://127.0.0.1:9000  # or whatever port
+./pilot-cli/result/bin/pilot deploy
+```
+
+The pilot module reads this env variable and writes it to the wallet config after every `create_new` call, ensuring the wallet-ffi default never takes effect.
+
+**Why this only affects fresh deploys:** On subsequent runs, `initWallet()` calls `open` first (which succeeds because the wallet already exists), skipping `create_new` entirely. The config overwrite only happens during `create_new`.
+
 ### Option B: Docker Compose from Source (NOT Recommended)
 
 ```bash

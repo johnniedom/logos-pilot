@@ -1,0 +1,10 @@
+{
+  "name": "pilot_ui",
+  "version": "1.0.0",
+  "description": "Pilot Agent — Autonomous AI agent with wallet, storage, and messaging",
+  "type": "ui_qml",
+  "view": "Main.qml",
+  "dependencies": ["pilot"],
+  "category": "general",
+  "icon": ""
+}

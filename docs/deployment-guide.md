@@ -195,3 +195,18 @@ Look for `LLM` field. If "none", redeploy with `pilot deploy`.
 **Agent freezes on first message:** The delivery module takes 30-60 seconds to connect to the Waku network on first use. Use slash commands (`/balance`, `/files`) while it warms up — these don't need delivery.
 
 **"unknown CID" on download:** Make sure you're using the CID from `/files`, or download by label: `/download my-label /tmp/file.pdf`.
+
+**"Identity generation failed" on deploy:** Check for stale Basecamp or logoscore processes. CLI and Basecamp cannot run at the same time — close one before using the other:
+```bash
+pkill -9 -f logos_host; pkill -9 -f logoscore
+sleep 2
+./pilot-cli/result/bin/pilot deploy
+```
+
+**Deploy fails repeatedly:** Modules crash on cold start (transient race). Reinstall and retry:
+```bash
+./setup-modules.sh
+./pilot-cli/result/bin/pilot deploy
+```
+
+**CLI and Basecamp:** Both read/write the same `pilot.db`. Deploy once, use from either — but never run both at the same time.

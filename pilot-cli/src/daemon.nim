@@ -39,6 +39,7 @@ proc startDaemon*(cfg: Config): bool =
     fail("logoscore binary not found in nix store")
     return false
   createDir(cfg.dataDir)
+  createDir(cfg.dataDir / "wallet_storage")
   cleanStaleDaemon(cfg)
 
   let logFile = cfg.dataDir / "daemon.log"
@@ -46,6 +47,8 @@ proc startDaemon*(cfg: Config): bool =
 
   # setsid detaches the daemon into its own session so it survives
   # the parent bash exit (required when launched from Nim execProcess).
+  # Start daemon without -m to avoid loading all modules simultaneously.
+  # Modules are loaded individually below with delays to prevent crashes.
   writeFile(scriptFile,
     "#!/bin/bash\n" &
     "setsid " & quoteShell(cfg.logoscore) &
@@ -77,13 +80,16 @@ proc startDaemon*(cfg: Config): bool =
       break
     sleep(1000)
 
-  # Load modules (15s timeout each)
+  # Load modules one at a time with stabilization delay
+  var moduleIdx = 0
   for m in MODULES.split(','):
-    spinTick("Loading " & m, 15)
+    spinTick("Loading " & m, 15 + moduleIdx)
     discard execProcess("bash", args = ["-c",
       "timeout 15 " & quoteShell(cfg.logoscore) &
       " --config-dir " & quoteShell(cfg.configDir) & " load-module " & m],
       options = {poUsePath, poStdErrToStdOut})
+    sleep(2000)
+    inc moduleIdx
 
   # Wait for pilot echo (max 10s)
   for i in 0 ..< 5:
@@ -96,7 +102,11 @@ proc startDaemon*(cfg: Config): bool =
         options = {poUsePath, poStdErrToStdOut}).strip()
     except: ""
     if resp.contains("ready"):
-      spinTick("Initializing", 25 + i)
+      # Give dependency modules time to fully stabilize
+      for w in 0 ..< 3:
+        spinTick("Waiting for modules", 25 + w)
+        sleep(2000)
+      spinTick("Initializing", 30 + i)
       discard execProcess("bash", args = ["-c",
         "timeout 30 " & quoteShell(cfg.logoscore) &
         " --config-dir " & quoteShell(cfg.configDir) &
