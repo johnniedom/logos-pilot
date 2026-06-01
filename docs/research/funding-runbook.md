@@ -160,3 +160,44 @@ sequencer — or the agent's proofs will be rejected.
 1. **Circuits match** — pilot's `lez_wallet_module` vs the sequencer build (v0.4.1).
 2. **Sovereign funding** — does `register` → `claim_pinata` succeed (spec requirement)?
 3. **Pinata PoW** — does the module compute the faucet puzzle, or send empty and fail?
+
+---
+
+
+## UPDATE 2026-06-01 — version match SOLVED; next-session context
+
+**Proven:** the installed pilot `lez_wallet_module` (built from `lssa@9df1217`, March) is
+version-incompatible with a May sequencer (RPC methods renamed → "Method not found"). Fix: build
+the sequencer at the **March rev**. Done + PROVEN — the real module's `register_public_account`
+returned `{"success":true,"tx_hash":"ebf459fd…"}` against the March sequencer on :3040.
+
+### March build/run — STANDALONE (proven, recommended; no Docker)
+- Repo `logos-execution-zone` checked out to `9df12170` (detached HEAD; `git checkout main` → back to May `bfdc087`).
+- Build: `~/build-lez.sh` (circuits `ec7d298`, nixpkgs `cb369ef2` for libclang, target `cargo build --release --features standalone -p sequencer_runner`).
+- Run: `~/run-sequencer.sh` → `target/release/sequencer_runner sequencer_runner/configs/debug` (config is a DIRECTORY). RISC0_DEV_MODE=1, r0vm 3.0.5 on PATH, serves `:3040`.
+- Test: `~/wallet-module-test.sh` (run `setup-modules.sh` first after any reboot — `/tmp` wipes).
+
+### March FULL-STACK (alternative — only for maximum realism; heavier, NOT required)
+The full stack runs a real L1 chain under the sequencer instead of standalone's mock. Use only if
+a reviewer wants a real bedrock chain; standalone is sufficient for funding and the demo.
+1. bedrock L1 node via Docker (re-pull `ghcr.io/logos-blockchain/logos-blockchain:devnet`; run `bedrock/` compose).
+2. `indexer_service` built from March (`cargo run --release -p indexer_service indexer/.../indexer_config.json`).
+3. `sequencer_runner` built WITHOUT `--features standalone`, pointed at bedrock (`node_url localhost:8080`) + indexer.
+Cost: Docker image (~1-2 GB) + indexer build + 3 services running. Standalone avoids all of it.
+
+### REMAINING GAP — fund the agent
+Pilot code only calls `create_new` / `open` / `create_account_private` / `get_balance` /
+`transfer_private` — NO `register`/`claim`. The agent uses a **PRIVATE** account. To fund, either:
+- **(A)** add `register_private_account` + `claim_pinata_private_owned` to the pilot deploy flow
+  (the sovereign-funding feature — a code addition), or
+- **(B)** externally fund the agent's private account after `pilot deploy` (register it, then a
+  private pinata claim or a shielded transfer from a genesis account).
+Then `pilot balance` + the Basecamp Wallet view show a non-zero balance.
+
+### Real-proof demo (RISC0_DEV_MODE=0)
+`spec.md` L125-126 REQUIRES the on-chain segment to run with `RISC0_DEV_MODE=0`, proof generation
+visible on camera (dev mode does NOT satisfy it; only the on-chain segment needs it — messaging /
+storage / A2A do not, per `decisions.md` L180). Plan: flip the flag to 0 on BOTH sequencer + wallet
+and TRY on the laptop first (7.6 GB; LEZ guests are small; lower `RISC0_SEGMENT_PO2` if it runs out
+of memory). If it won't fit, run on a 16 GB+ box / cloud VM with a full `rzup install` (proving
+keys). Same binaries and flow — only the flag + RAM change.
