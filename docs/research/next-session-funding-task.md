@@ -61,29 +61,22 @@ Fresh deploy → agent auto-registers + claims → `pilot balance` and Basecamp 
 ~150 LEZ, no manual steps. (Real-proof `RISC0_DEV_MODE=0` demo is a separate task — try laptop
 first, lower RISC0_SEGMENT_PO2 if OOM, else 16GB box; both sides flag=0 + full rzup install.)
 
+
 ## IMPORTANT — wallet address persistence (verified from code)
-The pilot already persists identity: on boot  reads  from 
-( table) and REUSES it;  runs ONLY on first run (no row).
-So the address persists ACROSS REBOOTS **only if the data dir survives**:
-- Run the agent with a PERSISTENT  (NOT  — Basecamp default 
-  is wiped on reboot → new account every boot). Use e.g. a fixed home path.
-- Both  AND  live under dataDir_; both must persist (initWallet xdg-open - opens a file or URL in the user's preferred application
-
-Synopsis
-
-xdg-open { file | URL }
-
-xdg-open { --help | --manual | --version }
-
-Use 'man xdg-open' or 'xdg-open --manual' for additional info.
-  reuses the wallet; loadIdentity reuses the account id).
+The pilot already persists identity: on boot `loadIdentity()` reads `account_id` from `pilot.db`
+(`agent_identity` table) and REUSES it; `create_account_private` runs ONLY on first run (no row).
+So the address persists across reboots **only if the data dir survives**:
+- Run the agent with a PERSISTENT `dataDir_` — NOT `/tmp/...` (Basecamp default `/tmp/pilot-data`
+  is wiped on reboot → new account every boot). Use a fixed home path.
+- Both `pilot.db` AND `wallet_storage/` live under `dataDir_`; both must persist (`initWallet` →
+  `open` reuses the wallet; `loadIdentity` reuses the account id).
 
 Consequence for funding: make the funding step idempotent, keyed to the persisted identity (store
-a "funded" flag in pilot.db). Fund once on first boot; skip on later boots. With a persistent data
-dir there is exactly one address and one funding.
+a "funded" flag in `pilot.db`). Fund once on first boot; skip on later boots. With a persistent
+data dir there is exactly one address and one funding.
 
 ## Also: point the pilot at the right sequencer
-initWallet defaults sequencer_addr to http://127.0.0.1:8080 (WRONG) but honors env
-. Set  so the agent hits the
-running March sequencer. (create_new also rewrites the config to default port; initWallet already
-re-writes it after — keep sequencer_addr=3040.)
+`initWallet` defaults `sequencer_addr` to `http://127.0.0.1:8080` (WRONG) but honors env var
+`PILOT_SEQUENCER_ADDR`. Set `PILOT_SEQUENCER_ADDR=http://127.0.0.1:3040` so the agent hits the
+running March sequencer. (`create_new` rewrites the config to a default port; `initWallet` already
+re-writes it afterward — keep `sequencer_addr` = 3040.)
