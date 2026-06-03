@@ -39,7 +39,7 @@ Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix fi
 | 4 | `logoscore call pilot getPendingSpends` | the 100 shown as `NOTIFIED`, awaiting approval |
 | 5 | `logoscore call pilot approveSpend <request_id>` | owner approves → executes |
 
-## Demo 4 — Paid agent marketplace / 2-agent A2A 🔴 (verify first; required criterion #99)
+## Demo 4 — Paid agent marketplace / 2-agent A2A ✅ (verified: discover→message→task→pay, 13/14; run via `test-two-agents-docker.sh`, needs nwaku container up)
 | # | Action (run) | On screen |
 |---|---|---|
 | 1 | Agent B: `logoscore call pilot agentCard` | B advertises a skill + LEZ price |

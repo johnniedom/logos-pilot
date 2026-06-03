@@ -346,11 +346,11 @@ bool PilotImpl::fundAgentIfNeeded() {
     {
         QVariant s = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
         long long start = s.isNull() ? 0 : s.toLongLong();
-        for (int i = 0; i < 20; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        for (int i = 0; i < 60; ++i) {
             syncToHead();
             QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
             if (!h.isNull() && h.toLongLong() >= start + 2) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
     }
 
@@ -377,12 +377,12 @@ bool PilotImpl::fundAgentIfNeeded() {
 
     // Wait for the claim tx to be mined and credited before spending it.
     bool credited = false;
-    for (int i = 0; i < 20 && !credited; ++i) {
+    for (int i = 0; i < 60 && !credited; ++i) {
         syncToHead();
         QVariant balV = wallet->invokeRemoteMethod(kWalletModule, "get_balance",
                                                    QString::fromStdString(pubId), QVariant(true));
         if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) credited = true;
-        else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        else std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
     if (!credited) { qWarning() << "[pilot] fund: pinata claim not credited in time"; return false; }
 
