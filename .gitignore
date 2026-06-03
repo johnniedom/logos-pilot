@@ -1,6 +1,9 @@
 result
 result-*
 *.bak
+build/
+generated_code/
+*.lgx
 /tmp/
 .logoscore/
 __pycache__/

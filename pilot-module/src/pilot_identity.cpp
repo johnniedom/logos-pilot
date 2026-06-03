@@ -12,11 +12,64 @@
 #include <cstdlib>
 #include <thread>
 #include <functional>
+#include <vector>
+#include <cstdint>
+#include <cstring>
+#include <openssl/evp.h>
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+
+// ---- funding helpers (LP-0008 sovereign pinata funding) ----
+namespace {
+constexpr const char* kWalletModule = "logos_execution_zone";
+// Well-known dev pinata faucet account (base58). Decodes to cafe…cafe (32 bytes).
+constexpr const char* kPinataBase58 = "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7";
+
+std::vector<uint8_t> hexToBytes(const std::string& hex) {
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+        out.push_back(static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+    return out;
+}
+
+// 16-byte little-endian hex of an unsigned value (amount or pinata solution).
+std::string u128LeHex(uint64_t value) {
+    char hex[33];
+    for (int i = 0; i < 16; ++i) {
+        uint8_t b = (i < 8) ? static_cast<uint8_t>((value >> (8 * i)) & 0xFF) : 0;
+        snprintf(hex + i * 2, 3, "%02x", b);
+    }
+    hex[32] = '\0';
+    return std::string(hex);
+}
+
+// Pinata proof-of-work: data = [difficulty(1)][seed(32)]. Find the smallest u128
+// solution where SHA256(seed ++ solution_LE16) has `difficulty` leading zero bytes.
+// Returns the solution as 16-byte little-endian hex, or "" on bad input.
+std::string computePinataSolution(const std::string& dataHex) {
+    std::vector<uint8_t> data = hexToBytes(dataHex);
+    if (data.size() < 33) return {};
+    const int difficulty = data[0];
+    uint8_t buf[48];
+    std::memcpy(buf, data.data() + 1, 32);   // seed
+    const EVP_MD* md = EVP_sha256();
+    for (uint64_t sol = 0; sol != 0ULL - 1; ++sol) {
+        for (int i = 0; i < 16; ++i)
+            buf[32 + i] = (i < 8) ? static_cast<uint8_t>((sol >> (8 * i)) & 0xFF) : 0;
+        uint8_t h[EVP_MAX_MD_SIZE];
+        unsigned int hlen = 0;
+        if (EVP_Digest(buf, sizeof(buf), h, &hlen, md, nullptr) != 1) return {};
+        bool ok = true;
+        for (int i = 0; i < difficulty; ++i) { if (h[i] != 0) { ok = false; break; } }
+        if (ok) return u128LeHex(sol);
+    }
+    return {};
+}
+}  // namespace
 
 bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
@@ -26,12 +79,15 @@ bool PilotImpl::initialize(const std::string& dataDir) {
 
     if (loadIdentity()) {
         initialized_ = true;
+        initWallet();              // reopen the on-disk wallet for this process
         recoverPendingTransactions();
+        fundAgentIfNeeded();       // idempotent, best-effort
         return true;
     }
 
-    if (createIdentity()) {
+    if (createIdentity()) {        // calls initWallet() internally
         initialized_ = true;
+        fundAgentIfNeeded();       // idempotent, best-effort
         return true;
     }
 
@@ -117,34 +173,26 @@ bool PilotImpl::loadIdentity() {
 }
 
 bool PilotImpl::initWallet() {
+    if (walletOpened_) return true;   // idempotent: handle persists in the module process
     if (!logosAPI_) { qWarning() << "[pilot] initWallet: logosAPI_ is NULL"; return false; }
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient(kWalletModule);
     if (!wallet) { qWarning() << "[pilot] initWallet: getClient returned null"; return false; }
 
     for (int i = 0; i < 20 && !wallet->isConnected(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     if (!wallet->isConnected()) { qWarning() << "[pilot] initWallet: wallet not connected after 5s"; return false; }
 
-    qWarning() << "[pilot] initWallet: wallet connected, trying open...";
     std::string configPath = dataDir_ + "/wallet_config.json";
-    std::string storagePath = dataDir_ + "/wallet_storage";
+    // Storage MUST be a file path (wallet_ffi_open/create_new write a file, not a dir).
+    std::string storagePath = dataDir_ + "/wallet_storage.json";
 
-    mkdir(storagePath.c_str(), 0755);
-
-    QVariant openResult = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "open",
-        QString::fromStdString(configPath),
-        QString::fromStdString(storagePath), Timeout(15000));
-    qWarning() << "[pilot] initWallet: open result:" << openResult;
-    if (!openResult.isNull() && openResult.toInt() == 0) return true;
-
-    std::string sequencerAddr = "http://127.0.0.1:8080";
+    std::string sequencerAddr = "http://127.0.0.1:3040";   // v0.1.2 standalone sequencer
     if (const char* env = std::getenv("PILOT_SEQUENCER_ADDR"))
         sequencerAddr = env;
 
-    // Write config for create_new
-    auto writeConfig = [&]() {
+    // Always (re)write the config so the sequencer address is correct for this run.
+    {
         std::ofstream cf(configPath, std::ios::trunc);
         if (cf.is_open()) {
             QJsonObject walletCfg;
@@ -157,32 +205,28 @@ bool PilotImpl::initWallet() {
             cf << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();
             cf.close();
         }
-    };
+    }
 
-    writeConfig();
+    // Reopen existing on-disk wallet first (reload path).
+    QVariant openResult = wallet->invokeRemoteMethod(
+        kWalletModule, "open",
+        QString::fromStdString(configPath),
+        QString::fromStdString(storagePath), Timeout(15000));
+    qWarning() << "[pilot] initWallet: open result:" << openResult;
+    if (!openResult.isNull() && openResult.toInt() == 0) { walletOpened_ = true; return true; }
 
+    // No storage yet — create a fresh wallet (uses the config above as-is).
     std::string walletName = "pilot_" + std::to_string(
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
     qWarning() << "[pilot] initWallet: trying create_new with name" << walletName.c_str();
     QVariant createResult = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "create_new",
+        kWalletModule, "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
         QString::fromStdString(walletName), Timeout(15000));
     qWarning() << "[pilot] initWallet: create_new result:" << createResult;
 
-    // Rewrite config — create_new overwrites it with default port 3040
-    writeConfig();
-
-    if (!createResult.isNull() && createResult.toInt() == 0) {
-        // Reopen with correct sequencer address
-        QVariant reopenResult = wallet->invokeRemoteMethod(
-            "lez_wallet_module", "open",
-            QString::fromStdString(configPath),
-            QString::fromStdString(storagePath), Timeout(15000));
-        qWarning() << "[pilot] initWallet: reopen result:" << reopenResult;
-        return !reopenResult.isNull() && reopenResult.toInt() == 0;
-    }
+    if (!createResult.isNull() && createResult.toInt() == 0) { walletOpened_ = true; return true; }
     return false;
 }
 
@@ -191,17 +235,17 @@ bool PilotImpl::createIdentity() {
 
     if (!initWallet()) return false;
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient(kWalletModule);
     if (!wallet) return false;
 
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "create_account_private");
+        kWalletModule, "create_account_private");
     if (result.isNull() || result.toString().isEmpty()) return false;
 
     agentAccountId_ = result.toString().toStdString();
 
     QVariant keysResult = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "get_private_account_keys",
+        kWalletModule, "get_private_account_keys",
         QString::fromStdString(agentAccountId_));
     if (keysResult.isNull()) return false;
 
@@ -251,6 +295,117 @@ bool PilotImpl::createIdentity() {
     return true;
 }
 
+// Fund the agent's private account from the dev pinata faucet, once.
+// Flow (proven against LEZ v0.1.2): create+register a public account, claim the
+// pinata into it (solving the PoW), then shielded-transfer into the agent's
+// private account. Idempotent via the 'funded' config flag; best-effort (never
+// fatal to startup). NOTE: if the chain is wiped, also clear pilot.db so this re-runs.
+bool PilotImpl::fundAgentIfNeeded() {
+    if (!logosAPI_ || agentAccountId_.empty() || !db_) return false;
+
+    // Idempotency check.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, "SELECT value FROM config WHERE key='funded';",
+                               -1, &stmt, nullptr) == SQLITE_OK) {
+            bool funded = (sqlite3_step(stmt) == SQLITE_ROW &&
+                           std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))) == "1");
+            sqlite3_finalize(stmt);
+            if (funded) return true;
+        }
+    }
+
+    if (!initWallet()) { qWarning() << "[pilot] fund: wallet not open"; return false; }
+    auto* wallet = logosAPI_->getClient(kWalletModule);
+    if (!wallet) return false;
+
+    const int64_t fundAmount = 100;   // tokens to move into the agent's private account
+
+    auto syncToHead = [&]() {
+        QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
+        if (!h.isNull())
+            wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
+                                       QString::number(h.toLongLong()), Timeout(30000));
+    };
+    auto ok = [](const QVariant& v) {
+        if (v.isNull()) return false;
+        QJsonDocument d = QJsonDocument::fromJson(v.toString().toUtf8());
+        return d.isObject() && d.object().value("success").toBool();
+    };
+
+    // 1. Fresh public account + initialise it on-chain.
+    QVariant pubV = wallet->invokeRemoteMethod(kWalletModule, "create_account_public");
+    std::string pubId = pubV.isNull() ? std::string() : pubV.toString().toStdString();
+    if (pubId.empty()) { qWarning() << "[pilot] fund: create_account_public failed"; return false; }
+    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "register_public_account",
+                                       QString::fromStdString(pubId), Timeout(30000)))) {
+        qWarning() << "[pilot] fund: register_public_account failed"; return false;
+    }
+    // Wait for the register tx to be mined — claim_pinata requires an initialised
+    // recipient on-chain, else the claim is accepted but never credits.
+    {
+        QVariant s = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
+        long long start = s.isNull() ? 0 : s.toLongLong();
+        for (int i = 0; i < 20; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            syncToHead();
+            QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
+            if (!h.isNull() && h.toLongLong() >= start + 2) break;
+        }
+    }
+
+    // 2. Resolve the pinata id, fetch its data, solve the PoW.
+    QVariant pinV = wallet->invokeRemoteMethod(kWalletModule, "account_id_from_base58",
+                                               QString(kPinataBase58), Timeout(15000));
+    std::string pinataHex = pinV.isNull() ? std::string() : pinV.toString().toStdString();
+    if (pinataHex.empty()) { qWarning() << "[pilot] fund: pinata id resolve failed"; return false; }
+
+    QVariant accV = wallet->invokeRemoteMethod(kWalletModule, "get_account_public",
+                                               QString::fromStdString(pinataHex), Timeout(15000));
+    QJsonDocument accDoc = accV.isNull() ? QJsonDocument() : QJsonDocument::fromJson(accV.toString().toUtf8());
+    std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
+    std::string solHex = computePinataSolution(dataHex);
+    if (solHex.empty()) { qWarning() << "[pilot] fund: bad pinata data / no solution"; return false; }
+
+    // 3. Claim the pinata into the public account.
+    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "claim_pinata",
+                                       QString::fromStdString(pinataHex),
+                                       QString::fromStdString(pubId),
+                                       QString::fromStdString(solHex), Timeout(60000)))) {
+        qWarning() << "[pilot] fund: claim_pinata failed"; return false;
+    }
+
+    // Wait for the claim tx to be mined and credited before spending it.
+    bool credited = false;
+    for (int i = 0; i < 20 && !credited; ++i) {
+        syncToHead();
+        QVariant balV = wallet->invokeRemoteMethod(kWalletModule, "get_balance",
+                                                   QString::fromStdString(pubId), QVariant(true));
+        if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) credited = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
+    if (!credited) { qWarning() << "[pilot] fund: pinata claim not credited in time"; return false; }
+
+    // 4. Shielded transfer public -> agent's private account (generates a ZK proof).
+    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "transfer_shielded_owned",
+                                       QString::fromStdString(pubId),
+                                       QString::fromStdString(agentAccountId_),
+                                       QString::fromStdString(u128LeHex(fundAmount)), Timeout(120000)))) {
+        qWarning() << "[pilot] fund: transfer_shielded_owned failed"; return false;
+    }
+    syncToHead();
+
+    // 5. Mark funded.
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "INSERT OR REPLACE INTO config (key, value) VALUES ('funded', '1');",
+                           -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    qWarning() << "[pilot] fund: agent private account funded with" << fundAmount;
+    return true;
+}
+
 std::string PilotImpl::getAgentNpk() {
     return agentNpk_;
 }
@@ -262,11 +417,17 @@ std::string PilotImpl::getAccountId() {
 std::string PilotImpl::walletBalance() {
     if (!logosAPI_ || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient(kWalletModule);
     if (!wallet) return "{\"error\": \"wallet module unavailable\"}";
 
+    // Sync to chain head so the balance reflects the latest blocks.
+    QVariant head = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
+    if (!head.isNull())
+        wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
+                                   QString::number(head.toLongLong()), Timeout(30000));
+
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "get_balance",
+        kWalletModule, "get_balance",
         QString::fromStdString(agentAccountId_), QVariant(false));
 
     if (result.isNull())

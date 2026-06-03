@@ -406,11 +406,11 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
 std::string PilotImpl::programQuery(const std::string& programId, const std::string& paramsJson) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient("logos_execution_zone");
     if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "queryProgram",
+        "logos_execution_zone", "queryProgram",
         QString::fromStdString(programId),
         QString::fromStdString(paramsJson), RPC_TIMEOUT);
 
@@ -444,11 +444,11 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient("logos_execution_zone");
     if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "callProgram",
+        "logos_execution_zone", "callProgram",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(programId),
         QString::fromStdString(instruction),

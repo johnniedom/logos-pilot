@@ -25,6 +25,35 @@ static std::string amountToHexLE(int64_t amount) {
     return std::string(hex);
 }
 
+// Execute a private (shielded) transfer, choosing the right wallet method by recipient form:
+//   - recipient is a keys JSON ({nullifier_public_key, viewing_public_key}) -> transfer_private
+//     (external payee whose public keys we were given, e.g. from an Agent Card)
+//   - recipient is a plain 32-byte account id hex -> transfer_private_owned
+//     (a private account this wallet owns)
+// A bare account id cannot be shielded-paid without the payee's keys, so id form is
+// only valid for owned recipients.
+static QVariant doPrivateTransfer(LogosAPIClient* wallet, const std::string& fromId,
+                                  const std::string& recipient, int64_t amount) {
+    const bool hasKeys = recipient.find("nullifier_public_key") != std::string::npos
+                      || recipient.find("viewing_public_key") != std::string::npos;
+    const char* method = hasKeys ? "transfer_private" : "transfer_private_owned";
+    return wallet->invokeRemoteMethod(
+        "logos_execution_zone", method,
+        QString::fromStdString(fromId),
+        QString::fromStdString(recipient),
+        QString::fromStdString(amountToHexLE(amount)), Timeout(120000));
+}
+
+// A transfer result is JSON: {"error":"...","success":bool,"tx_hash":"..."}.
+// Parse the success flag explicitly — substring-matching is wrong because the
+// "error" key matches even when error is empty, and a real error message may
+// not contain the word "fail".
+static bool transferSucceeded(const QVariant& result) {
+    if (result.isNull()) return false;
+    QJsonDocument d = QJsonDocument::fromJson(result.toString().toUtf8());
+    return d.isObject() && d.object().value("success").toBool();
+}
+
 static std::string generateId() {
     auto now = std::chrono::high_resolution_clock::now();
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -118,17 +147,12 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient("logos_execution_zone");
     if (!wallet) return false;
 
-    QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "transfer_private",
-        QString::fromStdString(agentAccountId_),
-        QString::fromStdString(recipient),
-        QString::fromStdString(amountToHexLE(amount)));
+    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
 
-    QString resultStr = result.toString();
-    bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive);
+    bool ok = transferSucceeded(result);
     std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
     now = currentTimestamp();
     sqlite3_prepare_v2(db_,
@@ -300,7 +324,7 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    auto* wallet = logosAPI_->getClient("lez_wallet_module");
+    auto* wallet = logosAPI_->getClient("logos_execution_zone");
     if (!wallet) {
         QJsonObject res;
         res["status"] = QString("failed");
@@ -309,14 +333,9 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    QVariant result = wallet->invokeRemoteMethod(
-        "lez_wallet_module", "transfer_private",
-        QString::fromStdString(agentAccountId_),
-        QString::fromStdString(recipient),
-        QString::fromStdString(amountToHexLE(amount)));
+    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
 
-    QString resultStr = result.toString();
-    bool ok = !result.isNull() && !resultStr.isEmpty() && !resultStr.contains("fail", Qt::CaseInsensitive) && !resultStr.contains("error", Qt::CaseInsensitive);
+    bool ok = transferSucceeded(result);
     std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
     now = currentTimestamp();
     sqlite3_prepare_v2(db_,

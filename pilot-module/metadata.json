@@ -8,7 +8,7 @@
   "category": "general",
   "main": "pilot_plugin",
   "dependencies": [
-    "lez_wallet_module",
+    "logos_execution_zone",
     "delivery_module",
     "storage_module",
     "chat_module"
