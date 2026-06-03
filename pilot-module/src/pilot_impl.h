@@ -81,6 +81,7 @@ private:
     bool initWallet();
     bool loadIdentity();
     bool createIdentity();
+    bool fundAgentIfNeeded();
     void recoverPendingTransactions();
     void initLLM();
     std::string buildLLMSystemPrompt();
@@ -102,6 +103,7 @@ private:
     int64_t spendPeriodSeconds_ = 86400;
     std::string dataDir_;
     bool initialized_ = false;
+    bool walletOpened_ = false;
     bool storageInitialized_ = false;
     bool deliveryInitialized_ = false;
     bool depsInitialized_ = false;
