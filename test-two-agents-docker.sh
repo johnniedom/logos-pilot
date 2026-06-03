@@ -40,12 +40,12 @@ call_a() {
 }
 
 call_b() {
-  local raw=$(docker exec $CONTAINER timeout 60 $LOGOSCORE --config-dir /data/.logoscore call pilot "$@" 2>&1)
+  local raw=$(docker exec $CONTAINER timeout 120 $LOGOSCORE --config-dir /data/.logoscore call pilot "$@" 2>&1)
   echo "$raw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "$raw"
 }
 
 # Pre-flight
-if ! curl -s -o /dev/null -w "" http://127.0.0.1:8080/ 2>/dev/null; then
+if ! curl -s -o /dev/null -w "" http://127.0.0.1:3040/ 2>/dev/null; then
   echo "  ✗ Sequencer not running on port 8080"
   exit 1
 fi
@@ -69,7 +69,7 @@ mkdir -p $AGENT_A $AGENT_B
 # Prepare modules-b (no storage_module)
 rm -rf $MODULES_B
 mkdir -p $MODULES_B
-for m in capability_module lez_wallet_module delivery_module chat_module pilot; do
+for m in capability_module logos_execution_zone delivery_module chat_module pilot; do
   cp -r $MODULES/$m $MODULES_B/$m 2>/dev/null
 done
 sleep 2
@@ -85,7 +85,7 @@ if ! cat $AGENT_A/.logoscore/daemon/state.json 2>/dev/null | grep -q '"pid"'; th
 fi
 echo "  OK    Agent A daemon running"
 
-for m in capability_module lez_wallet_module delivery_module storage_module pilot; do
+for m in capability_module logos_execution_zone delivery_module storage_module pilot; do
   timeout 15 $LOGOSCORE $CFG_A load-module $m > /dev/null 2>&1
 done
 sleep 3
@@ -99,9 +99,13 @@ docker run --rm -d \
   -v /nix/store:/nix/store:ro \
   -v $MODULES_B:/modules:ro \
   -v $AGENT_B:/data \
+  -v /home/johnnie/.risc0:/root/.risc0:ro \
   -e LOGOS_HOST_PATH=$LOGOS_HOST_PATH \
-  -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:8080 \
+  -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
   -e PILOT_WAKU_ADDR=/ip4/host.docker.internal/tcp/30303 \
+  -e RISC0_DEV_MODE=1 \
+  -e LOGOS_BLOCKCHAIN_CIRCUITS=/nix/store/y8i3f2qiyhbl9kccvl7z12rnbj6h42g9-logos-blockchain-circuits-0.4.1 \
+  -e PATH=/root/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   --add-host=host.docker.internal:host-gateway \
   ubuntu:22.04 \
   $LOGOSCORE --config-dir /data/.logoscore -D -m /modules \
@@ -115,7 +119,7 @@ if ! docker ps --filter name=$CONTAINER --format "{{.Status}}" | grep -q "Up"; t
 fi
 echo "  OK    Agent B container running"
 
-for m in capability_module lez_wallet_module delivery_module pilot; do
+for m in capability_module logos_execution_zone delivery_module pilot; do
   docker exec $CONTAINER timeout 15 $LOGOSCORE --config-dir /data/.logoscore load-module $m > /dev/null 2>&1
 done
 sleep 3
@@ -219,7 +223,8 @@ echo ""
 # ═══════════════════════════════════════
 echo "── Phase 6: Wallet Transfer ──"
 
-R=$(call_a walletSend "$ACCOUNT_B" 1 "test transfer A to B")
+# Cross-agent shielded pay needs B's public keys (npk+vpk), not its account id.
+R=$(call_a walletSend "$NPK_B" 1 "test transfer A to B")
 check "[A→B] walletSend" "$R"
 
 echo ""
