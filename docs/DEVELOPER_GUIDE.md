@@ -407,6 +407,30 @@ Key points:
 - `host.docker.internal` reaches the host's sequencer and Waku node
 - Agent B gets its own port 60000 (isolated network namespace)
 
+#### Updated for LEZ v0.1.2 (2026-06-03)
+
+The snippet above is the original shape; on the current stack apply these deltas (all baked into
+`test-two-agents-docker.sh`, verified 13/14):
+
+- Module renamed: `lez_wallet_module` → **`logos_execution_zone`** (in both the copy loop and load loop).
+- Sequencer port is **3040**, not 8080: `PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040`.
+- **The container MUST get the RISC0 environment** or Agent B's wallet/identity init dies and *every*
+  B call returns an empty response (which then shows up on A's side as
+  `encryption failed: invalid recipient key: not a hex string`, because B never produced keys). Add:
+  ```bash
+    -v /home/$USER/.risc0:/root/.risc0:ro \
+    -e RISC0_DEV_MODE=1 \
+    -e LOGOS_BLOCKCHAIN_CIRCUITS=<logos-blockchain-circuits store path> \
+    -e PATH=/root/.risc0/extensions/<r0vm-version>:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  ```
+- **Cross-agent payment uses the recipient's keys, not its account id:** `walletSend <B_npk_json> <amt>`
+  (a bare account id only works for accounts the *sender's own* wallet owns — see the wallet API notes).
+- B's `initialize` in a cold container (mounted `/nix/store` cold-load + funding ZK proof) can exceed
+  **60s** — use a ~120s client call timeout. It's a stopwatch, not a real failure: `getAgentNpk` and all
+  later B operations pass, confirming B did initialise.
+- One shared **nwaku** serves both agents (`docker compose up -d nwaku`); each agent's `delivery_module`
+  runs its own embedded Core-mode Waku node and peers with that nwaku on `:30303`.
+
 ### Environment variables for multi-agent
 
 | Variable | Default | Description |

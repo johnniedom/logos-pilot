@@ -50,13 +50,27 @@ This requires a custom LEZ program (RISC0 guest binary). Documented as a future 
 
 ## CU Cost Reference
 
-Measured on LEZ testnet (costs may change during testnet):
+On LEZ testnet v0.1.2 (standalone sequencer) there is **no explicit on-chain CU fee meter** —
+the dominant compute cost of every *private* operation is its **zk-proof generation** (RISC0 zkVM).
+So the numbers below are proof/compute cost, not a fee. They were measured end-to-end with real
+proofs (`RISC0_DEV_MODE=0`) on the reference dev machine on 2026-06-05.
 
-| Operation | Estimated CU |
-|-----------|-------------|
-| `transferPrivate()` | TBD — measure during Phase E |
-| `createAccountPrivate()` | TBD |
-| `callProgram()` | TBD |
-| `deployProgram()` | TBD |
+**Reference hardware:** WSL2 / Ubuntu, ~7.6 GB RAM laptop. Proving for these circuits is
+**RAM-bound** — on this box the prover swaps heavily, so the wall-clock figures are a worst case.
+A machine with adequate RAM (16 GB+) generates the same proofs in *minutes*, not tens of minutes.
 
-These will be filled in during integration testing with actual on-chain measurements.
+| Operation | On-chain proof? | Measured cost (reference HW) | Notes |
+|-----------|-----------------|------------------------------|-------|
+| `transferPrivate()` — shielded public→private send | **Yes — real STARK** | **~44 min wall / ~139 min CPU** (≈3.2× parallel) | The expensive op; dominates everything. RAM-bound; ≈minutes on 16 GB+. |
+| `createAccountPrivate()` | No (local) | instant | Account is created locally; the proof is deferred to its first transfer. |
+| pinata claim / public transfer | Public circuit (no privacy proof) | seconds — lands in ~1–2 blocks | Funding path; cheap because no privacy circuit. |
+| `account sync-private` | No (decrypt/scan) | **~21 s** | Viewing-key note scan to decode the incoming shielded note. |
+| `callProgram()` / `deployProgram()` | Depends on the guest | not exercised in v1 | No custom RISC0 guest ships in v1; a `deployProgram` would add a one-time guest-proving cost. |
+
+**Getting exact, hardware-independent numbers:** wall-clock varies wildly with RAM. The portable CU
+measure is the **RISC0 zkVM cycle count** — run the prover with `RISC0_INFO=1` (or read
+`session.total_cycles`) to log cycles per segment; sum them for the per-operation cycle cost.
+
+**Takeaway for agent design:** private transfers are the heavy operation, so the pilot batches/holds
+rather than proving speculatively, and the spending FSM only triggers a shielded proof once on an
+explicitly approved transfer — never on ambiguous input.

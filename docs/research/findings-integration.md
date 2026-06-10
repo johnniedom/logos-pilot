@@ -564,6 +564,27 @@ static std::string amountToHexLE(int64_t amount) {
 - `transfer_private` needs recipient's public keys as JSON, not a hex address
 - `open()` can return error 99 if wallet storage is locked from a previous process
 
+### Private-transfer method selection (LEZ v0.1.2 — verified 2026-06-03)
+
+`logos_execution_zone` has **three** private-transfer methods; using the wrong one fails silently:
+
+| Method | Recipient arg | When |
+|--------|---------------|------|
+| `transfer_private_owned(fromId, toId, amt)` | account-id **hex** | recipient is a private account **this wallet owns** (e.g. self-transfer, demo) |
+| `transfer_private(fromId, toKeysJson, amt)` | **keys JSON** `{nullifier_public_key, viewing_public_key}` | recipient is **external** (another agent) — you need their npk+vpk to build the note; a bare id can't be shielded-paid |
+| `transfer_shielded_owned(fromPublic, toPrivOwned, amt)` | owned private id | public → owned-private (used by funding) |
+
+So a generic "send" must branch on recipient form: keys-JSON → `transfer_private`; plain id → `transfer_private_owned`.
+(In the pilot: `doPrivateTransfer()` in `pilot_spending.cpp`.)
+
+### Detecting transfer success — parse the field, don't substring-match
+
+The result is `{"error":"","success":true,"tx_hash":".."}`. **Do NOT** decide success with a substring test:
+- `resultStr.contains("error")` matches the empty **`"error"` key** → reports a real success as failed.
+- a genuine failure like `InsufficientFundsError` does **not** contain `fail`.
+
+Parse the JSON `success` boolean instead (`transferSucceeded()` in `pilot_spending.cpp`).
+
 ---
 
 ## 17. Spending FSM Error Checking
