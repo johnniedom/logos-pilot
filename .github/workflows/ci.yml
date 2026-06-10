@@ -51,3 +51,51 @@ jobs:
         run: |
           pilot-cli/result/bin/pilot version
           pilot-cli/result/bin/pilot help
+
+  e2e:
+    name: E2E (headless logoscore)
+    runs-on: ubuntu-latest
+    needs: build-module
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-pilot
+          skipPush: true
+        continue-on-error: true
+
+      # Headless runtime that loads modules as real plugins (see CLAUDE.md).
+      - name: Build logoscore CLI
+        run: nix build 'github:logos-co/logos-logoscore-cli' -o result-logoscore
+
+      - name: Package pilot as an LGX
+        run: cd pilot-module && nix build .#lgx -o result-lgx
+
+      - name: Install module via lgpm
+        run: |
+          cd pilot-module
+          LGPM=$(find /nix/store -maxdepth 3 -name lgpm -path "*/bin/*" | head -1)
+          "$LGPM" install --file result-lgx/logos-pilot-module-lib.lgx \
+            --modules-dir /tmp/pilot/modules --allow-unsigned
+
+      # Load the packaged plugin in the real runtime and exercise the no-chain
+      # skills end-to-end. Funding/spending with real proofs needs the LEZ stack +
+      # RISC0 and is validated manually (see RUNBOOK.md), not in CI.
+      - name: Run headless E2E
+        run: |
+          export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d | head -1)/bin/logos_host
+          out=$(./result-logoscore/bin/logoscore -m /tmp/pilot/modules -l pilot \
+            -c "pilot.echo(ci-smoke)" \
+            -c "pilot.metaSkills()" \
+            -c "pilot.metaStatus()" --quit-on-finish 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "echo: ci-smoke"     || { echo "E2E FAIL: echo round-trip"; exit 1; }
+          echo "$out" | grep -q "wallet.send"         || { echo "E2E FAIL: skill registry"; exit 1; }
+          echo "$out" | grep -q '"count":21'          || { echo "E2E FAIL: skill count != 21"; exit 1; }
+          echo "E2E OK: plugin loaded, 21 skills registered, echo round-trip works"
