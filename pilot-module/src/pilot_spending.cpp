@@ -6,6 +6,7 @@
 #include <chrono>
 #include <random>
 #include <cstring>
+#include <vector>
 #include <QString>
 #include <QVariant>
 #include <QJsonDocument>
@@ -193,8 +194,51 @@ bool PilotImpl::rejectSpend(const std::string& requestId) {
     return changed;
 }
 
+// Proactively cancel any pending request whose 60-minute approval window has
+// passed. Without this the deadline shown to the owner ("Expires: 60 min") is
+// only enforced lazily at approve-time — a stale request would otherwise sit in
+// the pending list forever and be re-announced on restart. Returns the count.
+// SQL verified against real SQLite in /tmp/test_expiry.cpp (red->green).
+int PilotImpl::expireStaleSpends() {
+    if (!db_) return 0;
+    long long now = std::stoll(currentTimestamp());
+
+    // Only states still awaiting the owner can expire; APPROVED/EXECUTING/etc. are
+    // mid-flight and COMPLETED/REJECTED are terminal.
+    static const char* PENDING =
+        "state IN ('CREATED','HELD','NOTIFIED') "
+        "AND expires_at != '' AND CAST(expires_at AS INTEGER) < ?";
+
+    std::vector<std::string> ids;
+    std::string selSql = std::string("SELECT id FROM spend_requests WHERE ") + PENDING + ";";
+    sqlite3_stmt* sel = nullptr;
+    sqlite3_prepare_v2(db_, selSql.c_str(), -1, &sel, nullptr);
+    sqlite3_bind_int64(sel, 1, now);
+    while (sqlite3_step(sel) == SQLITE_ROW)
+        ids.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(sel, 0)));
+    sqlite3_finalize(sel);
+    if (ids.empty()) return 0;
+
+    std::string updSql =
+        std::string("UPDATE spend_requests SET state='EXPIRED', updated_at=? WHERE ") + PENDING + ";";
+    sqlite3_stmt* upd = nullptr;
+    sqlite3_prepare_v2(db_, updSql.c_str(), -1, &upd, nullptr);
+    std::string nowStr = std::to_string(now);
+    sqlite3_bind_text(upd, 1, nowStr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd, 2, now);
+    sqlite3_step(upd);
+    sqlite3_finalize(upd);
+
+    // Tell the owner once per cancelled request (best-effort; no-op if no channel).
+    for (const auto& id : ids)
+        sendToOwner("Spend request " + id + " expired before approval and was cancelled.");
+    return static_cast<int>(ids.size());
+}
+
 std::string PilotImpl::getPendingSpends() {
     if (!db_) return "{\"error\": \"not initialized\"}";
+
+    expireStaleSpends();   // never present a request that has already timed out
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
@@ -355,6 +399,8 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
 
 void PilotImpl::recoverPendingTransactions() {
     if (!db_ || !logosAPI_) return;
+
+    expireStaleSpends();   // don't re-announce requests that already timed out while we were down
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,

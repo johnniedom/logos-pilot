@@ -29,6 +29,7 @@ logos_test(
         test_crypto.cpp
         test_skills.cpp
         test_llm.cpp
+        test_spending.cpp
 )
 
 target_link_libraries(pilot_module_tests PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
