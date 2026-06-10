@@ -50,11 +50,15 @@ Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix fi
 
 ---
 
-### Recordable now
-Demo 1 + Demo 2 (both ✅).
+### Status — ALL FOUR VERIFIED ✅ (2026-06-05)
+- Demo 1 funding, Demo 2 vault, Demo 3 spending threshold (30 auto / 60 held→approved),
+  Demo 4 two-agent A2A (13/14, host+Docker) — all working.
+- Demo 3 `transfer_private` fixed (use `transfer_private_owned` for owned recipient by id;
+  parse the result `success` field, not substrings).
+- #35 real proofs (`RISC0_DEV_MODE=0`) verified end-to-end: shielded 77 transfer → private balance 77.
 
-### Blocked until fixed/verified
-- Demo 3: fix `transfer_private` (recipient private account likely needs on-chain registration).
-- Demo 4: verify the 2-agent discover → task → pay flow on the v0.1.2 build.
+### One-command launchers (see RUNBOOK.md in repo root)
+- Demos 1 + 2 + 3 together:  `bash ~/demo-run.sh`   (add ` 0` for real proofs)
+- Demo 4 (A2A):              `bash ~/run-a2a.sh`     (Docker / nwaku up first)
 
 (Interface coverage: film Demo 2 via **Basecamp** owner channel, Demos 1/3/4 via **CLI** — satisfies both required interfaces.)
