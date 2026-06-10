@@ -33,6 +33,7 @@ public:
     std::string createSpendRequest(const std::string& recipient, int64_t amount, const std::string& reason);
     bool approveSpend(const std::string& requestId);
     bool rejectSpend(const std::string& requestId);
+    int expireStaleSpends();   // auto-cancel pending requests past their deadline; returns count
     std::string getPendingSpends();
     bool setSpendingLimits(int64_t perTransaction, int64_t perPeriod, int64_t periodSeconds);
     std::string walletSend(const std::string& recipient, int64_t amount, const std::string& reason);
@@ -82,7 +83,10 @@ private:
     bool loadIdentity();
     bool createIdentity();
     bool fundAgentIfNeeded();
+    void resetStaleIdentity();   // clear pilot.db identity + funded flag on wallet divergence
+    void backupWallet();         // save wallet + keep a recovery copy of its storage file
     void recoverPendingTransactions();
+    bool deliverToOwner(const std::string& payload);   // retrying, honest publish to owner channel
     void initLLM();
     std::string buildLLMSystemPrompt();
     sqlite3* db_ = nullptr;

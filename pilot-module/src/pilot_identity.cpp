@@ -15,6 +15,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <openssl/evp.h>
 #include <QString>
 #include <QVariant>
@@ -80,6 +81,21 @@ bool PilotImpl::initialize(const std::string& dataDir) {
     if (loadIdentity()) {
         initialized_ = true;
         initWallet();              // reopen the on-disk wallet for this process
+        // Guard against pilot.db / wallet divergence: confirm the wallet actually holds
+        // the saved account. If not (corrupt/replaced wallet), recover by recreating a
+        // matching identity instead of pointing at an account the wallet no longer has.
+        bool walletHasAccount = false;
+        auto* w = logosAPI_ ? logosAPI_->getClient(kWalletModule) : nullptr;
+        if (w && !agentAccountId_.empty()) {
+            QVariant k = w->invokeRemoteMethod(kWalletModule, "get_private_account_keys",
+                QString::fromStdString(agentAccountId_));
+            walletHasAccount = (!k.isNull() && !k.toString().isEmpty());
+        }
+        if (!walletHasAccount) {
+            qWarning() << "[pilot] initialize: wallet missing saved account -> recovering identity";
+            resetStaleIdentity();
+            createIdentity();      // fresh, consistent pilot.db + wallet pair
+        }
         recoverPendingTransactions();
         fundAgentIfNeeded();       // idempotent, best-effort
         return true;
@@ -172,6 +188,36 @@ bool PilotImpl::loadIdentity() {
     return found;
 }
 
+// Wipe the saved identity + funded flag when the on-disk wallet has diverged from
+// pilot.db (e.g. the wallet file was unreadable and had to be recreated). Keeps the
+// pilot's notebook and the wallet's keyring consistent: the agent then recreates a
+// fresh matching identity and re-funds, instead of pointing at an account the wallet
+// no longer has (which is what caused ACCOUNT_NOT_FOUND / KEY_NOT_FOUND).
+void PilotImpl::resetStaleIdentity() {
+    if (db_) {
+        sqlite3_exec(db_, "DELETE FROM agent_identity WHERE id=1;", nullptr, nullptr, nullptr);
+        sqlite3_exec(db_, "DELETE FROM config WHERE key='funded';", nullptr, nullptr, nullptr);
+    }
+    agentAccountId_.clear();
+    agentNpk_.clear();
+    agentViewingKey_.clear();
+}
+
+// Persist the wallet and keep a backup copy of its storage file. This wallet has no
+// seed-phrase / private-key export — the storage file IS the only key backup — so we
+// keep a second copy that initWallet() can restore from if the main file is lost.
+void PilotImpl::backupWallet() {
+    if (!logosAPI_ || dataDir_.empty()) return;
+    if (auto* wallet = logosAPI_->getClient(kWalletModule))
+        wallet->invokeRemoteMethod(kWalletModule, "save");
+    std::string storagePath = dataDir_ + "/wallet_storage.json";
+    std::ifstream src(storagePath, std::ios::binary);
+    if (src.good()) {
+        std::ofstream dst(storagePath + ".bak", std::ios::binary | std::ios::trunc);
+        dst << src.rdbuf();
+    }
+}
+
 bool PilotImpl::initWallet() {
     if (walletOpened_) return true;   // idempotent: handle persists in the module process
     if (!logosAPI_) { qWarning() << "[pilot] initWallet: logosAPI_ is NULL"; return false; }
@@ -207,25 +253,54 @@ bool PilotImpl::initWallet() {
         }
     }
 
-    // Reopen existing on-disk wallet first (reload path).
-    QVariant openResult = wallet->invokeRemoteMethod(
-        kWalletModule, "open",
-        QString::fromStdString(configPath),
-        QString::fromStdString(storagePath), Timeout(15000));
-    qWarning() << "[pilot] initWallet: open result:" << openResult;
-    if (!openResult.isNull() && openResult.toInt() == 0) { walletOpened_ = true; return true; }
+    std::string backupPath = storagePath + ".bak";
 
-    // No storage yet — create a fresh wallet (uses the config above as-is).
+    auto tryOpen = [&](const std::string& path) -> bool {
+        QVariant r = wallet->invokeRemoteMethod(
+            kWalletModule, "open",
+            QString::fromStdString(configPath),
+            QString::fromStdString(path), Timeout(15000));
+        return (!r.isNull() && r.toInt() == 0);
+    };
+    auto copyFile = [](const std::string& from, const std::string& to) {
+        std::ifstream src(from, std::ios::binary);
+        if (!src.good()) return;
+        std::ofstream dst(to, std::ios::binary | std::ios::trunc);
+        dst << src.rdbuf();
+    };
+    bool storageExists = std::ifstream(storagePath).good();
+    bool backupExists  = std::ifstream(backupPath).good();
+
+    // 1. Normal restart: open the main wallet file. (Most common real-world path.)
+    if (storageExists && tryOpen(storagePath)) { walletOpened_ = true; return true; }
+
+    // 2. Main file missing/unreadable but a backup exists -> RESTORE it. Same account,
+    //    same keys, same funds — never lose a real user's money to a fresh account.
+    if (backupExists && tryOpen(backupPath)) {
+        copyFile(backupPath, storagePath);   // promote the restored copy to the main file
+        qWarning() << "[pilot] initWallet: restored wallet from backup";
+        walletOpened_ = true; return true;
+    }
+
+    // 3. A storage file exists but neither it nor a backup could be opened -> it is
+    //    corrupt/incompatible. NEVER overwrite it silently (that was the bug). Move it
+    //    aside for forensics, and reset the now-orphaned identity so pilot.db and the
+    //    fresh wallet stay consistent.
+    if (storageExists) {
+        std::rename(storagePath.c_str(), (storagePath + ".corrupt").c_str());
+        qWarning() << "[pilot] initWallet: wallet unreadable; moved aside + resetting identity";
+        resetStaleIdentity();
+    }
+
+    // 4. Genuine first run (or unrecoverable) -> create a fresh wallet.
     std::string walletName = "pilot_" + std::to_string(
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
-    qWarning() << "[pilot] initWallet: trying create_new with name" << walletName.c_str();
     QVariant createResult = wallet->invokeRemoteMethod(
         kWalletModule, "create_new",
         QString::fromStdString(configPath),
         QString::fromStdString(storagePath),
         QString::fromStdString(walletName), Timeout(15000));
     qWarning() << "[pilot] initWallet: create_new result:" << createResult;
-
     if (!createResult.isNull() && createResult.toInt() == 0) { walletOpened_ = true; return true; }
     return false;
 }
@@ -403,6 +478,7 @@ bool PilotImpl::fundAgentIfNeeded() {
         sqlite3_finalize(stmt);
     }
     qWarning() << "[pilot] fund: agent private account funded with" << fundAmount;
+    backupWallet();   // persist + keep a recovery copy of the now-funded wallet
     return true;
 }
 
