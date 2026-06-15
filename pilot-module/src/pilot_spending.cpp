@@ -171,6 +171,8 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
         sendToOwner("Transaction " + requestId + " FAILED");
     }
 
+    // If this spend backs an inbound peer task, drive that task to its terminal state.
+    resumeInboundTask(requestId, ok, ok ? "owner approved; executed" : "owner approved; execution failed");
     return ok;
 }
 
@@ -190,6 +192,7 @@ bool PilotImpl::rejectSpend(const std::string& requestId) {
     bool changed = sqlite3_changes(db_) > 0;
     if (changed) {
         sendToOwner("Transaction " + requestId + " rejected.");
+        resumeInboundTask(requestId, false, "owner rejected");
     }
     return changed;
 }
@@ -229,9 +232,12 @@ int PilotImpl::expireStaleSpends() {
     sqlite3_step(upd);
     sqlite3_finalize(upd);
 
-    // Tell the owner once per cancelled request (best-effort; no-op if no channel).
-    for (const auto& id : ids)
+    // Tell the owner once per cancelled request (best-effort; no-op if no channel),
+    // and drive any linked inbound A2A task to failed.
+    for (const auto& id : ids) {
         sendToOwner("Spend request " + id + " expired before approval and was cancelled.");
+        resumeInboundTask(id, false, "approval expired");
+    }
     return static_cast<int>(ids.size());
 }
 

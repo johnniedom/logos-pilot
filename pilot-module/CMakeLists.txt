@@ -24,6 +24,7 @@ logos_module(
         src/pilot_messaging.cpp
         src/pilot_meta.cpp
         src/pilot_a2a.cpp
+        src/pilot_a2a_inbox.cpp
         src/pilot_llm.h
         src/pilot_llm_anthropic.cpp
         src/pilot_llm_openai.cpp

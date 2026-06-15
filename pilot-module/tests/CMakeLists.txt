@@ -17,6 +17,7 @@ logos_test(
         ../src/pilot_messaging.cpp
         ../src/pilot_meta.cpp
         ../src/pilot_a2a.cpp
+        ../src/pilot_a2a_inbox.cpp
         ../src/pilot_llm_anthropic.cpp
         ../src/pilot_llm_openai.cpp
         ../src/pilot_llm_factory.cpp
@@ -30,6 +31,7 @@ logos_test(
         test_skills.cpp
         test_llm.cpp
         test_spending.cpp
+        test_a2a_inbox.cpp
 )
 
 target_link_libraries(pilot_module_tests PRIVATE SQLite::SQLite3 OpenSSL::Crypto)

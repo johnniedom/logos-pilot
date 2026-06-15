@@ -32,7 +32,7 @@ jobs:
 
       - uses: cachix/cachix-action@v15
         with:
-          name: logos-pilot
+          name: logos-pilot-johnniedom
           skipPush: true
         continue-on-error: true
 
@@ -102,7 +102,7 @@ jobs:
 
       - uses: cachix/cachix-action@v15
         with:
-          name: logos-pilot
+          name: logos-pilot-johnniedom
           skipPush: true
         continue-on-error: true
 
