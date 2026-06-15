@@ -13,6 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The wallet (Rust) + RISC0 build needs far more than the runner's ~14 GB.
+      # Reclaim ~25-30 GB by dropping preinstalled toolchains we don't use.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
       - uses: cachix/install-nix-action@v27
         with:
           extra_nix_config: |
@@ -39,6 +51,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The wallet (Rust) + RISC0 build needs far more than the runner's ~14 GB.
+      # Reclaim ~25-30 GB by dropping preinstalled toolchains we don't use.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
       - uses: cachix/install-nix-action@v27
         with:
           extra_nix_config: |
@@ -58,6 +82,18 @@ jobs:
     needs: build-module
     steps:
       - uses: actions/checkout@v4
+
+      # The wallet (Rust) + RISC0 build needs far more than the runner's ~14 GB.
+      # Reclaim ~25-30 GB by dropping preinstalled toolchains we don't use.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
 
       - uses: cachix/install-nix-action@v27
         with:
