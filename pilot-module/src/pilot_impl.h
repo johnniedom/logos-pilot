@@ -61,6 +61,10 @@ public:
     std::string agentSubscribe(const std::string& agentAddress, const std::string& taskId);
     bool agentCancel(const std::string& agentAddress, const std::string& taskId);
 
+    // Inbound A2A task server: handle a decrypted JSON-RPC request from a peer agent,
+    // returning the JSON-RPC reply. Public so tests drive the state machine directly.
+    std::string processInboundRequest(const std::string& requestJson);
+
     // Phase 5: Blockchain skills
     std::string programQuery(const std::string& programId, const std::string& paramsJson);
     std::string programCall(const std::string& programId, const std::string& instruction, const std::string& paramsJson);
@@ -87,6 +91,12 @@ private:
     void backupWallet();         // save wallet + keep a recovery copy of its storage file
     void recoverPendingTransactions();
     bool deliverToOwner(const std::string& payload);   // retrying, honest publish to owner channel
+    // Inbound A2A internals (impl in pilot_a2a_inbox.cpp)
+    void handleInboundA2A(const std::string& encryptedPayload);
+    bool replyToPeer(const std::string& topic, const std::string& recipientKey, const std::string& json);
+    void inboundTaskSetState(const std::string& taskId, const std::string& state, const std::string& resultJson);
+    void inboundTasksRecover();
+    void resumeInboundTask(const std::string& spendRequestId, bool approved, const std::string& detail);
     void initLLM();
     std::string buildLLMSystemPrompt();
     sqlite3* db_ = nullptr;

@@ -76,6 +76,7 @@ bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
 
     initDatabase(dataDir);
+    inboundTasksRecover();     // fail inbound A2A tasks that died with the previous process
     initLLM();
 
     if (loadIdentity()) {

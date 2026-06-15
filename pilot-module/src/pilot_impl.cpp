@@ -89,6 +89,19 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             topic TEXT NOT NULL,
             last_seen TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS inbound_tasks (
+            id TEXT PRIMARY KEY,
+            sender_npk TEXT NOT NULL,
+            reply_topic TEXT NOT NULL,
+            skill TEXT NOT NULL,
+            params_json TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'accepted',
+            spend_request_id TEXT,
+            result_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
     )SQL";
 
     char* errMsg = nullptr;
@@ -152,6 +165,12 @@ void PilotImpl::initDeliveryModule() {
         delivery->invokeRemoteMethod("delivery_module", "start",
             QVariantList{}, Timeout(15000));
 
+        // A2A server: also listen on our own inbox (the topic our Agent Card advertises),
+        // so peer agents can send us tasks.
+        if (!agentNpk_.empty())
+            delivery->invokeRemoteMethod("delivery_module", "subscribe",
+                QString::fromStdString("/pilot/1/inbox-" + agentNpk_ + "/proto"), Timeout(15000));
+
         LogosObject* deliveryObj = delivery->requestObject("delivery_module");
         if (deliveryObj) {
             delivery->onEvent(deliveryObj, "messageReceived",
@@ -159,6 +178,12 @@ void PilotImpl::initDeliveryModule() {
                     if (data.size() < 2) return;
                     std::string topic = data[0].toString().toStdString();
                     std::string payload = data[1].toString().toStdString();
+
+                    // Peer task on our inbox -> A2A server.
+                    if (!agentNpk_.empty() && topic == "/pilot/1/inbox-" + agentNpk_ + "/proto") {
+                        handleInboundA2A(payload);
+                        return;
+                    }
 
                     if (topic != ownerChannelId_ || agentEciesPriv_.empty()) return;
 
