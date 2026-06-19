@@ -33,7 +33,7 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: logos-pilot-johnniedom
-          skipPush: true
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
         continue-on-error: true
 
       - name: Build module
@@ -103,7 +103,7 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: logos-pilot-johnniedom
-          skipPush: true
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
         continue-on-error: true
 
       # Headless runtime that loads modules as real plugins (see CLAUDE.md).
