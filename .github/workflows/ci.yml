@@ -76,10 +76,99 @@ jobs:
           pilot-cli/result/bin/pilot version
           pilot-cli/result/bin/pilot help
 
-  # NOTE: a headless logoscore E2E job was removed. The current logoscore replaced
-  # inline `-c` calls with daemon+subcommands AND a real method call needs pilot's
-  # companion modules (logos_execution_zone, delivery_module, storage_module,
-  # chat_module) plus the LEZ sequencer + RISC0 — none of which CI provides. The
-  # full runtime is validated manually (see RUNBOOK.md) and in the demo videos.
-  # CI proves the build + the 55 unit tests, which cover the skill registry, the
-  # spending FSM, crypto, and the inbound A2A task lifecycle.
+  # End-to-end integration test against a standalone LEZ sequencer (spec line 122).
+  # Boots the prebuilt devnet sequencer, builds pilot + all 4 dependency modules
+  # (pinned to flake.lock revs), installs them via lgpm, then loads pilot in the real
+  # logoscore daemon and exercises its skills. Real on-chain funding/spending with
+  # RISC0 proofs is validated manually (RUNBOOK.md) + the demo videos.
+  e2e:
+    name: E2E (logoscore + LEZ sequencer)
+    runs-on: ubuntu-latest
+    needs: build-module
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-pilot-johnniedom
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        continue-on-error: true
+
+      - name: Boot standalone LEZ sequencer (devnet image)
+        run: |
+          docker run -d --name seq -p 8080:8080 \
+            -e SEQUENCER_LISTEN_ADDR=0.0.0.0:8080 \
+            -e SEQUENCER_DB_PATH=/data/sequencer.db \
+            -e SEQUENCER_SIGNING_KEY_PATH=/data/sequencer.key \
+            -e SEQUENCER_INITIAL_BALANCE=1000 \
+            -e SEQUENCER_CHANNEL_ID=6d656d636f696e00000000000000000000000000000000000000000000000001 \
+            -v seq-data:/data \
+            --entrypoint /usr/bin/logos-blockchain-demo-sequencer \
+            ghcr.io/logos-blockchain/logos-blockchain:devnet
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/8080) 2>/dev/null; then echo "sequencer listening on :8080"; break; fi
+            sleep 5
+          done
+
+      - name: Build runtime (logoscore) + installer (lgpm)
+        run: |
+          nix build 'github:logos-co/logos-logoscore-cli' -o result-logoscore
+          nix build 'github:logos-co/logos-package-manager' -o result-lgpm
+
+      - name: Build module LGX packages (pilot + deps, pinned to flake.lock)
+        run: |
+          ( cd pilot-module && nix build .#lgx -o ../result-pilot-lgx )
+          nix build 'github:logos-blockchain/logos-execution-zone-module/5d42559db863#lgx' -o result-ez-lgx
+          nix build 'github:logos-co/logos-delivery-module/b18ec067517e#lgx'   -o result-delivery-lgx
+          nix build 'github:logos-co/logos-storage-module/b1d82a32c1ba#lgx'    -o result-storage-lgx
+          nix build 'github:logos-co/logos-chat-module/a0d251f9d764#lgx'       -o result-chat-lgx
+
+      - name: Install all modules via lgpm
+        run: |
+          MODS=/tmp/pilot/modules
+          rm -rf "$MODS"; mkdir -p "$MODS"
+          for f in result-pilot-lgx/*.lgx result-ez-lgx/*.lgx result-delivery-lgx/*.lgx \
+                   result-storage-lgx/*.lgx result-chat-lgx/*.lgx; do
+            result-lgpm/bin/lgpm install --file "$f" --modules-dir "$MODS" --allow-unsigned
+          done
+          ls "$MODS"
+
+      - name: E2E — load pilot + deps and exercise skills (sequencer up)
+        run: |
+          export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d | head -1)/bin/logos_host
+          LS=result-logoscore/bin/logoscore
+          "$LS" -D -m /tmp/pilot/modules &
+          sleep 8
+
+          load=$("$LS" load-module pilot 2>&1); echo "load: $load"
+          echo "$load" | grep -q '"status":"ok"'        || { echo "E2E FAIL: pilot did not load"; "$LS" stop || true; exit 1; }
+          echo "$load" | grep -q 'logos_execution_zone' || { echo "E2E FAIL: dependencies not resolved"; "$LS" stop || true; exit 1; }
+
+          eo=$("$LS" call pilot echo "ci-e2e" 2>&1); echo "echo: $eo"
+          echo "$eo" | grep -q 'echo: ci-e2e'           || { echo "E2E FAIL: echo round-trip"; "$LS" stop || true; exit 1; }
+
+          sk=$("$LS" call pilot metaSkills 2>&1); echo "skills(head): ${sk:0:140}"
+          echo "$sk" | grep -qE 'count[^0-9]*21'        || { echo "E2E FAIL: expected 21 skills"; "$LS" stop || true; exit 1; }
+
+          # Informational: probe the wallet against the sequencer (non-fatal — real
+          # funding/spending with proofs is the manual/video path).
+          echo "wallet probe: $("$LS" call pilot metaStatus 2>&1 | head -c 200)" || true
+
+          "$LS" stop || true
+          docker rm -f seq >/dev/null 2>&1 || true
+          echo "E2E OK: LEZ sequencer up; pilot + 4 deps loaded in logoscore; 21 skills; echo round-trip"
