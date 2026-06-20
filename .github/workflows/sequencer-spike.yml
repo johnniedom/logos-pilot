@@ -1,0 +1,56 @@
+name: Sequencer Spike
+
+# Feasibility test only: can a GitHub runner boot the standalone LEZ sequencer
+# (prebuilt devnet docker image) within its limits? Runs only on spike/** branches
+# so it never touches the main CI.
+on:
+  push:
+    branches: ['spike/**']
+  workflow_dispatch:
+
+jobs:
+  boot-sequencer:
+    name: Boot standalone LEZ sequencer (devnet image)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Disk + docker baseline
+        run: |
+          echo "=== disk ==="; df -h / | tail -1
+          echo "=== docker ==="; docker version --format 'server={{.Server.Version}}'
+
+      - name: Pull devnet image
+        run: |
+          /usr/bin/time -v docker pull ghcr.io/logos-blockchain/logos-blockchain:devnet 2>&1 | tail -5 || \
+            docker pull ghcr.io/logos-blockchain/logos-blockchain:devnet
+          docker images ghcr.io/logos-blockchain/logos-blockchain:devnet --format 'image size={{.Size}}'
+
+      - name: Boot sequencer and probe :8080
+        run: |
+          docker run -d --name seq -p 8080:8080 \
+            -e SEQUENCER_LISTEN_ADDR=0.0.0.0:8080 \
+            -e SEQUENCER_DB_PATH=/data/sequencer.db \
+            -e SEQUENCER_SIGNING_KEY_PATH=/data/sequencer.key \
+            -e SEQUENCER_INITIAL_BALANCE=1000 \
+            -e SEQUENCER_CHANNEL_ID=6d656d636f696e00000000000000000000000000000000000000000000000001 \
+            -v seq-data:/data \
+            --entrypoint /usr/bin/logos-blockchain-demo-sequencer \
+            ghcr.io/logos-blockchain/logos-blockchain:devnet
+
+          echo "=== wait up to 5 min for :8080 to listen ==="
+          open=no
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/8080) 2>/dev/null; then
+              echo "PORT 8080 OPEN after ~$((i*10))s"; open=yes; break
+            fi
+            sleep 10
+          done
+
+          echo "=== container status ==="; docker ps -a --filter name=seq
+          echo "=== resource use ==="; docker stats seq --no-stream --format 'mem={{.MemUsage}} cpu={{.CPUPerc}}' || true
+          echo "=== last 50 log lines ==="; docker logs seq 2>&1 | tail -50
+
+          docker rm -f seq >/dev/null 2>&1 || true
+          if [ "$open" != yes ]; then
+            echo "SPIKE RESULT: sequencer did NOT open :8080 in time (see logs above)"; exit 1
+          fi
+          echo "SPIKE RESULT: sequencer booted and listened on :8080 in a GitHub runner"
