@@ -4,7 +4,7 @@ const
   DEFAULT_DATA_DIR* = "/tmp/pilot-data"
   DEFAULT_MODULE_PATH* = "/tmp/pilot-logoscore/modules"
   DEFAULT_WAKU_ADDR* = "/ip4/127.0.0.1/tcp/30303"
-  MODULES* = "capability_module,lez_wallet_module,delivery_module,storage_module,pilot"
+  MODULES* = "capability_module,logos_execution_zone,delivery_module,storage_module,chat_module,pilot"
 
 type
   Config* = object
