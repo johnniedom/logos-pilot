@@ -5,9 +5,11 @@ appears on screen. Record with `RISC0_DEV_MODE=0` so the sequencer terminal show
 
 **Prerequisite (one command brings up the whole stack + funds the agent):**
 ```bash
-bash ~/demo-run.sh 0        # 0 = real proofs (use 1 to rehearse fast)
+./demo.sh                   # reproducible run from a clean clone (dev mode, docker sequencer)
 ```
-Keep the **sequencer terminal visible** on screen — that's where real proof generation shows.
+For the recorded video with **real proofs** (`RISC0_DEV_MODE=0`) against the local
+compiled sequencer, use the real-proof path in `RUNBOOK.md` §3 and keep the
+**sequencer terminal visible** on screen — that's where real proof generation shows.
 
 Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix first) · 🔴 not yet verified
 
@@ -58,7 +60,8 @@ Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix fi
 - #35 real proofs (`RISC0_DEV_MODE=0`) verified end-to-end: shielded 77 transfer → private balance 77.
 
 ### One-command launchers (see RUNBOOK.md in repo root)
-- Demos 1 + 2 + 3 together:  `bash ~/demo-run.sh`   (add ` 0` for real proofs)
-- Demo 4 (A2A):              `bash ~/run-a2a.sh`     (Docker / nwaku up first)
+- Demos 1 + 2 + 3 together:  `./demo.sh`            (reproducible from a clean clone; nix + docker)
+- Real proofs (`RISC0_DEV_MODE=0`) + local sequencer:  RUNBOOK.md §3
+- Demo 4 (A2A):              `bash ~/run-a2a.sh`     (Docker / nwaku up first; advanced/local)
 
 (Interface coverage: film Demo 2 via **Basecamp** owner channel, Demos 1/3/4 via **CLI** — satisfies both required interfaces.)

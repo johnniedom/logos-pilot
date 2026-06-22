@@ -9,16 +9,30 @@ Open **Ubuntu (WSL)** and run these. Each demo is basically **one command**.
 
 ## 1. Funding + File Vault + Spending Threshold  (Demos 1, 2 AND 3 — one command)
 
+**Reproducible, from a clean clone** (requires `nix` + `docker`):
+
 ```bash
-bash ~/demo-run.sh
+git clone <repo> && cd logos-pilot
+./demo.sh
 ```
 
-Self-contained — this single command runs **three** of the four demos:
-- **Demo 1 (funding):** starts the sequencer, agent funds itself → balance 100
-- **Demo 2 (file vault):** encrypted upload → list → download → round-trip check
-- **Demo 3 (spending threshold):** small payment auto-executes, big one is held for approval
+`./demo.sh` builds the module + its 4 dependencies + logoscore (heavy deps come
+from the Cachix cache), boots the standalone **LEZ devnet sequencer via Docker
+(:8080)**, loads the agent in the real logoscore daemon, and runs:
+- **Reproducible core** (the same flow CI's e2e job asserts): load pilot + deps →
+  21 skills → echo round-trip.
+- **Demo 1 (funding):** agent self-funds against the sequencer → balance.
+- **Demo 2 (spending threshold):** small payment auto-executes, big one is held for
+  owner approval, then approved.
+- **Demo 3 (file vault):** encrypted upload → download → byte-identical round-trip.
 
-Fast (~1–2 min, dev mode). Add ` 0` for real proofs: `bash ~/demo-run.sh 0` (slow).
+Dev mode (`RISC0_DEV_MODE=1`) by default. The funding/spending/vault steps are
+best-effort and report their status honestly.
+
+> **Real zk proofs (`RISC0_DEV_MODE=0`) + the local compiled sequencer (:3040):**
+> see §3 below — these take ~40 min/transfer and are for the recorded video, not
+> the quick reproducible run.
+
 For the per-step commands to type on screen, see `pilot-module/demo/DEMO.md`.
 
 ---

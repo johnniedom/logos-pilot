@@ -144,9 +144,15 @@ pilot-module/
 ### Blockchain (3)
 | Skill | Method | Description |
 |-------|--------|-------------|
-| program.query | `programQuery(programId, params)` | Reads state from a LEZ program |
-| program.call | `programCall(programId, instruction, params)` | Submits a transaction (threshold-enforced) |
-| program.deploy | `programDeploy(binaryPath)` | Deploys a program binary (requires approval) |
+| program.query | `programQuery(programId, params)` | Reads state from a LEZ program — _limited: upstream wallet-ffi does not yet support program queries_ |
+| program.call | `programCall(programId, instruction, params)` | Submits a transaction (threshold-enforced) — _limited: upstream wallet-ffi does not yet support program calls_ |
+| program.deploy | `programDeploy(binaryPath)` | _Not yet functional: routes through owner approval but does not deploy or return a program id (pending upstream support). Documented as a known limitation._ |
+
+> **Known limitation:** the `program.*` skills are wired through the spending
+> threshold and owner-approval flow, but program query/call/deploy are not yet
+> operational because the underlying `wallet-ffi` does not expose program
+> operations in this release. They are included for interface completeness and
+> will activate when upstream support lands.
 
 ### Meta (3)
 | Skill | Method | Description |
@@ -479,4 +485,5 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of **MIT** ([LICENSE](LICENSE)) or **Apache-2.0**
+([LICENSE-APACHE](LICENSE-APACHE)) at your option.

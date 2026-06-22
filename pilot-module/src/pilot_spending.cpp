@@ -296,6 +296,40 @@ bool PilotImpl::setSpendingLimits(int64_t perTransaction, int64_t perPeriod, int
     return true;
 }
 
+// Drive a freshly-created (CREATED) spend request into the owner-approval flow and
+// report honestly. HELD first, then notify; only advance to NOTIFIED if the owner
+// notification actually delivered. If it failed, the request stays HELD (so it is
+// re-announced on recovery and never silently lost) and we flag notification_failed
+// instead of claiming the owner was prompted. approveSpend accepts HELD or NOTIFIED,
+// so either way the request remains approvable — fixing the per-period path that used
+// to leave requests stuck in CREATED (unapprovable).
+std::string PilotImpl::holdForApproval(const std::string& reqId, const std::string& ownerMsg,
+                                       const std::string& heldMessage) {
+    auto setState = [&](const char* st) {
+        if (!db_) return;
+        std::string now = currentTimestamp();
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db_,
+            "UPDATE spend_requests SET state = ?, updated_at = ? WHERE id = ?;", -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, st, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, now.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, reqId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    };
+
+    setState("HELD");
+    bool notified = sendToOwner(ownerMsg);
+    if (notified) setState("NOTIFIED");   // else stay HELD: recovery will re-announce it
+
+    QJsonObject res;
+    res["status"] = QString("held");
+    res["request_id"] = QString::fromStdString(reqId);
+    res["message"] = QString::fromStdString(heldMessage);
+    if (!notified) res["notification_failed"] = true;
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+}
+
 std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, const std::string& reason) {
     if (!logosAPI_ || agentAccountId_.empty())
         return "{\"error\": \"not initialized\"}";
@@ -317,49 +351,20 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
 
         if (periodTotal + amount > spendLimitPerPeriod_) {
             std::string reqId = createSpendRequest(recipient, amount, reason);
-            sendToOwner("Period limit exceeded (" + std::to_string(periodTotal) + "/" +
+            return holdForApproval(reqId,
+                "Period limit exceeded (" + std::to_string(periodTotal) + "/" +
                 std::to_string(spendLimitPerPeriod_) + " LEZ). Approval required.\n/approve " +
-                reqId + "\n/reject " + reqId);
-            QJsonObject res;
-            res["status"] = QString("held");
-            res["request_id"] = QString::fromStdString(reqId);
-            res["message"] = QString("Period spending limit exceeded");
-            return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+                reqId + "\n/reject " + reqId,
+                "Period spending limit exceeded");
         }
     }
 
     if (amount > spendLimitPerTx_) {
         std::string reqId = createSpendRequest(recipient, amount, reason);
-
-        std::string now = currentTimestamp();
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_,
-            "UPDATE spend_requests SET state = 'HELD', updated_at = ? WHERE id = ?;",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, now.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, reqId.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-
         std::string msg = "Approval needed:\nAmount: " + std::to_string(amount) +
             " LEZ\nTo: " + recipient + "\nReason: " + reason +
             "\nExpires: 60 min\n/approve " + reqId + "\n/reject " + reqId;
-        sendToOwner(msg);
-
-        now = currentTimestamp();
-        sqlite3_prepare_v2(db_,
-            "UPDATE spend_requests SET state = 'NOTIFIED', updated_at = ? WHERE id = ?;",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, now.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, reqId.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-
-        QJsonObject res;
-        res["status"] = QString("held");
-        res["request_id"] = QString::fromStdString(reqId);
-        res["message"] = QString("Awaiting owner approval");
-        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+        return holdForApproval(reqId, msg, "Awaiting owner approval");
     }
 
     std::string reqId = createSpendRequest(recipient, amount, reason);

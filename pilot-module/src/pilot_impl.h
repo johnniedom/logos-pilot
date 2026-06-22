@@ -90,6 +90,12 @@ private:
     void resetStaleIdentity();   // clear pilot.db identity + funded flag on wallet divergence
     void backupWallet();         // save wallet + keep a recovery copy of its storage file
     void recoverPendingTransactions();
+    // Move a freshly-created spend request into the owner-approval flow: HELD -> notify ->
+    // NOTIFIED only if the owner notification actually delivered (else keep it HELD so we
+    // never claim an approval prompt that failed, and it is re-announced on recovery).
+    // Shared by the per-transaction and per-period limit branches of walletSend.
+    std::string holdForApproval(const std::string& reqId, const std::string& ownerMsg,
+                                const std::string& heldMessage);
     bool deliverToOwner(const std::string& payload);   // retrying, honest publish to owner channel
     // Inbound A2A internals (impl in pilot_a2a_inbox.cpp)
     void handleInboundA2A(const std::string& encryptedPayload);

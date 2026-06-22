@@ -1,6 +1,11 @@
 # Pilot Skill Interface
 
-Build custom skills for the Pilot agent without modifying core code.
+Build custom skills for the Pilot agent by implementing the `PilotSkill` interface
+and registering them in the module.
+
+> **Note:** today, adding a skill means registering it in-tree and rebuilding the
+> module — there is **no runtime plugin loader yet** (see _Registering a Skill_
+> below). Runtime loading of external `.so` plugins is on the roadmap.
 
 ## The PilotSkill Abstract Class
 
@@ -46,34 +51,34 @@ Schemas are used for:
 - Input validation before `execute()` is called
 - Documentation generation
 
-## Building as a Shared Library
+## Registering a Skill
 
-```cmake
-cmake_minimum_required(VERSION 3.14)
-project(MySkill LANGUAGES CXX)
+Skills are registered in the module's built-in registry and compiled into the
+module. There is **no runtime plugin loader yet**, so adding a skill means
+registering it in-tree and rebuilding:
 
-add_library(my_skill SHARED my_skill.cpp)
-target_include_directories(my_skill PRIVATE /path/to/pilot-module/src)
-set_target_properties(my_skill PROPERTIES PREFIX "")
-```
+1. Add your `PilotSkill` subclass (or use the provided `LambdaSkill`) under
+   `pilot-module/src/`.
+2. Register it inside `registerBuiltinSkills()` in `pilot-module/src/pilot_builtin_skills.cpp`:
+   ```cpp
+   registry.registerSkill(std::make_unique<MySkill>());
+   // or, for a quick inline skill:
+   registry.registerSkill(std::make_unique<LambdaSkill>(
+       "weather.lookup", "utility", "Returns weather for a location",
+       /*inputSchema*/  "{}", /*outputSchema*/ "{}", /*priceLez*/ 0,
+       [](const std::string& argsJson) { return std::string("{...}"); }));
+   ```
+3. Rebuild the module:
+   ```bash
+   cd pilot-module && nix build
+   ```
 
-Build:
-```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
-```
+See `examples/skill-weather/` for a complete reference skill.
 
-## Installation
-
-Copy the `.so` to the plugins directory:
-
-```bash
-mkdir -p ~/.pilot/plugins
-cp my_skill.so ~/.pilot/plugins/
-```
-
-The agent scans this directory on startup and loads all valid skill libraries.
+> **Roadmap (not yet implemented):** runtime loading of external `.so` skill
+> plugins from a plugins directory (e.g. `~/.pilot/plugins`) — so third parties
+> could add skills without rebuilding the core module. Until that lands, skills
+> must be registered in-tree as above.
 
 ## A2A Integration
 
