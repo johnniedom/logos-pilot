@@ -55,10 +55,10 @@ docker-compose up -d
 ./pilot-cli/result/bin/pilot chat
 ```
 
-### Step 5: Test suites (86 total — pending CI verification)
+### Step 5: Test suites (unit suite green in CI; integration suites run locally against a sequencer)
 
 ```bash
-# Unit tests (44) — no runtime needed
+# Unit tests — no runtime needed (green in CI: build + unit suite + E2E)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L && cd ..
 
 # Single-agent integration (28) — needs sequencer
@@ -81,6 +81,21 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 | `test-phases.sh` | After setup | 28 single-agent integration tests |
 | `test-two-agents-docker.sh` | After setup | 14 two-agent cross-network tests |
 | `install-basecamp.sh` | For GUI | Installs pilot into Logos Basecamp |
+
+### What needs what (you don't always need the full stack)
+
+The CLI degrades gracefully — you only need the heavy infrastructure for the parts that
+use it. Identity creation is local; `deploy` never hard-fails without a sequencer (it
+shows a `0` balance, warns on card publish, and completes).
+
+| You want to… | Sequencer? | Waku? | How |
+|--------------|-----------|-------|-----|
+| Run the unit tests | No | No | `cd pilot-module && nix build .#unit-tests -L` (zero infra) |
+| `deploy` + `chat` + list skills | No | No | build → `setup-modules.sh` → `pilot deploy` / `pilot chat` (needs an LLM API key for chat) |
+| Owner channel / messaging / A2A | No | **Yes** | also run `docker-compose up -d` |
+| Balance / funding / send / spending | **Yes** | — | also run `./run-sequencer.sh` |
+
+So the fastest way to see the agent run is **build → `setup-modules.sh` → `pilot deploy` → `pilot chat`** — no `run-sequencer.sh`, no `docker-compose`.
 
 ## What It Does
 

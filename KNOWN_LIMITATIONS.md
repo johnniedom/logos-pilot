@@ -115,26 +115,24 @@ trusted code, not a defense against untrusted code.**
 
 ---
 
-## 4. Build & test — not yet CI-verified (pending CI)
+## 4. Build & test — CI-verified green; real on-chain settlement still manual
 
-**What it is.** At the time of writing, the module has **not been built or run end
-to end in CI**, and the unit tests have **not been executed locally**.
+**What it is.** The module **builds**, the full **unit suite (109 tests) passes**,
+and the **end-to-end job passes** in CI — pilot + its dependencies load into the
+`logoscore` runtime against a **standalone LEZ sequencer**, the echo round-trip
+works, and all 22 skills are present. (CI run on the default branch, all three jobs:
+Build C++ Module, Build Nim CLI, E2E.) What is **not** yet exercised in automation is
+**real on-chain settlement** — funding/spending with RISC0 proofs — and the **live
+two-agent A2A round trip**; those remain the manual / video path.
 
-**Why.** A local build is infeasible on the development box: building `wallet-ffi`
-plus RISC0 OOM-crashes the WSL VM (7.9 GB box), and there is no Cachix / RISC0
-substituter available there to pull prebuilt artifacts. The module compiles per
-repeated static cross-review, and unit tests have been **added** (crypto
-sign/verify, A2A inbox/outbound, agent-card auth, plugin loader), but they were
-**not run** on the dev box.
+**Why CI rather than local.** A local build is infeasible on the development box:
+building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RISC0
+substituter. CI (with the Cachix cache `logos-pilot-johnniedom` and a disk-freed
+runner) is the source of truth — and is green.
 
-**Status to claim.** Treat build and test results as **"pending CI verification."**
-CI is the source of truth, not any local claim. Do not represent the test counts as
-passing until CI shows them passing.
-
-**What would close it.** A green CI run that builds the module and executes the unit
-suite (and, ideally, the integration suites) on a machine with adequate memory and a
-populated Nix substituter. The Cachix cache `logos-pilot-johnniedom` exists to
-supply prebuilt wallet/RISC0 artifacts for exactly this.
+**What would close the remainder.** A run that drives real funding/spending with
+`RISC0_DEV_MODE=0` against a sequencer, plus a live two-agent A2A settlement, to
+confirm the on-chain behavior the unit/E2E suites do not assert.
 
 ---
 
