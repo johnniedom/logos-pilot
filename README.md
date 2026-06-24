@@ -81,6 +81,8 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 | `test-phases.sh` | After setup | 28 single-agent integration tests |
 | `test-two-agents-docker.sh` | After setup | 14 two-agent cross-network tests |
 | `install-basecamp.sh` | For GUI | Installs pilot into Logos Basecamp |
+| `run-sequencer-realproof.sh` | For the spec demo | Boots the standalone LEZ sequencer with **real** RISC0 proofs (`RISC0_DEV_MODE=0`) — needs the prerequisites below |
+| `demo-realproof.sh` | For the spec demo | End-to-end flow against the real-proof sequencer (the flow the demo video captures) |
 
 ### What needs what (you don't always need the full stack)
 
@@ -96,6 +98,34 @@ shows a `0` balance, warns on card publish, and completes).
 | Balance / funding / send / spending | **Yes** | — | also run `./run-sequencer.sh` |
 
 So the fastest way to see the agent run is **build → `setup-modules.sh` → `pilot deploy` → `pilot chat`** — no `run-sequencer.sh`, no `docker-compose`.
+
+### Real-proof demo (`RISC0_DEV_MODE=0`)
+
+The spec requires an end-to-end demo with **real** RISC0 proofs, shown on camera. Unlike the
+dev-mode `demo.sh` (which clone-and-runs against the Docker demo-sequencer), the real-proof
+flow needs a standalone LEZ sequencer + the RISC0 toolchain — a documented prerequisite, since
+the sequencer is a separate project not bundled in this repo.
+
+**Prerequisites (one-time):**
+1. Build the standalone LEZ sequencer from `logos-execution-zone` at the circuits-matched rev:
+   `cargo build --release --features standalone -p sequencer_runner`.
+2. Install the RISC0 toolchain so `r0vm` is on PATH: `rzup install`.
+3. ~16 GB RAM (real proving is heavy; lower `RISC0_SEGMENT_PO2` to trade RAM for time).
+
+**Run it:**
+
+```bash
+# Terminal 1 — real-proof sequencer on :3040 (point LEZ at your execution-zone checkout)
+LEZ=/path/to/logos-execution-zone ./run-sequencer-realproof.sh
+
+# Terminal 2 — the end-to-end demo (build → deploy → self-fund → balance → use cases)
+export ANTHROPIC_API_KEY=sk-...        # or another provider, for chat / agent.ask
+./demo-realproof.sh
+```
+
+Each on-chain step (funding, an above-threshold transfer) triggers visible `r0vm` proof
+generation — that on-screen output is what confirms `RISC0_DEV_MODE=0` was active. The recorded
+video of this run is the submission's proof-of-real-proving artifact.
 
 ## What It Does
 
