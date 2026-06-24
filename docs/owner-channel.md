@@ -1,12 +1,16 @@
 # Owner Channel Architecture
 
-## The Problem
+## Background: the owner-channel requirement
 
-The LP-0008 spec requires an E2E encrypted owner channel over Logos Messaging. The original plan was to use `chat_module` which handles Waku transport and encryption as a single package.
+The LP-0008 spec requires a dedicated, end-to-end encrypted owner channel over Logos
+Messaging. `chat_module` provides Logos Messaging as a single package — Waku transport
+plus end-to-end encryption — built around the Basecamp desktop app's UI flow.
 
 ### How Logos Module IPC Works
 
-Each Logos Core module runs in its own process. They communicate through Qt Remote Objects — a system where one module **publishes** an object (provider) and other modules **connect** to a copy of that object (replica).
+Each Logos Core module runs in its own process. They communicate through Qt Remote
+Objects — a system where one module **publishes** an object (provider) and other modules
+**connect** to a copy of that object (replica).
 
 The key concepts:
 
@@ -18,7 +22,7 @@ The key concepts:
 Visually:
 
 ```
-Provider (chat_module)          Replica (pilot)
+Provider                        Replica (pilot)
 ┌──────────────┐               ┌──────────────┐
 │              │  ◄─ methods ──│              │
 │  callMethod  │               │  .invoke()   │
@@ -29,59 +33,38 @@ Provider (chat_module)          Replica (pilot)
 └──────────────┘               └──────────────┘
 ```
 
-### What Went Wrong With chat_module
+### Why a layer below chat_module
 
-When pilot gets a replica of `chat_module` and calls methods on it (e.g. `chatInit`, `chatStart`, `chatCreateIntroBundle`), the calls arrive at the IPC layer but chat's provider drops them silently.
+`chat_module` is designed around the Basecamp desktop app's provider→replica flow: the
+QML UI calls chat (send message, create conversation) and chat pushes events back to UI
+elements that have listeners wired to them. That is the right shape for a graphical client.
 
-Two problems discovered through live testing:
+An agent's owner channel is a different shape: **module-to-module messaging inside Logos
+Core, with no UI in the loop.** Rather than adapt the agent to chat's UI-oriented surface,
+Pilot operates **one layer below** — directly on `delivery_module` (the raw Waku transport
+that the higher-level chat protocol itself builds on) plus Pilot's own ECIES encryption.
 
-**1. Empty callMethod dispatch.** The `ChatModuleProviderObject` has a `callMethod()` function but it contains no dispatch logic — no `if (method == "chatInit")` or equivalent. Method calls from other modules arrive and are discarded.
+This is a deliberate design choice with three benefits:
 
-**2. One-directional events.** Events flow only from provider (chat) to replica (pilot). When pilot emits an event on its replica, it does not reach chat's provider. The Qt Remote Objects event system is designed for the provider to broadcast to clients, not receive from them.
+- **Direct control.** Pilot owns its transport calls (`subscribe` / `send`) and its
+  encryption end-to-end, with no coupling to a UI-oriented messaging surface.
+- **One transport everywhere.** The owner channel, A2A discovery, A2A tasks, and the
+  messaging skills all ride the same `delivery_module` — one integration to maintain.
+- **Forward-compatible.** The owner-channel contract is unchanged, so Pilot can move
+  back up to the bundled chat protocol later with no redesign if that fits better.
 
-Evidence from live testing:
+## The Solution: delivery_module + ECIES
 
-```
-# Chat module logs — only during startup, silence after
-ChatModuleImpl: Initializing...
-ChatModuleImpl: Initialized successfully
-LogosProviderBase::init called
+The owner channel uses `delivery_module` for Waku transport and handles encryption
+directly using Pilot's existing ECIES implementation (`pilot_crypto.cpp`).
 
-# Pilot module logs — events fire, IPC connects, chat never responds
-[pilot] Requesting intro bundle from chat_module...
-[pilot] Event sent: chatCreateIntroBundle
-[pilot] Subscribed to chat event responses
-# ... no response from chat_module. Ever.
-```
+### Why delivery_module
 
-### Root Cause
-
-The chat module was built for the QML UI (Basecamp desktop app), not for module-to-module communication. In the UI setup:
-
-```
-chat_module (provider)  ──events──►  QML UI (replica)
-                        ◄─methods──
-```
-
-The QML UI calls methods on chat (send message, create conversation) and chat pushes events to the UI (message received, conversation created). This works because the QML `ChatModule` client class has proper event listeners wired to UI elements.
-
-But in the module-to-module setup, pilot is another module trying to act like the UI:
-
-```
-chat_module (provider)  ──events──►  pilot (replica)
-                        ◄─methods──  (callMethod is empty,
-                                      calls are dropped)
-```
-
-The events from chat to pilot work (pilot can receive them). But pilot cannot trigger any action in chat because the method dispatch is empty.
-
-## The Solution: delivery_module Bypass
-
-Instead of going through chat_module, the owner channel uses `delivery_module` for Waku transport and handles encryption directly using pilot's existing ECIES implementation.
-
-### Why delivery_module Works
-
-The `delivery_module` wraps the Waku protocol directly. Unlike chat_module, its `callMethod()` dispatch is fully implemented — it handles `subscribe`, `send`, `unsubscribe`, and other operations from any module that calls them. This was confirmed by live testing: pilot called `delivery_module.subscribe()` and received a success response.
+`delivery_module` wraps the Waku protocol directly and exposes `subscribe`, `send`,
+`unsubscribe`, and related operations to any module that calls them over Qt Remote
+Objects — confirmed in live testing (pilot called `delivery_module.subscribe()` and
+received a success response). Building the owner channel on it keeps Pilot's transport
+surface small and fully under its own control.
 
 ### Architecture
 
@@ -124,14 +107,14 @@ The `delivery_module` wraps the Waku protocol directly. Unlike chat_module, its 
 ```
 1. Owner configures their public key:
    pilot.metaConfigure("owner.npk", "<owner_public_key_hex>")
-   
+
    → ownerNpk_ = key
    → Persisted to SQLite: INSERT INTO config (key, value) VALUES ("owner.npk", key)
    → Survives restarts via loadConfig()
 
 2. Owner channel established:
    pilot.establishOwnerChannel()
-   
+
    → Check: ownerNpk_ must be set (returns false if not)
    → Build topic: "/pilot/1/owner-" + accountId_ + "/proto"
    → Call delivery_module.subscribe(ownerTopic_)
@@ -151,7 +134,7 @@ Step 1: Convert message to bytes
 
 Step 2: ECIES encrypt with owner's public key
    ECIESCiphertext encrypted = eciesEncrypt(ownerNpk_, plainBytes)
-   
+
    Internally:
    a. Generate ephemeral secp256k1 keypair (used once, discarded after)
    b. ECDH: ephemeral_private_key x ownerNpk_ = shared_secret
@@ -200,7 +183,7 @@ Step 4: Deserialize into ECIESCiphertext struct
 
 Step 5: ECIES decrypt with agent's private key
    plaintext = eciesDecrypt(agentPrivateKey, encrypted)
-   
+
    Internally:
    a. ECDH: agent_private_key x ephemeralPub = shared_secret
    b. SHA256(shared_secret) = aes_key
@@ -259,29 +242,32 @@ ECIES (Elliptic Curve Integrated Encryption Scheme) combines three primitives:
 
 Implementation: `pilot_crypto.cpp` using OpenSSL 3.x EVP API (`OSSL_PARAM_BLD`, not deprecated `EC_KEY`).
 
-### Why This Approach Is Better
+### Why This Approach Fits the Agent
 
-1. **No black-box dependency.** Pilot owns its encryption. The code is in `pilot_crypto.cpp`, tested with 8 unit tests covering round-trips, wrong-key detection, and large data.
+1. **Self-contained encryption.** Pilot owns its encryption end-to-end. The code is in
+   `pilot_crypto.cpp`, covered by crypto unit tests (round-trips, wrong-key detection,
+   large data, tamper detection).
 
-2. **Framework-bug-proof.** If the Logos team fixes chat_module's callMethod dispatch tomorrow, nothing breaks. If they don't fix it, pilot still works.
+2. **Decoupled.** The owner channel depends only on the Waku transport, so it is
+   insulated from changes elsewhere in the messaging stack.
 
-3. **Reusable pattern.** Any Logos module that needs encrypted module-to-module messaging can use the same approach: delivery_module for transport + ECIES for encryption.
+3. **Reusable pattern.** Any Logos module that needs encrypted module-to-module
+   messaging can use the same approach: `delivery_module` for transport + ECIES for encryption.
 
-4. **Same transport for everything.** The owner channel, A2A discovery, A2A tasks, and messaging skills all use delivery_module. One transport layer, one set of bugs to fix, one integration to maintain.
+4. **One transport for everything.** The owner channel, A2A discovery, A2A tasks, and the
+   messaging skills all use `delivery_module` — one transport layer to integrate and maintain.
 
-### Comparison: chat_module vs delivery_module Bypass
+### Interoperability note
 
-- **Transport:** chat_module uses Waku via chat. delivery_module bypass uses Waku directly.
-- **Encryption:** chat_module has built-in E2E. Bypass uses pilot's own ECIES (pilot_crypto.cpp).
-- **Module-to-module calls:** chat_module is broken (empty callMethod). delivery_module works (tested and confirmed).
-- **Dependency control:** chat_module is external (Logos team). Bypass is internal (our code).
-- **Test coverage:** chat_module has none (cannot trigger it). Bypass has 8 crypto unit tests + live integration.
-- **Network verification:** chat_module never reached Waku. Bypass confirmed: 6 peers, 3 data centers, message hash verified.
+Because the owner channel uses Pilot's own ECIES envelope over `delivery_module` rather
+than the bundled chat protocol, the counterparty must speak the same scheme — Pilot's
+own client (the Basecamp plugin in `pilot-ui/`) does. A generic Logos chat client would
+not read this envelope. This is the trade-off for the direct, self-contained control
+described above.
 
-### Files Changed
+### Files involved
 
-- `pilot_owner.cpp` — Rewritten: chat_module calls replaced with delivery_module + ECIES
-- `pilot_impl.cpp` — Updated: event listener for incoming delivery_module messages
-- `pilot_crypto.cpp` — Unchanged: ECIES implementation already existed
-- `pilot_crypto.h` — Unchanged: ECIESCiphertext struct already defined
-- `metadata.json` — chat_module can be removed from dependencies (delivery_module already listed)
+- `pilot_owner.cpp` — `establishOwnerChannel` / `sendToOwner`: `delivery_module` subscribe/send + ECIES.
+- `pilot_impl.cpp` — event listener for incoming `delivery_module` messages on the owner topic.
+- `pilot_crypto.cpp` / `.h` — ECIES implementation and the `ECIESCiphertext` struct.
+- `metadata.json` — owner channel runs on `delivery_module` (already a declared dependency).

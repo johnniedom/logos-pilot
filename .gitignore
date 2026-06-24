@@ -10,3 +10,5 @@ __pycache__/
 *.pyc
 .DS_Store
 store/
+# Local working docs/scripts — NOT for the public submission repo (kept off Logos's view).
+private/

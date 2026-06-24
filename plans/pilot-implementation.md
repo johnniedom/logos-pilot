@@ -17,7 +17,7 @@
 - Comprehensive documentation (19 sections in findings-integration.md)
 
 ### Key architectural decisions made during integration
-- **Owner channel uses delivery_module** (not chat_module) — chat_module's callMethod dispatch is empty, delivery_module is Qt-wrapped with auto-dispatch and working Waku transport
+- **Owner channel uses delivery_module** (one layer below chat_module) — delivery_module is the Qt-wrapped Waku transport with module-to-module dispatch; the agent's owner channel uses it directly + its own ECIES for self-contained control (see docs/owner-channel.md)
 - **Agent generates own ECIES keypair** — separate from wallet keys (wallet-ffi only exposes public keys)
 - **Storage configured with `{"nat":"none"}`** — disables UPnP for WSL compatibility
 - **Waku cluster-id=2, 8 shards** — matches Logos delivery network configuration
@@ -96,7 +96,7 @@
 | 5 | Wallet config missing field | Added `"initial_accounts": []` |
 | 6 | Wallet amount format | Plain int → 32-char LE hex string |
 | 7 | Spending FSM false success | Check result string for "fail"/"error" |
-| 8 | chat_module callMethod empty | Switched to delivery_module for all messaging |
+| 8 | owner-channel transport choice | delivery_module + ECIES (one layer below chat) for all messaging |
 | 9 | Storage NAT timeout | `{"nat":"none"}` config |
 | 10 | Storage LogosResult extraction | `result.value<LogosResult>().value` |
 | 11 | Storage download method name | `downloadFile` → `downloadChunks` |
