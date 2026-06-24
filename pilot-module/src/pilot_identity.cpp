@@ -75,9 +75,35 @@ std::string computePinataSolution(const std::string& dataHex) {
 bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
 
-    initDatabase(dataDir);
+    // Persistent, shared identity: PILOT_DATA_DIR (when set) overrides the caller's
+    // data dir, so the CLI and Basecamp can both point at one durable location
+    // (e.g. ~/.pilot) instead of their own caller-specific path (often /tmp, which is
+    // wiped on reboot). Same env var -> same pilot.db + wallet_storage -> same agent.
+    std::string effectiveDir = dataDir;
+    if (const char* env = std::getenv("PILOT_DATA_DIR"); env && *env)
+        effectiveDir = env;
+
+    initDatabase(effectiveDir);
     inboundTasksRecover();     // fail inbound A2A tasks that died with the previous process
+    outboundTasksRecover();    // re-arm/reconcile outbound A2A settlement after a restart (M7)
     initLLM();
+
+    // Runtime third-party skills (Usability #1). Builtins are already registered in the
+    // ctor (registerBuiltinSkills), so this loads strictly ON TOP of them — a plugin can
+    // ADD skills but, by the loader's name-clash guard, never SHADOW a builtin. OFF BY
+    // DEFAULT: loadPlugins is inert unless the operator sets PILOT_ENABLE_PLUGINS, in
+    // which case it scans an operator-TRUSTED directory whose contents run with full agent
+    // privileges (PILOT_PLUGINS_DIR, else ~/.pilot/plugins). Best-effort: a bad plugin is
+    // logged + skipped, never fatal to startup.
+    if (registry_) {
+        std::string pluginsDir;
+        if (const char* pd = std::getenv("PILOT_PLUGINS_DIR"); pd && *pd)
+            pluginsDir = pd;
+        else if (const char* home = std::getenv("HOME"); home && *home)
+            pluginsDir = std::string(home) + "/.pilot/plugins";
+        if (!pluginsDir.empty())
+            registry_->loadPlugins(pluginsDir);
+    }
 
     if (loadIdentity()) {
         initialized_ = true;

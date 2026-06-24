@@ -75,7 +75,8 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             cid TEXT PRIMARY KEY,
             label TEXT NOT NULL,
             file_key_encrypted TEXT NOT NULL,
-            timestamp TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS config (
@@ -93,6 +94,7 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         CREATE TABLE IF NOT EXISTS inbound_tasks (
             id TEXT PRIMARY KEY,
             sender_npk TEXT NOT NULL,
+            sender_ecies TEXT NOT NULL DEFAULT '',
             reply_topic TEXT NOT NULL,
             skill TEXT NOT NULL,
             params_json TEXT NOT NULL,
@@ -101,6 +103,25 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             result_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS outbound_tasks (
+            id TEXT PRIMARY KEY,
+            agent_address TEXT NOT NULL,
+            skill TEXT NOT NULL,
+            price INTEGER NOT NULL DEFAULT 0,
+            reply_topic TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'submitted',
+            payout TEXT NOT NULL DEFAULT '',
+            spend_request_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pinned_identities (
+            npk TEXT PRIMARY KEY,
+            signing_key TEXT NOT NULL,
+            first_seen TEXT NOT NULL
         );
     )SQL";
 
@@ -111,6 +132,57 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         sqlite3_free(errMsg);
         throw std::runtime_error("Schema creation failed: " + err);
     }
+
+    // Migrate DBs created before stored_files.size_bytes (added for meta.status
+    // storage-usage reporting). ADD COLUMN is a no-op error if it already exists,
+    // which we deliberately ignore so the migration is idempotent.
+    sqlite3_exec(db_,
+        "ALTER TABLE stored_files ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+
+    // Migrate DBs created before inbound_tasks.sender_ecies. The doer stores the
+    // requester's _logos.sender_ecies here and encrypts EVERY A2A reply to it (one
+    // ECIES keypair drives all A2A reply encryption on both legs). ADD COLUMN is a
+    // no-op error if the column already exists, deliberately ignored for idempotency.
+    sqlite3_exec(db_,
+        "ALTER TABLE inbound_tasks ADD COLUMN sender_ecies TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
+
+    // Migrate DBs created before outbound_tasks.payout. The requester records the doer's
+    // resolved Agent Card payout account here at settlement time, so a duplicate reply
+    // can be audited and recovery knows WHO was paid (never the messaging address, M5).
+    // ADD COLUMN is a no-op error if the column already exists, deliberately ignored.
+    sqlite3_exec(db_,
+        "ALTER TABLE outbound_tasks ADD COLUMN payout TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
+
+    // Migrate DBs created before the rest of the outbound_tasks pay-on-acceptance columns
+    // were added across passes: price (declared LEZ price to settle), reply_topic (where the
+    // doer's reply is consumed), spend_request_id (the linked spend the settlement/recovery
+    // path drives). Each ADD COLUMN is a no-op error if the column already exists, which we
+    // deliberately ignore so the whole migration stays idempotent. NOT NULL columns carry a
+    // DEFAULT so the ALTER succeeds on a populated table; spend_request_id is nullable.
+    sqlite3_exec(db_,
+        "ALTER TABLE outbound_tasks ADD COLUMN price INTEGER NOT NULL DEFAULT 0;",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(db_,
+        "ALTER TABLE outbound_tasks ADD COLUMN reply_topic TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(db_,
+        "ALTER TABLE outbound_tasks ADD COLUMN spend_request_id TEXT;",
+        nullptr, nullptr, nullptr);
+
+    // Migrate DBs created before pinned_identities (first-contact identity pinning, TOFU).
+    // verifyCardStatus binds a payee npk to the signing_key seen on FIRST discovery, so a
+    // later card reusing that npk under a DIFFERENT signing_key cannot swap the payout (M3).
+    // ADD COLUMN is a no-op error if the column already exists, deliberately ignored so the
+    // migration is idempotent on a freshly-created table.
+    sqlite3_exec(db_,
+        "ALTER TABLE pinned_identities ADD COLUMN signing_key TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
+    sqlite3_exec(db_,
+        "ALTER TABLE pinned_identities ADD COLUMN first_seen TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
 }
 
 static bool waitForConnection(LogosAPIClient* client, int maxMs = 5000) {
@@ -166,10 +238,12 @@ void PilotImpl::initDeliveryModule() {
             QVariantList{}, Timeout(15000));
 
         // A2A server: also listen on our own inbox (the topic our Agent Card advertises),
-        // so peer agents can send us tasks.
-        if (!agentNpk_.empty())
+        // so peer agents can send us tasks. The inbox is keyed on agentEciesPub_ — the ECIES
+        // key we HOLD the private half of and decrypt with (handleInboundA2A) — NOT the wallet
+        // npk, matching what agentCard advertises and _logos.signing_key publishes.
+        if (!agentEciesPub_.empty())
             delivery->invokeRemoteMethod("delivery_module", "subscribe",
-                QString::fromStdString("/pilot/1/inbox-" + agentNpk_ + "/proto"), Timeout(15000));
+                QString::fromStdString("/pilot/1/inbox-" + agentEciesPub_ + "/proto"), Timeout(15000));
 
         LogosObject* deliveryObj = delivery->requestObject("delivery_module");
         if (deliveryObj) {
@@ -179,9 +253,17 @@ void PilotImpl::initDeliveryModule() {
                     std::string topic = data[0].toString().toStdString();
                     std::string payload = data[1].toString().toStdString();
 
-                    // Peer task on our inbox -> A2A server.
-                    if (!agentNpk_.empty() && topic == "/pilot/1/inbox-" + agentNpk_ + "/proto") {
+                    // Peer task on our inbox -> A2A server. Inbox keyed on agentEciesPub_
+                    // (the key we decrypt with), consistent with the subscribe above.
+                    if (!agentEciesPub_.empty() && topic == "/pilot/1/inbox-" + agentEciesPub_ + "/proto") {
                         handleInboundA2A(payload);
+                        return;
+                    }
+
+                    // Peer server's reply to a task WE submitted -> requester-side
+                    // pay-on-acceptance consumer.
+                    if (topic.rfind("/pilot/1/reply-", 0) == 0) {
+                        handleA2AReply(topic, payload);
                         return;
                     }
 
@@ -228,11 +310,11 @@ std::string PilotImpl::buildLLMSystemPrompt() {
         "send encrypted messages, discover other agents, and execute on-chain transactions. "
         "You think before you act, and you never spend above your owner's limits without approval.\n\n"
 
-        "CAPABILITIES (21 skills)\n"
+        "CAPABILITIES (22 skills)\n"
         "Wallet: check balance, send LEZ tokens, view history\n"
         "Storage: upload encrypted files, download, list, share access with others\n"
         "Messaging: send encrypted messages, join groups, create groups\n"
-        "Agents: publish your Agent Card, discover peers, send tasks, subscribe to updates, cancel tasks\n"
+        "Agents: publish your Agent Card, answer paid LLM questions (agent.ask), discover peers, send tasks, subscribe to updates, cancel tasks\n"
         "Programs: query LEZ smart contracts, call instructions, deploy binaries\n"
         "Meta: list skills, check status, update config\n\n"
 
@@ -309,6 +391,45 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     }
 
     return response;
+}
+
+void PilotImpl::setLLMProvider(std::unique_ptr<LLMProvider> provider) {
+    llm_ = provider ? std::move(provider) : std::make_unique<NoOpProvider>();
+}
+
+// SAFE paid A2A service (FIX 2): answer a stranger's prompt with the agent's LLM. PURE
+// COMPUTE — no local files, no messaging identity, no funds — so it is safe to auto-run for an
+// unknown peer. We deliberately use a SELF-CONTAINED system prompt that exposes NO owner
+// context (name/account/limits) and NO tool-dispatch protocol, so an A2A caller can never use
+// agent.ask to probe the owner or coax the agent into emitting an action command. We NEVER
+// fabricate an answer: with no configured LLM (or a provider error / empty completion) we
+// return an honest error and the inbound dispatcher marks the task 'failed', never 'completed'.
+std::string PilotImpl::agentAsk(const std::string& prompt) {
+    if (prompt.empty())
+        return "{\"error\":\"agent.ask requires a non-empty prompt\"}";
+    if (!llm_ || !llm_->isConfigured())
+        return "{\"error\":\"LLM not configured\"}";
+
+    const std::string systemPrompt =
+        "You are a helpful assistant answering a single question for an external party over an "
+        "agent-to-agent channel. Give a direct, concise, plain-text answer. You have NO access "
+        "to any tools, files, funds, private data, or owner information in this context, and you "
+        "must not claim otherwise. If you cannot answer, say so plainly.";
+
+    std::vector<LLMMessage> messages;
+    messages.push_back({"user", prompt});
+    std::string answer = llm_->complete(systemPrompt, messages);
+
+    if (answer.empty() || answer.find("\"error\"") != std::string::npos) {
+        std::string detail = answer.empty() ? "LLM returned empty response" : answer;
+        QJsonObject err;
+        err["error"] = QString::fromStdString("LLM error: " + detail);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    }
+
+    QJsonObject out;
+    out["answer"] = QString::fromStdString(answer);
+    return QJsonDocument(out).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::dispatchSkill(const std::string& skillName, const std::string& argsJson) {

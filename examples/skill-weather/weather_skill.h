@@ -1,5 +1,7 @@
 #pragma once
-#include "../../pilot-module/src/pilot_skill.h"
+// Resolved via the PILOT_SRC_DIR include directory the CMake adds, so this example
+// builds standalone (copied out of the repo) against just the two stable headers.
+#include "pilot_skill.h"
 
 class WeatherSkill : public PilotSkill {
 public:

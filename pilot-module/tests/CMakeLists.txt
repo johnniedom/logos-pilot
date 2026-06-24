@@ -32,6 +32,51 @@ logos_test(
         test_llm.cpp
         test_spending.cpp
         test_a2a_inbox.cpp
+        test_a2a_outbound.cpp
+        test_agent_card.cpp
 )
 
 target_link_libraries(pilot_module_tests PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
+
+# --- Runtime plugin loader: REAL positive-path coverage --------------------
+# The loader unit tests in test_skills.cpp cover the safety-critical negative
+# paths (off-by-default, missing dir, malformed library skipped) without needing
+# a compiled plugin. To also prove the *happy path* — that a genuine third-party
+# .so is discovered, its skill REGISTERS and DISPATCHES, and the core was NOT
+# recompiled to add it — we build the bundled weather example as an actual
+# loadable Qt plugin and hand its directory to the test via PILOT_TEST_PLUGIN_DIR.
+#
+# Guarded by Qt6 discovery: if Qt6 isn't directly findable here, the macro is
+# left undefined and the positive-path test compiles out — the negative-path
+# loader tests (the safety contract) always run.
+find_package(Qt6 QUIET COMPONENTS Core)
+if(Qt6_FOUND)
+    set(PILOT_EXAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../examples/skill-weather)
+    set(PILOT_TEST_PLUGIN_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_plugins)
+
+    # A QPluginLoader-loadable plugin is a MODULE library. Built from the SAME
+    # example sources a third party would ship — only the two stable public
+    # headers (pilot_skill.h + pilot_plugin_iface.h) + QtCore, no core internals.
+    add_library(test_weather_plugin MODULE
+        ${PILOT_EXAMPLE_DIR}/weather_plugin.cpp
+        ${PILOT_EXAMPLE_DIR}/weather_skill.cpp
+    )
+    set_target_properties(test_weather_plugin PROPERTIES
+        AUTOMOC ON                                      # Q_OBJECT / Q_PLUGIN_METADATA
+        LIBRARY_OUTPUT_DIRECTORY ${PILOT_TEST_PLUGIN_OUTDIR}
+    )
+    target_include_directories(test_weather_plugin PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src   # pilot_skill.h + pilot_plugin_iface.h
+        ${PILOT_EXAMPLE_DIR}                 # weather_skill.h + weather_plugin.json (AUTOMOC FILE)
+    )
+    target_link_libraries(test_weather_plugin PRIVATE Qt6::Core)
+
+    # Build the plugin before the test, and tell the test where the .so landed.
+    add_dependencies(pilot_module_tests test_weather_plugin)
+    target_compile_definitions(pilot_module_tests PRIVATE
+        PILOT_TEST_PLUGIN_DIR="${PILOT_TEST_PLUGIN_OUTDIR}")
+else()
+    message(STATUS "[pilot] Qt6 not directly findable for tests; "
+                   "runtime-plugin positive-path test will compile out "
+                   "(negative-path loader tests still run).")
+endif()

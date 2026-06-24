@@ -277,6 +277,92 @@ std::vector<uint8_t> eciesDecrypt(const std::string& privateKeyHex,
     return result;
 }
 
+// ECDSA over secp256k1: SHA-256 digest + DER signature, hex-encoded.
+// Reuses the agent's existing ECIES key material (same curve).
+
+std::string signMessage(const std::vector<uint8_t>& message,
+                        const std::string& privateKeyHex) {
+    std::vector<uint8_t> privBytes = hexToBytes(privateKeyHex);
+    if (privBytes.empty())
+        throw std::invalid_argument("invalid private key: not a hex string");
+
+    BIGNUM* privBn = BN_bin2bn(privBytes.data(), static_cast<int>(privBytes.size()), nullptr);
+    if (!privBn) throw std::runtime_error("BN_bin2bn failed");
+
+    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "secp256k1", 0);
+    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, privBn);
+    OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
+
+    EVP_PKEY_CTX* fromCtx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    EVP_PKEY_fromdata_init(fromCtx);
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_fromdata(fromCtx, &pkey, EVP_PKEY_KEYPAIR, params);
+    OSSL_PARAM_free(params);
+    OSSL_PARAM_BLD_free(bld);
+    EVP_PKEY_CTX_free(fromCtx);
+    BN_free(privBn);
+    if (!pkey) throw std::runtime_error("failed to load private key for signing");
+
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    std::vector<uint8_t> sig;
+    try {
+        if (!mdctx) throw std::runtime_error("EVP_MD_CTX_new failed");
+        if (EVP_DigestSignInit(mdctx, nullptr, EVP_sha256(), nullptr, pkey) != 1)
+            throw std::runtime_error("EVP_DigestSignInit failed");
+        size_t sigLen = 0;
+        if (EVP_DigestSign(mdctx, nullptr, &sigLen,
+                           message.data(), message.size()) != 1)
+            throw std::runtime_error("EVP_DigestSign (size probe) failed");
+        sig.resize(sigLen);
+        if (EVP_DigestSign(mdctx, sig.data(), &sigLen,
+                           message.data(), message.size()) != 1)
+            throw std::runtime_error("EVP_DigestSign failed");
+        sig.resize(sigLen);
+    } catch (...) {
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(pkey);
+        throw;
+    }
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+    return bytesToHex(sig);
+}
+
+bool verifySignature(const std::vector<uint8_t>& message,
+                     const std::string& signatureHex,
+                     const std::string& publicKeyHex) {
+    std::vector<uint8_t> sig = hexToBytes(signatureHex);
+    std::vector<uint8_t> pubBytes = hexToBytes(publicKeyHex);
+    if (sig.empty() || pubBytes.empty()) return false;
+
+    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "secp256k1", 0);
+    OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
+                                      pubBytes.data(), pubBytes.size());
+    OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
+    EVP_PKEY_CTX* fromCtx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+    EVP_PKEY_fromdata_init(fromCtx);
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_fromdata(fromCtx, &pkey, EVP_PKEY_PUBLIC_KEY, params);
+    OSSL_PARAM_free(params);
+    OSSL_PARAM_BLD_free(bld);
+    EVP_PKEY_CTX_free(fromCtx);
+    if (!pkey) return false;
+
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    bool ok = false;
+    if (mdctx &&
+        EVP_DigestVerifyInit(mdctx, nullptr, EVP_sha256(), nullptr, pkey) == 1) {
+        int rc = EVP_DigestVerify(mdctx, sig.data(), sig.size(),
+                                  message.data(), message.size());
+        ok = (rc == 1);
+    }
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+    return ok;
+}
+
 std::string eciesSerialize(const ECIESCiphertext& ct) {
     return bytesToHex(ct.ephemeralPub) + ":" +
            bytesToHex(ct.ciphertext) + ":" +

@@ -89,6 +89,56 @@ LOGOS_TEST(aes_large_data_roundtrip) {
     LOGOS_ASSERT_TRUE(decrypted == plaintext);
 }
 
+// --- ECDSA sign/verify (Agent Card signing, spec.md:63) ---
+
+LOGOS_TEST(ecdsa_sign_verify_roundtrip) {
+    ECIESKeypair kp = generateECIESKeypair();
+    std::string canonical = "{\"name\":\"Pilot Agent\",\"version\":\"1.0.0\"}";
+    std::vector<uint8_t> msg(canonical.begin(), canonical.end());
+
+    std::string sig = signMessage(msg, kp.privateKeyHex);
+    LOGOS_ASSERT_TRUE(sig.size() > 0);
+    LOGOS_ASSERT_TRUE(verifySignature(msg, sig, kp.publicKeyHex));
+}
+
+LOGOS_TEST(ecdsa_verify_fails_on_tampered_card) {
+    ECIESKeypair kp = generateECIESKeypair();
+    std::string original = "{\"name\":\"Pilot Agent\",\"version\":\"1.0.0\"}";
+    std::vector<uint8_t> msg(original.begin(), original.end());
+    std::string sig = signMessage(msg, kp.privateKeyHex);
+
+    // Flip a single value in the card bytes — signature must no longer verify.
+    std::string tampered = "{\"name\":\"Pilot Agent\",\"version\":\"9.9.9\"}";
+    std::vector<uint8_t> tmsg(tampered.begin(), tampered.end());
+    LOGOS_ASSERT_FALSE(verifySignature(tmsg, sig, kp.publicKeyHex));
+}
+
+LOGOS_TEST(ecdsa_verify_fails_with_wrong_public_key) {
+    ECIESKeypair signer = generateECIESKeypair();
+    ECIESKeypair other = generateECIESKeypair();
+    std::string data = "agent card bytes";
+    std::vector<uint8_t> msg(data.begin(), data.end());
+
+    std::string sig = signMessage(msg, signer.privateKeyHex);
+    LOGOS_ASSERT_TRUE(verifySignature(msg, sig, signer.publicKeyHex));
+    LOGOS_ASSERT_FALSE(verifySignature(msg, sig, other.publicKeyHex));
+}
+
+LOGOS_TEST(ecdsa_verify_rejects_garbage_signature) {
+    ECIESKeypair kp = generateECIESKeypair();
+    std::string data = "hello";
+    std::vector<uint8_t> msg(data.begin(), data.end());
+    LOGOS_ASSERT_FALSE(verifySignature(msg, "deadbeef", kp.publicKeyHex));
+    LOGOS_ASSERT_FALSE(verifySignature(msg, "", kp.publicKeyHex));
+}
+
+LOGOS_TEST(ecdsa_sign_empty_message_roundtrip) {
+    ECIESKeypair kp = generateECIESKeypair();
+    std::vector<uint8_t> msg;
+    std::string sig = signMessage(msg, kp.privateKeyHex);
+    LOGOS_ASSERT_TRUE(verifySignature(msg, sig, kp.publicKeyHex));
+}
+
 LOGOS_TEST(ecies_serialize_deserialize_roundtrip) {
     ECIESCiphertext ct;
     ct.ephemeralPub = {0x04, 0xAA, 0xBB, 0xCC};

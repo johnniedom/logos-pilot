@@ -35,3 +35,11 @@ std::vector<uint8_t> eciesDecrypt(const std::string& privateKeyHex,
                                    const ECIESCiphertext& ct);
 std::string eciesSerialize(const ECIESCiphertext& ct);
 ECIESCiphertext eciesDeserialize(const std::string& data);
+
+// ECDSA over secp256k1 (same curve/key material as ECIES). Signs SHA-256 of the
+// message; returns a hex-encoded DER signature. Used to sign the A2A Agent Card.
+std::string signMessage(const std::vector<uint8_t>& message,
+                        const std::string& privateKeyHex);
+bool verifySignature(const std::vector<uint8_t>& message,
+                     const std::string& signatureHex,
+                     const std::string& publicKeyHex);

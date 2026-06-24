@@ -95,10 +95,21 @@ void registerBuiltinSkills(SkillRegistry& registry, PilotImpl* impl) {
                 obj["members"].toString().toStdString());
         });
 
-    // Agent / A2A (5)
+    // Agent / A2A (6)
     reg(registry, "agent.card", "agent",
         "Publishes and returns the agent's A2A Agent Card", 0,
         [impl](const std::string&) { return impl->agentCard(); });
+
+    // SAFE paid A2A service (FIX 2): pure-compute LLM Q&A. No local files, no messaging
+    // identity, no funds — safe to auto-run for an unknown peer. Price matches the SAFE
+    // service catalog (a2aServiceCatalog) so advertised price == auto-serviced price.
+    reg(registry, "agent.ask", "agent",
+        "Answers a prompt with the agent's LLM (pure compute; no files, messaging, or funds)", 5,
+        [impl](const std::string& args) {
+            QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(args));
+            QJsonObject obj = doc.object();
+            return impl->agentAsk(obj["prompt"].toString().toStdString());
+        });
 
     reg(registry, "agent.discover", "agent",
         "Discovers peer agents on the network", 0,

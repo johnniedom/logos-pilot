@@ -12,7 +12,7 @@
 #
 # The script ALWAYS demonstrates the reproducible core (the same flow the green CI
 # e2e job proves): build -> boot sequencer -> install pilot + 4 deps -> load in the
-# real logoscore daemon -> list the 21 skills -> echo round-trip. It then runs the
+# real logoscore daemon -> list the 22 skills -> echo round-trip. It then runs the
 # funding / spending-threshold / encrypted-vault demos best-effort and reports their
 # status honestly (these exercise the wallet against the sequencer).
 
@@ -85,7 +85,7 @@ if ! echo "$LOAD" | grep -q '"status":"ok"'; then
   echo "      ERROR: pilot failed to load — see $WORK/daemon.log"; tail -20 "$WORK/daemon.log"; exit 1
 fi
 
-echo "      --- 21 skills registered (the agent's capability surface) ---"
+echo "      --- 22 skills registered (the agent's capability surface) ---"
 "$LC" call pilot metaSkills 2>/dev/null | jget | python3 -c "import sys,json;d=json.loads(sys.stdin.read() or '{}');print('      skill count:',d.get('count'))" 2>/dev/null
 echo "      --- echo round-trip ---"
 "$LC" call pilot echo "clean-clone-demo" 2>/dev/null | jget
@@ -124,5 +124,5 @@ else
   echo "      (skipped — storage upload not available in this environment)"
 fi
 
-echo "=== Demo complete.  Reproducible core (build + load + 21 skills + echo) verified;"
+echo "=== Demo complete.  Reproducible core (build + load + 22 skills + echo) verified;"
 echo "    funding/spending/vault shown best-effort against the devnet sequencer. ==="

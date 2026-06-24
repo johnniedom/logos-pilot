@@ -85,13 +85,14 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     std::string keyHex = aesKeyToHex(fileKey);
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
-        "INSERT OR REPLACE INTO stored_files (cid, label, file_key_encrypted, timestamp) VALUES (?, ?, ?, ?);",
+        "INSERT OR REPLACE INTO stored_files (cid, label, file_key_encrypted, timestamp, size_bytes) VALUES (?, ?, ?, ?, ?);",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, cid.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, label.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, keyHex.c_str(), -1, SQLITE_TRANSIENT);
     std::string ts = currentTs();
     sqlite3_bind_text(stmt, 4, ts.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(content.size()));
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 

@@ -10,8 +10,7 @@
   "dependencies": [
     "logos_execution_zone",
     "delivery_module",
-    "storage_module",
-    "chat_module"
+    "storage_module"
   ],
   "include": [],
   "capabilities": [],

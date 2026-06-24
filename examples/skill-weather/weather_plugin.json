@@ -1,0 +1,7 @@
+{
+    "name": "weather",
+    "version": "1.0.0",
+    "abiVersion": 1,
+    "skills": ["weather.lookup"],
+    "description": "Example third-party Pilot plugin: a single weather.lookup skill."
+}

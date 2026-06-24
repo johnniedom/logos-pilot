@@ -69,6 +69,25 @@ static std::string currentTimestamp() {
     return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
 }
 
+// Advance an outbound A2A task linked to `spendId` to a terminal state on the owner's
+// decision (M6): 'paid' when the transfer went through, 'pay-failed' otherwise. Only a row
+// actually waiting on this spend ('awaiting-approval'/'settling') is moved — we never
+// overwrite an already-terminal 'paid'/'pay-failed'/'canceled' or touch an unrelated row.
+// A plain owner spend with no linked outbound task is a harmless no-op (0 rows).
+static void advanceLinkedOutboundTask(sqlite3* db, const std::string& spendId, const char* outState) {
+    if (!db || spendId.empty()) return;
+    sqlite3_stmt* u = nullptr;
+    sqlite3_prepare_v2(db,
+        "UPDATE outbound_tasks SET state=?, updated_at=? WHERE spend_request_id=? "
+        "AND state IN ('awaiting-approval','settling');", -1, &u, nullptr);
+    std::string ts = currentTimestamp();
+    sqlite3_bind_text(u, 1, outState, -1, SQLITE_STATIC);
+    sqlite3_bind_text(u, 2, ts.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(u, 3, spendId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(u);
+    sqlite3_finalize(u);
+}
+
 std::string PilotImpl::createSpendRequest(const std::string& recipient, int64_t amount, const std::string& reason) {
     if (!db_) return "{\"error\": \"not initialized\"}";
 
@@ -93,6 +112,76 @@ std::string PilotImpl::createSpendRequest(const std::string& recipient, int64_t 
     sqlite3_finalize(stmt);
 
     return id;
+}
+
+// Sum of amounts committed within the current rolling period. COMPLETED/EXECUTING/
+// APPROVED are the states that have spent (or are committed to spend) real tokens;
+// CREATED/HELD/NOTIFIED are still gated and TX_FAILED/REJECTED/EXPIRED never moved
+// funds. Shared by walletSend and the inbound A2A auto-approve gate.
+int64_t PilotImpl::periodSpent() {
+    if (!db_) return 0;
+    int64_t periodStart = std::stoll(currentTimestamp()) - spendPeriodSeconds_;
+    std::string psStr = std::to_string(periodStart);
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_,
+        "SELECT COALESCE(SUM(amount), 0) FROM spend_requests "
+        "WHERE state IN ('COMPLETED', 'EXECUTING', 'APPROVED') AND created_at > ?;",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, psStr.c_str(), -1, SQLITE_TRANSIENT);
+    int64_t total = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return total;
+}
+
+// Run the real on-chain transfer for a spend request that has cleared its gate
+// (owner-approved via approveSpend, or auto-approved below threshold by the A2A
+// inbox). EXECUTING -> private transfer -> COMPLETED/TX_FAILED. Returns true iff the
+// transfer succeeded. No owner notification, no inbound-task wiring — callers own
+// those. Without a wallet the request is honestly marked TX_FAILED (no fake success).
+bool PilotImpl::executeSpend(const std::string& requestId) {
+    if (!db_) return false;
+
+    std::string recipient, state;
+    int64_t amount = 0;
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_,
+        "SELECT recipient, amount, state FROM spend_requests WHERE id = ?;", -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, requestId.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return false; }
+    recipient = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    amount = sqlite3_column_int64(stmt, 1);
+    state = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    sqlite3_finalize(stmt);
+
+    // Idempotency: never re-run a request that already reached (or is mid-) execution.
+    if (state == "COMPLETED") return true;
+    if (state == "EXECUTING" || state == "TX_FAILED" ||
+        state == "REJECTED" || state == "EXPIRED")
+        return false;
+
+    auto setSpendState = [&](const char* st) {
+        std::string now = currentTimestamp();
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db_,
+            "UPDATE spend_requests SET state = ?, updated_at = ? WHERE id = ?;", -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, st, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, now.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, requestId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    };
+
+    setSpendState("EXECUTING");
+
+    auto* wallet = logosAPI_ ? logosAPI_->getClient("logos_execution_zone") : nullptr;
+    if (!wallet) { setSpendState("TX_FAILED"); return false; }
+
+    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
+    bool ok = transferSucceeded(result);
+    setSpendState(ok ? "COMPLETED" : "TX_FAILED");
+    return ok;
 }
 
 bool PilotImpl::approveSpend(const std::string& requestId) {
@@ -140,30 +229,9 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    sqlite3_prepare_v2(db_,
-        "UPDATE spend_requests SET state = 'EXECUTING', updated_at = ? WHERE id = ?;",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, requestId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    auto* wallet = logosAPI_->getClient("logos_execution_zone");
-    if (!wallet) return false;
-
-    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
-
-    bool ok = transferSucceeded(result);
-    std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
-    now = currentTimestamp();
-    sqlite3_prepare_v2(db_,
-        "UPDATE spend_requests SET state = ?, updated_at = ? WHERE id = ?;",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, finalState.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, requestId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    // APPROVED -> EXECUTING -> COMPLETED/TX_FAILED, via the shared executor (also used
+    // by the A2A inbox auto-approve path) so there is one transfer code path.
+    bool ok = executeSpend(requestId);
 
     if (ok) {
         sendToOwner("Transaction " + requestId + " completed: " + std::to_string(amount) + " LEZ sent to " + recipient);
@@ -173,6 +241,9 @@ bool PilotImpl::approveSpend(const std::string& requestId) {
 
     // If this spend backs an inbound peer task, drive that task to its terminal state.
     resumeInboundTask(requestId, ok, ok ? "owner approved; executed" : "owner approved; execution failed");
+    // If this spend backs an OUTBOUND A2A payment held for approval, advance that task too
+    // (M6): 'paid' on a real transfer, 'pay-failed' otherwise — never orphan it.
+    advanceLinkedOutboundTask(db_, requestId, ok ? "paid" : "pay-failed");
     return ok;
 }
 
@@ -193,6 +264,8 @@ bool PilotImpl::rejectSpend(const std::string& requestId) {
     if (changed) {
         sendToOwner("Transaction " + requestId + " rejected.");
         resumeInboundTask(requestId, false, "owner rejected");
+        // An outbound A2A payment the owner rejected never moves money: 'pay-failed' (M6).
+        advanceLinkedOutboundTask(db_, requestId, "pay-failed");
     }
     return changed;
 }
@@ -237,6 +310,11 @@ int PilotImpl::expireStaleSpends() {
     for (const auto& id : ids) {
         sendToOwner("Spend request " + id + " expired before approval and was cancelled.");
         resumeInboundTask(id, false, "approval expired");
+        // An ABOVE-THRESHOLD outbound A2A payment parks its task in 'awaiting-approval' behind
+        // a HELD spend. If that spend EXPIRES unapproved the money never moves, so the linked
+        // outbound task must also reach a terminal state — exactly as approveSpend/rejectSpend
+        // drive it. Without this it orphans in 'awaiting-approval' forever (M6).
+        advanceLinkedOutboundTask(db_, id, "pay-failed");
     }
     return static_cast<int>(ids.size());
 }
@@ -336,18 +414,7 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
 
     // Check per-period spending limit
     if (db_) {
-        int64_t periodStart = std::stoll(currentTimestamp()) - spendPeriodSeconds_;
-        std::string psStr = std::to_string(periodStart);
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_,
-            "SELECT COALESCE(SUM(amount), 0) FROM spend_requests "
-            "WHERE state IN ('COMPLETED', 'EXECUTING', 'APPROVED') AND created_at > ?;",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, psStr.c_str(), -1, SQLITE_TRANSIENT);
-        int64_t periodTotal = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            periodTotal = sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
+        int64_t periodTotal = periodSpent();
 
         if (periodTotal + amount > spendLimitPerPeriod_) {
             std::string reqId = createSpendRequest(recipient, amount, reason);
@@ -367,40 +434,11 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
         return holdForApproval(reqId, msg, "Awaiting owner approval");
     }
 
+    // Below both limits -> execute autonomously through the shared executor
+    // (CREATED -> EXECUTING -> COMPLETED/TX_FAILED). Same transfer path as the
+    // owner-approved (approveSpend) and A2A auto-approve flows.
     std::string reqId = createSpendRequest(recipient, amount, reason);
-
-    std::string now = currentTimestamp();
-    sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(db_,
-        "UPDATE spend_requests SET state = 'EXECUTING', updated_at = ? WHERE id = ?;",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, reqId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    auto* wallet = logosAPI_->getClient("logos_execution_zone");
-    if (!wallet) {
-        QJsonObject res;
-        res["status"] = QString("failed");
-        res["request_id"] = QString::fromStdString(reqId);
-        res["error"] = QString("wallet unavailable");
-        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
-    }
-
-    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
-
-    bool ok = transferSucceeded(result);
-    std::string finalState = ok ? "COMPLETED" : "TX_FAILED";
-    now = currentTimestamp();
-    sqlite3_prepare_v2(db_,
-        "UPDATE spend_requests SET state = ?, updated_at = ? WHERE id = ?;",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, finalState.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, reqId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    bool ok = executeSpend(reqId);
 
     QJsonObject res;
     res["status"] = ok ? QString("completed") : QString("failed");

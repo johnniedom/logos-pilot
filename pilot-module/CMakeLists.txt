@@ -32,6 +32,7 @@ logos_module(
         src/pilot_crypto.h
         src/pilot_crypto.cpp
         src/pilot_skill.h
+        src/pilot_plugin_iface.h
         src/pilot_skill_registry.cpp
         src/pilot_builtin_skills.cpp
         generated_code/pilot_qt_glue.h
@@ -41,3 +42,17 @@ logos_module(
 )
 
 target_link_libraries(pilot_module_plugin PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
+
+# Optional: build the bundled example third-party skill plugin
+# (examples/skill-weather -> libweather_plugin.so). OFF by default so the core
+# module build is unaffected; enable with -DPILOT_BUILD_EXAMPLES=ON. The example
+# is self-contained and only consumes the two stable public headers
+# (pilot_skill.h + pilot_plugin_iface.h), proving a skill can be added at runtime
+# without modifying or recompiling the core module.
+option(PILOT_BUILD_EXAMPLES "Build bundled example skill plugins" OFF)
+if(PILOT_BUILD_EXAMPLES)
+    set(PILOT_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH
+        "Directory with pilot_skill.h and pilot_plugin_iface.h" FORCE)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../examples/skill-weather
+                     ${CMAKE_CURRENT_BINARY_DIR}/examples/skill-weather)
+endif()

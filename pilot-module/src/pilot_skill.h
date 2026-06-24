@@ -44,6 +44,26 @@ private:
 class SkillRegistry {
 public:
     void registerSkill(std::unique_ptr<PilotSkill> skill);
+
+    // Runtime third-party skill loader (Usability #1): scan `dir` for native skill
+    // plugins and register the skills they provide, so an operator can add skills
+    // WITHOUT recompiling the core module.
+    //
+    // TRUST / SAFETY (this is a native-code loader, not a sandbox):
+    //   * OFF BY DEFAULT. Does nothing unless the operator sets PILOT_ENABLE_PLUGINS
+    //     (any value other than empty/"0"/"false"). With it unset, no .so is opened
+    //     and behavior is identical to a build without this loader.
+    //   * `dir` is an OPERATOR-TRUSTED directory. A plugin loaded from it runs with
+    //     the FULL privileges of the agent (keys, funds, DB, network). Placing a file
+    //     there is an explicit act of trust — it is an operator boundary, NOT a
+    //     security sandbox. No isolation is claimed or provided.
+    //   * Per-plugin isolation is for ROBUSTNESS, not security: a plugin that fails to
+    //     load, has the wrong IID, reports a mismatched ABI version, throws, or names a
+    //     skill that already exists is logged and SKIPPED. A bad plugin never crashes
+    //     the module, never double-registers a name, and is never silently treated as
+    //     loaded.
+    void loadPlugins(const std::string& dir);
+
     std::string listSkills() const;
     std::string listSkillsForCard() const;
     std::string dispatch(const std::string& name, const std::string& argsJson);

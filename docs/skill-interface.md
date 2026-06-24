@@ -3,9 +3,13 @@
 Build custom skills for the Pilot agent by implementing the `PilotSkill` interface
 and registering them in the module.
 
-> **Note:** today, adding a skill means registering it in-tree and rebuilding the
-> module — there is **no runtime plugin loader yet** (see _Registering a Skill_
-> below). Runtime loading of external `.so` plugins is on the roadmap.
+> **Two ways to add a skill:**
+> 1. **In-tree (built-in):** register it in `registerBuiltinSkills()` and rebuild the
+>    module. Best for skills that ship with Pilot.
+> 2. **Runtime plugin (third-party, no core rebuild):** ship a native Qt plugin `.so`
+>    and drop it in the operator's plugins directory. The module loads it at startup —
+>    see _Runtime Plugins_ below. This is **opt-in and is NOT a sandbox** (a loaded
+>    plugin runs with full agent privileges).
 
 ## The PilotSkill Abstract Class
 
@@ -51,11 +55,9 @@ Schemas are used for:
 - Input validation before `execute()` is called
 - Documentation generation
 
-## Registering a Skill
+## Registering a Skill (in-tree / built-in)
 
-Skills are registered in the module's built-in registry and compiled into the
-module. There is **no runtime plugin loader yet**, so adding a skill means
-registering it in-tree and rebuilding:
+Built-in skills are compiled into the module:
 
 1. Add your `PilotSkill` subclass (or use the provided `LambdaSkill`) under
    `pilot-module/src/`.
@@ -75,10 +77,87 @@ registering it in-tree and rebuilding:
 
 See `examples/skill-weather/` for a complete reference skill.
 
-> **Roadmap (not yet implemented):** runtime loading of external `.so` skill
-> plugins from a plugins directory (e.g. `~/.pilot/plugins`) — so third parties
-> could add skills without rebuilding the core module. Until that lands, skills
-> must be registered in-tree as above.
+## Runtime Plugins (third-party, no core rebuild)
+
+A third party can add skills **without modifying or recompiling the core module** by
+shipping a native Qt plugin and dropping it in the operator's plugins directory. At
+startup the module scans that directory, loads each plugin with `QPluginLoader`, and
+registers the skills it provides.
+
+### Authoring a plugin
+
+Implement `PilotPluginInterface` (in `pilot-module/src/pilot_plugin_iface.h`) and export
+it as a Qt plugin:
+
+```cpp
+#include "pilot_skill.h"
+#include "pilot_plugin_iface.h"
+#include <QObject>
+
+class WeatherPlugin : public QObject, public PilotPluginInterface {
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID PilotPluginInterface_iid)
+    Q_INTERFACES(PilotPluginInterface)
+public:
+    int abiVersion() const override { return PILOT_PLUGIN_ABI_VERSION; }
+    std::string pluginName() const override { return "weather"; }
+    std::string pluginVersion() const override { return "1.0.0"; }
+    std::vector<std::unique_ptr<PilotSkill>> createSkills() override {
+        std::vector<std::unique_ptr<PilotSkill>> skills;
+        skills.push_back(std::make_unique<WeatherSkill>());
+        return skills;
+    }
+};
+```
+
+Build it as a shared library against the same Qt + toolchain as the module, then place
+the resulting `.so` in the plugins directory.
+
+### Enabling and locating plugins
+
+Plugin loading is **OFF BY DEFAULT**. The module only scans for plugins when the
+operator opts in:
+
+- `PILOT_ENABLE_PLUGINS` — set to `1` (any value other than empty/`0`/`false`/`no`) to
+  enable scanning. Unset, the loader is completely inert and behavior is identical to a
+  build without it.
+- `PILOT_PLUGINS_DIR` — directory to scan. Defaults to `~/.pilot/plugins`.
+
+### Trust model (read this — it is NOT a sandbox)
+
+A plugin is **native code loaded into the agent process**, which holds the operator's
+keys and funds. A loaded plugin therefore runs with the **full privileges of the agent**
+— it can read the wallet, the database, the filesystem, and the network.
+
+- The plugins directory is an **operator-trusted boundary, not a security sandbox**.
+  Placing a file there is an explicit statement of trust. **No isolation is implemented
+  or claimed.**
+- What the loader *does* provide is **robustness isolation**, not security: a plugin that
+  fails to load, has the wrong IID, reports a mismatched `PILOT_PLUGIN_ABI_VERSION`,
+  throws, or names a skill that already exists is **logged and skipped**. A bad plugin
+  never crashes the module, never overwrites a built-in skill (name clashes are skipped,
+  not replaced), and is never silently treated as loaded.
+
+See `examples/skill-weather/` for the reference skill and `pilot_plugin_iface.h` for the
+full ABI contract.
+
+### The loader is real, and tested
+
+This is not an aspirational interface. `SkillRegistry::loadPlugins()`
+(`pilot-module/src/pilot_skill_registry.cpp`) is exercised by unit tests in
+`pilot-module/tests/test_skills.cpp`:
+
+- **Off by default** — with `PILOT_ENABLE_PLUGINS` unset (and with an explicit `0`),
+  `loadPlugins()` is a no-op: nothing is scanned and the registry is unchanged.
+- **Failure isolation** — a malformed file with a library extension is logged and
+  skipped; the module does not crash and nothing is registered.
+- **Positive path** — the bundled `examples/skill-weather` plugin is compiled into a
+  real `.so`, discovered with `PILOT_ENABLE_PLUGINS=1`, and its `weather.lookup` skill
+  both **registers** and **dispatches** — with the core module unmodified. (This test
+  is skipped only where Qt6 is not directly findable at configure time; the safety
+  tests always run.)
+- **No shadowing** — a plugin whose skill name collides with an existing/builtin skill
+  is skipped, not allowed to overwrite the incumbent.
 
 ## A2A Integration
 

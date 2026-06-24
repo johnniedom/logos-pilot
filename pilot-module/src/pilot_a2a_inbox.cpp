@@ -1,5 +1,7 @@
 #include "pilot_impl.h"
+#include "pilot_a2a.h"
 #include "pilot_crypto.h"
+#include "pilot_skill.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include "logos_mode.h"
@@ -11,6 +13,7 @@
 #include <QVariant>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QByteArray>
 #include <QDebug>
 
@@ -53,6 +56,39 @@ static std::string a2aRpcTask(const QString& rpcId, const QString& taskId,
     if (!result.isNull()) task["result"] = result;
     QJsonObject r; r["jsonrpc"] = QString("2.0"); r["id"] = rpcId; r["result"] = task;
     return QJsonDocument(r).toJson(QJsonDocument::Compact).toStdString();
+}
+
+// Unwrap the FLAT skill args from the A2A message envelope. The transport wraps the real
+// args as {role, parts:[{type:text,text:<args>}]} (see agentTask), but every skill reads
+// flat top-level keys (obj["path"], obj["recipient"], ...). So we pull parts[0].text — an
+// object, or a JSON string we parse — and pass THAT to dispatch. We fall back to the
+// message object itself only when there is no parts/text (flat callers and older tests).
+static QJsonObject a2aSkillArgs(const QJsonObject& message) {
+    QJsonArray parts = message.value("parts").toArray();
+    if (!parts.isEmpty()) {
+        QJsonValue text = parts.at(0).toObject().value("text");
+        if (text.isObject()) return text.toObject();
+        if (text.isString()) {
+            QJsonDocument d = QJsonDocument::fromJson(text.toString().toUtf8());
+            if (d.isObject()) return d.object();
+        }
+    }
+    return message;
+}
+
+// FIX 2 — RISKY classification. An A2A peer is a STRANGER, not the owner. A skill that touches
+// local files, the agent's messaging identity, or reads agent state must NEVER auto-run at a
+// stranger's request: storage-* would read/exfiltrate local files and leak our stored-file
+// inventory; messaging-* would send/relay/forge messages under OUR identity (open relay /
+// impersonation); program-* would act on-chain as us. We do NOT try to "secure" these skills —
+// we route them to the OWNER GATE (input-required + sendToOwner) regardless of amount and run
+// NOTHING until/unless the owner acts. wallet-send (moves funds) has its own spend-backed gate
+// just below and is handled there, so it is intentionally NOT matched here. SAFE skills (ping,
+// capabilities, and the a2aServiceCatalog() set — agent-ask) auto-run before we reach this.
+static bool a2aRiskyOwnerGated(const QString& skill) {
+    return skill.startsWith("storage-") ||
+           skill.startsWith("messaging-") ||
+           skill.startsWith("program-");
 }
 
 void PilotImpl::inboundTaskSetState(const std::string& taskId, const std::string& state,
@@ -105,25 +141,54 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
         const QString taskId = params["id"].toString();
         const QString skill = params["metadata"].toObject()["skill"].toString();
         const QString senderNpk = logosExt["sender_npk"].toString();
+        // The requester puts its ECIES public key here; we store it and encrypt EVERY
+        // reply (replyToPeer) to it. ONE ECIES keypair is used for all A2A reply
+        // encryption on both legs (requester decrypts with its agentEciesPriv_).
+        const QString senderEcies = logosExt["sender_ecies"].toString();
         const QString replyTopic = logosExt["reply_topic"].toString();
         if (taskId.isEmpty() || skill.isEmpty() || senderNpk.isEmpty())
             return a2aRpcError(rpcId, -32602, "missing task id, skill, or sender");
 
+        // IDEMPOTENCY (Waku is at-least-once): a redelivered tasks/send must NOT re-run a
+        // skill or re-execute a transfer (double-spend). If this task id was already seen
+        // in a working/terminal state OR it already carries a linked spend request, reply
+        // with the CACHED result (mirrors tasks/sendSubscribe) instead of INSERT OR REPLACE
+        // + re-dispatch. We re-process only a row that does not yet exist.
+        {
+            std::string priorState = a2aCol(db_, taskId.toStdString(), "state");
+            std::string priorSpend = a2aCol(db_, taskId.toStdString(), "spend_request_id");
+            bool alreadyHandled = !priorSpend.empty() ||
+                priorState == "working" || priorState == "input-required" ||
+                priorState == "completed" || priorState == "failed" || priorState == "canceled";
+            if (alreadyHandled) {
+                std::string cached = a2aCol(db_, taskId.toStdString(), "result_json");
+                QJsonDocument rd = QJsonDocument::fromJson(QByteArray::fromStdString(cached));
+                return a2aRpcTask(rpcId, taskId, QString::fromStdString(priorState),
+                    rd.isObject() ? QJsonValue(rd.object()) : QJsonValue());
+            }
+        }
+
+        // Persist the full message envelope for fidelity, but dispatch the FLAT inner args
+        // (params.message.parts[0].text) so parameterized skills find their top-level keys.
+        QJsonObject messageObj = params["message"].toObject();
+        QJsonObject argsObj = a2aSkillArgs(messageObj);
+        std::string argsStr = QJsonDocument(argsObj).toJson(QJsonDocument::Compact).toStdString();
         std::string paramsStr =
-            QJsonDocument(params["message"].toObject()).toJson(QJsonDocument::Compact).toStdString();
+            QJsonDocument(messageObj).toJson(QJsonDocument::Compact).toStdString();
         std::string ts = a2aNow();
         sqlite3_stmt* ins = nullptr;
         sqlite3_prepare_v2(db_,
             "INSERT OR REPLACE INTO inbound_tasks "
-            "(id, sender_npk, reply_topic, skill, params_json, state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?);", -1, &ins, nullptr);
+            "(id, sender_npk, sender_ecies, reply_topic, skill, params_json, state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'accepted', ?, ?);", -1, &ins, nullptr);
         sqlite3_bind_text(ins, 1, taskId.toUtf8().constData(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(ins, 2, senderNpk.toUtf8().constData(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 3, replyTopic.toUtf8().constData(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 4, skill.toUtf8().constData(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 5, paramsStr.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 6, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 3, senderEcies.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 4, replyTopic.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 5, skill.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 6, paramsStr.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(ins, 7, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 8, ts.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(ins);
         sqlite3_finalize(ins);
 
@@ -143,33 +208,84 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
                 cd.isObject() ? QJsonValue(cd.object()) : QJsonValue(QString::fromStdString(cardStr)));
         }
 
-        static const char* kCostly[] = {"wallet-send", "storage-upload", "storage-download",
-            "storage-share", "messaging-send", "program-query", "program-call", "program-deploy"};
-        bool costly = false;
-        for (const char* c : kCostly) if (skill == c) { costly = true; break; }
-        if (costly) {
-            QJsonObject msg = params["message"].toObject();
-            int64_t amount = 10;
-            std::string recipient = senderNpk.toStdString();
-            if (skill == "wallet-send") {
-                amount = static_cast<int64_t>(msg["amount"].toDouble());
-                recipient = msg["recipient"].toString().toStdString();
-            } else if (skill == "program-deploy") amount = 100;
-            else if (skill == "messaging-send") amount = 1;
-            else if (skill == "storage-upload") amount = 10;
-            else if (skill == "storage-download" || skill == "storage-share") amount = 5;
+        // SAFE SERVICE skills (asker pays the doer): we AUTO-RUN the real skill for a
+        // stranger and get PAID for it. SAFE means pure compute with no side effects on this
+        // agent (no local files, no messaging identity, no funds) — today: agent-ask. The
+        // requester pays us — so there is NO spend, NO owner gate, and we NEVER transfer money
+        // to the requester. The serviced set is the SINGLE-SOURCE SAFE catalog (FIX 4a + FIX 2)
+        // that ALSO drives agentCard()'s pricing, so we never advertise an autonomous price for
+        // a skill we don't auto-service here (and vice versa), and a RISKY skill can never leak
+        // into this auto-run path (it is owner-gated below). Drive working -> completed only if
+        // the real dispatch succeeded, else failed with the real error (honesty). The A2A skill
+        // id (dashes) maps back to the registry name (dots); underscores are preserved.
+        bool serviced = false;
+        for (const auto& svc : a2aServiceCatalog())
+            if (skill == QString::fromUtf8(svc.id)) { serviced = true; break; }
+        if (serviced) {
+            inboundTaskSetState(taskId.toStdString(), "working", "");
+            std::string regName = skill.toStdString();
+            for (auto& ch : regName) if (ch == '-') ch = '.';
+            std::string result = registry_
+                ? registry_->dispatch(regName, argsStr)
+                : std::string("{\"error\":\"registry not initialized\"}");
+            QJsonDocument rd = QJsonDocument::fromJson(QByteArray::fromStdString(result));
+            // HONEST SUCCESS CONTRACT (a2aResultIsSuccess, single-source in pilot_a2a.cpp): a
+            // task is 'completed' ONLY on an EXPLICIT, positive success signal — we never pay
+            // for unproven or failed work. A result reading {"joined":false}/{"success":false},
+            // status in {failed,error}, or an opaque/ambiguous shape (bare string, empty object/
+            // array, unparseable) is 'failed' (no pay). Ambiguity -> 'failed', NEVER 'completed'.
+            std::string state = a2aResultIsSuccess(result) ? "completed" : "failed";
+            inboundTaskSetState(taskId.toStdString(), state, result);
+            QJsonValue rv = rd.isObject() ? QJsonValue(rd.object())
+                          : (rd.isArray() ? QJsonValue(rd.array())
+                                          : QJsonValue(QString::fromStdString(result)));
+            return a2aRpcTask(rpcId, taskId, QString::fromStdString(state), rv);
+        }
+
+        // AGENT-SPENDING skill: performing wallet-send spends the AGENT'S OWN funds. A
+        // requester is NOT the owner and is NOT authenticated as such, so an autonomous
+        // below-threshold inbound wallet-send would let ANY peer move our funds. We
+        // therefore owner-gate EVERY inbound wallet-send regardless of amount — never
+        // auto-execute an agent-spend at a stranger's request. (The below-threshold
+        // autonomous path stays for the OWNER's own outbound asker-pays-doer loop, not
+        // here.) The recipient is the payee named in the task params — NEVER the requester
+        // (senderNpk). The requester is the asker, not a payee.
+        if (skill == "wallet-send") {
+            int64_t amount = static_cast<int64_t>(argsObj["amount"].toDouble());
+            std::string recipient = argsObj["recipient"].toString().toStdString();
+            if (recipient.empty()) {
+                inboundTaskSetState(taskId.toStdString(), "failed",
+                    "{\"error\":\"wallet-send missing recipient\"}");
+                return a2aRpcError(rpcId, -32602, "wallet-send missing recipient");
+            }
 
             std::string sid = createSpendRequest(recipient, amount,
-                "A2A task " + taskId.toStdString() + ": " + skill.toStdString() +
-                " from " + senderNpk.toStdString());
+                "A2A wallet-send task " + taskId.toStdString() + " from " + senderNpk.toStdString());
+
+            // Link the spend request to the task up front so resumeInboundTask can find
+            // the task on owner approve/reject/expiry regardless of which gate we take.
+            std::string tsLink = a2aNow();
+            sqlite3_stmt* link = nullptr;
+            sqlite3_prepare_v2(db_,
+                "UPDATE inbound_tasks SET spend_request_id=?, updated_at=? WHERE id=?;", -1, &link, nullptr);
+            sqlite3_bind_text(link, 1, sid.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(link, 2, tsLink.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(link, 3, taskId.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(link);
+            sqlite3_finalize(link);
+
+            // EVERY inbound wallet-send -> owner-approval gate. Unlike the OUTBOUND
+            // asker-pays-doer loop (the owner's own agent decided to ask and pays the
+            // doer's published payout), an inbound wallet-send is a stranger asking us to
+            // move OUR funds; there is no autonomous below-threshold path here. Park the
+            // spend HELD and ask the owner.
             std::string ts2 = a2aNow();
             sqlite3_stmt* up = nullptr;
             sqlite3_prepare_v2(db_,
-                "UPDATE inbound_tasks SET state='input-required', spend_request_id=?, updated_at=? WHERE id=?;",
+                "UPDATE inbound_tasks SET state='input-required', updated_at=? WHERE id=?;",
                 -1, &up, nullptr);
-            sqlite3_bind_text(up, 1, sid.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(up, 2, ts2.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(up, 3, taskId.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(up, 1, ts2.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(up, 2, taskId.toUtf8().constData(), -1, SQLITE_TRANSIENT);
             sqlite3_step(up);
             sqlite3_finalize(up);
 
@@ -188,6 +304,40 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
             return a2aRpcTask(rpcId, taskId, "input-required", pend);
         }
 
+        // RISKY skills (storage-*, messaging-*, program-*): an A2A peer is a STRANGER, so we
+        // NEVER auto-run these (that would read/exfiltrate local files, relay/forge messages
+        // under our identity, or act on-chain as us). There is no agent spend to gate here
+        // (the requester pays US), so unlike wallet-send we open NO spend request — we simply
+        // park the task at input-required and ask the OWNER, dispatching NOTHING. No file is
+        // read, no message is sent, no program runs until/unless the owner acts. The peer can
+        // poll (tasks/sendSubscribe) or withdraw (tasks/cancel) while it waits. This closes the
+        // exfil / open-relay / stranger-action findings by ROUTING through owner approval
+        // rather than executing. (Owner EXECUTION of an approved non-spend risky task is a
+        // follow-up; the SECURITY guarantee — never autonomous — holds today.)
+        if (a2aRiskyOwnerGated(skill)) {
+            std::string ts2 = a2aNow();
+            sqlite3_stmt* up = nullptr;
+            sqlite3_prepare_v2(db_,
+                "UPDATE inbound_tasks SET state='input-required', updated_at=? WHERE id=?;",
+                -1, &up, nullptr);
+            sqlite3_bind_text(up, 1, ts2.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(up, 2, taskId.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(up);
+            sqlite3_finalize(up);
+
+            sendToOwner("Peer agent requests a privileged skill (owner approval required):\n"
+                "Skill: " + skill.toStdString() +
+                "\nFrom: " + senderNpk.toStdString() +
+                "\nThis skill touches local files, this agent's messaging identity, or on-chain "
+                "state, so it will NOT run autonomously for a stranger.\nTask id: " +
+                taskId.toStdString());
+            QJsonObject pend; pend["reason"] = QString("requires owner approval (privileged skill)");
+            return a2aRpcTask(rpcId, taskId, "input-required", pend);
+        }
+
+        // Anything else (e.g. wallet-balance, which would leak our balance to a stranger, or
+        // an unknown skill): honest 'unsupported'. We never fabricate a result, never create a
+        // spend, never pay the requester. (program-* is caught by the risky owner-gate above.)
         inboundTaskSetState(taskId.toStdString(), "failed", "{\"error\":\"unsupported skill\"}");
         return a2aRpcError(rpcId, -32004, "unsupported skill");
     }
@@ -217,13 +367,14 @@ void PilotImpl::resumeInboundTask(const std::string& spendRequestId, bool approv
     if (!db_ || spendRequestId.empty()) return;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(db_,
-        "SELECT id, sender_npk, reply_topic FROM inbound_tasks "
+        "SELECT id, sender_ecies, reply_topic FROM inbound_tasks "
         "WHERE spend_request_id=? AND state='input-required';", -1, &st, nullptr);
     sqlite3_bind_text(st, 1, spendRequestId.c_str(), -1, SQLITE_TRANSIENT);
-    std::string taskId, senderNpk, replyTopic;
+    std::string taskId, senderEcies, replyTopic;
     if (sqlite3_step(st) == SQLITE_ROW) {
         taskId = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        senderNpk = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        if (sqlite3_column_text(st, 1))
+            senderEcies = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
         replyTopic = reinterpret_cast<const char*>(sqlite3_column_text(st, 2));
     }
     sqlite3_finalize(st);
@@ -237,7 +388,8 @@ void PilotImpl::resumeInboundTask(const std::string& spendRequestId, bool approv
     task["status"] = status; task["detail"] = QString::fromStdString(detail);
     QJsonObject note; note["jsonrpc"] = QString("2.0");
     note["method"] = QString("tasks/statusUpdate"); note["params"] = task;
-    replyToPeer(replyTopic, senderNpk,
+    // Encrypt the reply to the requester's ECIES key (it decrypts with agentEciesPriv_).
+    replyToPeer(replyTopic, senderEcies,
                 QJsonDocument(note).toJson(QJsonDocument::Compact).toStdString());
 }
 
@@ -247,9 +399,41 @@ void PilotImpl::resumeInboundTask(const std::string& spendRequestId, bool approv
 bool PilotImpl::replyToPeer(const std::string& topic, const std::string& recipientKey,
                             const std::string& json) {
     if (!logosAPI_ || topic.empty()) return false;
+
+    // SIGN THE REPLY (FIX 1 — the BLOCKER). Encrypting the reply to the requester's PUBLIC
+    // key authenticates NOTHING: the reply topic and that public key are PUBLIC, so any
+    // observer could encrypt a forged {"status":{"state":"completed"}} and force the asker to
+    // pay. So we SIGN the reply's canonical bytes with our ECIES private key (the same ES256K
+    // scheme as the Agent Card) and attach _logos.signing_key + _logos.signature to the
+    // envelope. The canonical bytes are the envelope WITH _logos.signing_key present and
+    // WITHOUT _logos.signature, so the asker reproduces them by removing the signature and
+    // verifies against the doer's pinned signing_key. We NEVER fabricate a signature: with no
+    // private key (or a non-object body) we leave the reply unsigned and the asker will
+    // (correctly) refuse to settle on it.
+    std::string toSend = json;
+    if (!agentEciesPriv_.empty() && !agentEciesPub_.empty()) {
+        QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(json));
+        if (d.isObject()) {
+            QJsonObject env = d.object();
+            QJsonObject logos = env.value("_logos").toObject();
+            logos.remove("signature");                                  // canonical excludes the sig
+            logos["signing_key"] = QString::fromStdString(agentEciesPub_);
+            env["_logos"] = logos;
+            std::string canonical = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+            try {
+                std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+                logos["signature"] = QString::fromStdString(signMessage(bytes, agentEciesPriv_));
+                env["_logos"] = logos;
+                toSend = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+            } catch (const std::exception&) {
+                // Honest failure: send unsigned rather than fabricate a signature.
+            }
+        }
+    }
+
     std::string payload;
     try {
-        std::vector<uint8_t> plain(json.begin(), json.end());
+        std::vector<uint8_t> plain(toSend.begin(), toSend.end());
         ECIESCiphertext ct = eciesEncrypt(recipientKey, plain);
         payload = eciesSerialize(ct);
     } catch (...) {
@@ -287,7 +471,9 @@ void PilotImpl::handleInboundA2A(const std::string& encryptedPayload) {
     if (!reqDoc.isObject()) return;
     QJsonObject logosExt = reqDoc.object()["_logos"].toObject();
     std::string replyTopic = logosExt["reply_topic"].toString().toStdString();
-    std::string senderNpk = logosExt["sender_npk"].toString().toStdString();
-    if (!replyTopic.empty() && !senderNpk.empty())
-        replyToPeer(replyTopic, senderNpk, reply);
+    // Encrypt the reply to the requester's ECIES key (the single A2A reply keypair),
+    // NOT its wallet/messaging npk. The requester decrypts with agentEciesPriv_.
+    std::string senderEcies = logosExt["sender_ecies"].toString().toStdString();
+    if (!replyTopic.empty() && !senderEcies.empty())
+        replyToPeer(replyTopic, senderEcies, reply);
 }
