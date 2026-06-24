@@ -111,14 +111,20 @@ bool PilotImpl::initialize(const std::string& dataDir) {
         // Guard against pilot.db / wallet divergence: confirm the wallet actually holds
         // the saved account. If not (corrupt/replaced wallet), recover by recreating a
         // matching identity instead of pointing at an account the wallet no longer has.
+        // Only RECOVER when we can POSITIVELY confirm the wallet lacks the saved account.
+        // If the wallet module isn't reachable (no client yet) we CANNOT verify divergence,
+        // so keep the loaded identity rather than wiping a good one on an unverifiable
+        // assumption — a transient wallet unavailability must never destroy the agent identity.
+        bool couldCheckWallet = false;
         bool walletHasAccount = false;
         auto* w = logosAPI_ ? logosAPI_->getClient(kWalletModule) : nullptr;
         if (w && !agentAccountId_.empty()) {
+            couldCheckWallet = true;
             QVariant k = w->invokeRemoteMethod(kWalletModule, "get_private_account_keys",
                 QString::fromStdString(agentAccountId_));
             walletHasAccount = (!k.isNull() && !k.toString().isEmpty());
         }
-        if (!walletHasAccount) {
+        if (couldCheckWallet && !walletHasAccount) {
             qWarning() << "[pilot] initialize: wallet missing saved account -> recovering identity";
             resetStaleIdentity();
             createIdentity();      // fresh, consistent pilot.db + wallet pair

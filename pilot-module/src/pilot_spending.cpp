@@ -185,7 +185,11 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
 }
 
 bool PilotImpl::approveSpend(const std::string& requestId) {
-    if (!db_ || !logosAPI_) return false;
+    // executeSpend (the real transfer) and sendToOwner both tolerate a missing wallet/transport
+    // (honest TX_FAILED / no-op), so the approval FSM + outbound-task advancement still run when
+    // logosAPI_ isn't wired. Gate only on the DB, so an unavailable transport never silently
+    // swallows an owner approval (and the path stays unit-testable).
+    if (!db_) return false;
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
