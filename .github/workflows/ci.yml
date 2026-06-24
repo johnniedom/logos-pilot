@@ -163,7 +163,7 @@ jobs:
           echo "$eo" | grep -q 'echo: ci-e2e'           || { echo "E2E FAIL: echo round-trip"; "$LS" stop || true; exit 1; }
 
           sk=$("$LS" call pilot metaSkills 2>&1); echo "skills(head): ${sk:0:140}"
-          echo "$sk" | grep -qE 'count[^0-9]*21'        || { echo "E2E FAIL: expected 21 skills"; "$LS" stop || true; exit 1; }
+          echo "$sk" | grep -qE 'count[^0-9]*22'        || { echo "E2E FAIL: expected 22 skills"; "$LS" stop || true; exit 1; }
 
           # Informational: probe the wallet against the sequencer (non-fatal — real
           # funding/spending with proofs is the manual/video path).
@@ -171,4 +171,4 @@ jobs:
 
           "$LS" stop || true
           docker rm -f seq >/dev/null 2>&1 || true
-          echo "E2E OK: LEZ sequencer up; pilot + 4 deps loaded in logoscore; 21 skills; echo round-trip"
+          echo "E2E OK: LEZ sequencer up; pilot + 4 deps loaded in logoscore; 22 skills; echo round-trip"
