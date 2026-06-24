@@ -4,7 +4,7 @@ There is logos skills that cover most of how logos works, always looks through t
 
 ## Before Writing Code
 
-Read `docs/research/` in this order: spec.md, decisions.md, audit-module-apis.md, research-hard-problems.md, research-identity-infrastructure.md. Implementation plan at `plans/pilot-implementation.md`.
+See the implementation plan at `plans/pilot-implementation.md`, and the design docs in `docs/` (architecture, security-model, agent-to-agent, owner-channel, payment-model).
 
 ## Build & Test
 
@@ -76,4 +76,4 @@ See `docs/DEVELOPER_GUIDE.md` for the full testing matrix.
 
 0: Infrastructure → 1: Identity + Wallet → 2: Owner Channel → 3: Spending FSM → 4: Storage + Messaging (10 skills) → 5: A2A Transport (5 skills) → 6: Integration Tests → 7: Basecamp UI → 8: Ship
 
-Do not reorder. Each phase depends on the previous. Full details in `plans/pilot-implementation.md` and `docs/research/decisions.md` (D10).
+Do not reorder. Each phase depends on the previous. Full details in `plans/pilot-implementation.md`.
