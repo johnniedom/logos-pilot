@@ -393,8 +393,8 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     return response;
 }
 
-void PilotImpl::setLLMProvider(std::unique_ptr<LLMProvider> provider) {
-    llm_ = provider ? std::move(provider) : std::make_unique<NoOpProvider>();
+void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider) {
+    impl.llm_ = provider ? std::move(provider) : std::make_unique<NoOpProvider>();
 }
 
 // SAFE paid A2A service (FIX 2): answer a stranger's prompt with the agent's LLM. PURE

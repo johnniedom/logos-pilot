@@ -148,10 +148,12 @@ public:
     // LLM-assisted owner message processing
     std::string processOwnerMessage(const std::string& message);
 
-    // Dependency-injection seam for the LLM provider. `pilot deploy` uses it to install the
-    // owner-selected provider; tests use it to drive agent.ask deterministically without a
-    // network call. Installs the NoOpProvider when given null (never leaves llm_ null).
-    void setLLMProvider(std::unique_ptr<LLMProvider> provider);
+    // Dependency-injection seam for the LLM provider — a FRIEND FREE FUNCTION (declared after
+    // this class), NOT a public member: the universal-module code generator wraps every public
+    // method for Qt Remote Objects and cannot marshal a std::unique_ptr<LLMProvider>. Tests call
+    // pilotSetLLMProvider(impl, ...) to drive agent.ask deterministically; deploy-time LLM
+    // selection goes through metaConfigure (llm.provider/llm.api_key) + initLLM(), not RPC.
+    friend void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
 
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
@@ -240,3 +242,8 @@ private:
     bool depsInitialized_ = false;
     std::vector<std::pair<std::string,std::string>> chatHistory_;
 };
+
+// Test/DI seam for the LLM provider: installs `provider` (or NoOpProvider when null) into impl.
+// A free function (not a PilotImpl method) so the Qt Remote Objects generator never tries to
+// marshal std::unique_ptr<LLMProvider>; friended above for access to the private llm_ member.
+void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);

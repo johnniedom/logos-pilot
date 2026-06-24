@@ -297,7 +297,7 @@ LOGOS_TEST(inbound_wallet_send_owner_gated_even_below_threshold) {
 LOGOS_TEST(inbound_service_skill_dispatches_no_pay_to_requester) {
     std::string dir = inboxDir("service");
     PilotImpl impl; impl.initialize(dir);   // registry is built in the ctor (no wallet needed)
-    impl.setLLMProvider(std::make_unique<FakeLLM>());   // deterministic, network-free
+    pilotSetLLMProvider(impl,std::make_unique<FakeLLM>());   // deterministic, network-free
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-svc\",\"params\":{"
         "\"id\":\"t-svc\",\"metadata\":{\"skill\":\"agent-ask\"},"
@@ -366,7 +366,7 @@ LOGOS_TEST(inbound_messaging_send_owner_gated_no_send) {
 LOGOS_TEST(inbound_agent_ask_autonomous_completes) {
     std::string dir = inboxDir("agentask_ok");
     PilotImpl impl; impl.initialize(dir);
-    impl.setLLMProvider(std::make_unique<FakeLLM>());
+    pilotSetLLMProvider(impl,std::make_unique<FakeLLM>());
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask\",\"params\":{"
         "\"id\":\"t-ask\",\"metadata\":{\"skill\":\"agent-ask\"},"
@@ -387,7 +387,7 @@ LOGOS_TEST(inbound_agent_ask_autonomous_completes) {
 LOGOS_TEST(inbound_agent_ask_honest_error_without_llm) {
     std::string dir = inboxDir("agentask_nollm");
     PilotImpl impl; impl.initialize(dir);
-    impl.setLLMProvider(nullptr);           // force NoOpProvider -> isConfigured()==false
+    pilotSetLLMProvider(impl,nullptr);           // force NoOpProvider -> isConfigured()==false
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask2\",\"params\":{"
         "\"id\":\"t-ask2\",\"metadata\":{\"skill\":\"agent-ask\"},"
@@ -525,7 +525,7 @@ LOGOS_TEST(inbound_extracts_flat_args_from_parts_envelope) {
 LOGOS_TEST(inbound_service_skill_dispatches_through_parts_envelope) {
     std::string dir = inboxDir("svc_parts");
     PilotImpl impl; impl.initialize(dir);
-    impl.setLLMProvider(std::make_unique<FakeLLM>());
+    pilotSetLLMProvider(impl,std::make_unique<FakeLLM>());
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-svcp\",\"params\":{"
         "\"id\":\"t-svcp\",\"metadata\":{\"skill\":\"agent-ask\"},"
