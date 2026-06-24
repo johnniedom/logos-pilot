@@ -50,8 +50,11 @@ target_link_libraries(pilot_module_tests PRIVATE SQLite::SQLite3 OpenSSL::Crypto
 # left undefined and the positive-path test compiles out — the negative-path
 # loader tests (the safety contract) always run.
 find_package(Qt6 QUIET COMPONENTS Core)
-if(Qt6_FOUND)
-    set(PILOT_EXAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../examples/skill-weather)
+set(PILOT_EXAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../examples/skill-weather)
+# Also require the example sources to be PRESENT: the Nix module build sandboxes only
+# pilot-module/, so the repo-root examples/ tree is absent there. When it's missing the
+# positive-path plugin test compiles out and the negative-path safety tests still run.
+if(Qt6_FOUND AND EXISTS ${PILOT_EXAMPLE_DIR}/weather_plugin.cpp)
     set(PILOT_TEST_PLUGIN_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_plugins)
 
     # A QPluginLoader-loadable plugin is a MODULE library. Built from the SAME
@@ -76,7 +79,7 @@ if(Qt6_FOUND)
     target_compile_definitions(pilot_module_tests PRIVATE
         PILOT_TEST_PLUGIN_DIR="${PILOT_TEST_PLUGIN_OUTDIR}")
 else()
-    message(STATUS "[pilot] Qt6 not directly findable for tests; "
-                   "runtime-plugin positive-path test will compile out "
-                   "(negative-path loader tests still run).")
+    message(STATUS "[pilot] runtime-plugin positive-path test compiled out "
+                   "(Qt6 not directly findable OR examples/ not in this build tree); "
+                   "negative-path loader safety tests still run.")
 endif()
