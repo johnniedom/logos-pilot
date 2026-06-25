@@ -22,6 +22,9 @@
 
 static const Timeout RPC_TIMEOUT(15000);
 
+// M3 — LRU cap on the heavy discovered_agents card_json cache (see a2aEvictDiscoveryCache).
+static const int kA2ADiscoveredAgentsMax = 1000;
+
 static std::string extractEncryptionKey(const std::string& addr) {
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(addr));
     if (doc.isObject() && doc.object().contains("viewing_public_key"))
@@ -480,6 +483,10 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
             }
         }
     }
+
+    // M3 — opportunistically LRU-trim the discovered_agents card cache after a discovery pass
+    // (it is the table this method grows). Pins and in-flight-outbound cards are spared.
+    if (db_) a2aEvictDiscoveryCache(db_);
 
     QJsonObject res;
     res["agents"] = agents;
@@ -1168,6 +1175,33 @@ std::string PilotImpl::programQuery(const std::string& programId, const std::str
     res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
         (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+}
+
+// M3 — LRU-trim ONLY the heavy discovered_agents card_json cache to kA2ADiscoveredAgentsMax by
+// last_seen. A row is deleted only if it is BOTH (a) not backing a non-terminal outbound_task and
+// (b) outside the freshest kA2ADiscoveredAgentsMax by last_seen.
+//   [FIX-B] pinned_identities / pinned_request_identities are AUTHORITATIVE TOFU stores and are
+//           NEVER touched here — pin permanence IS the anti-impersonation / anti-payout-swap
+//           property, and a pin row is tiny (npk + key + ts).
+//   [FIX-E] a card referenced by a non-terminal outbound_task ('submitted','settling',
+//           'awaiting-approval') is spared, else settleOutboundReply would lose the payout /
+//           signing_key at settle time and an owed payment would silently never pay.
+//   [FIX-C/FIX-F] built with std::to_string + the subquery `NOT IN (... LIMIT k)` form so it
+//           executes on stock SQLite (which ships without SQLITE_ENABLE_UPDATE_DELETE_LIMIT).
+// The three in-flight labels were verified against the outbound FSM in settleOutboundReply: the
+// row is created 'submitted', atomically claimed to 'settling', and parked 'awaiting-approval'
+// when above threshold; all other states ('paid','pay-failed','accepted-nopay','failed',
+// 'canceled','rejected') are terminal.
+void a2aEvictDiscoveryCache(sqlite3* db) {
+    if (!db) return;
+    std::string sql =
+        "DELETE FROM discovered_agents "
+        "WHERE npk NOT IN (SELECT agent_address FROM outbound_tasks "
+        "                  WHERE state IN ('submitted','settling','awaiting-approval')) "
+        "AND npk NOT IN (SELECT npk FROM discovered_agents "
+        "                ORDER BY CAST(last_seen AS INTEGER) DESC LIMIT " +
+        std::to_string(kA2ADiscoveredAgentsMax) + ");";
+    sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
 }
 
 std::string PilotImpl::programCall(const std::string& programId, const std::string& instruction, const std::string& paramsJson) {

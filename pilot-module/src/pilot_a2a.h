@@ -74,4 +74,16 @@ bool verifyInboundRequest(const QJsonObject& req, sqlite3* db, bool* firstContac
 // otherwise. Flattens npk via a2aFlattenForPrompt. Defined in pilot_a2a_inbox.cpp.
 QString a2aSenderDisplay(bool authenticated, bool firstContact, const QString& senderNpk);
 
+// Eviction / bounding helpers (M3). External linkage so the unit tests can drive them directly.
+// a2aEvictOldInboundTasks: a TTL sweep + row-cap backstop over TERMINAL inbound_tasks rows only
+// (in-flight rows are never touched). Defined in pilot_a2a_inbox.cpp.
+// a2aEvictDiscoveryCache: LRU-trims ONLY the heavy discovered_agents card cache to a fixed cap by
+// last_seen. [FIX-B] it NEVER touches the TOFU pin tables (pinned_identities /
+// pinned_request_identities) — pin permanence is the anti-impersonation property — and [FIX-E] it
+// never evicts a card backing a non-terminal outbound_task (else settlement loses its payout).
+// Defined in pilot_a2a.cpp. Both build their bounded DELETEs with std::to_string + the subquery
+// `NOT IN (... LIMIT k)` form so they execute on stock SQLite (no SQLITE_ENABLE_UPDATE_DELETE_LIMIT).
+void a2aEvictOldInboundTasks(sqlite3* db, long nowEpoch);
+void a2aEvictDiscoveryCache(sqlite3* db);
+
 #endif  // PILOT_A2A_H

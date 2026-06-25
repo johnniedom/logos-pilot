@@ -176,22 +176,63 @@ static const size_t kA2AMaxServiceBytes     = 8192;   // max serviced-skill args
 static const long   kA2AServiceWindowSec    = 60;     // rolling rate-limit window (seconds)
 static const int    kA2AServiceMaxPerWindow = 10;     // max serviced requests per sender per window
 
-// Count this sender's serviced requests of `skill` whose created_at is within the window
-// (inclusive of the current row, which was already inserted). Pure read over inbound_tasks.
+// M3 — resource caps / bounding for the inbound task path. kA2AMaxParamsBytes gates the FULL
+// stored message envelope (params_json) and is deliberately > the 8192 H3 serviced-args cap so
+// the per-skill arg gate still fires first for serviced skills. kA2AInboundMaxPerWindow is the
+// GLOBAL per-sender tasks/send flood cap across ALL skills (> the 10 agent-ask sublimit) and
+// reuses kA2AServiceWindowSec. The TTL + row-cap bound how many TERMINAL inbound rows persist.
+static const size_t kA2AMaxParamsBytes      = 16384;  // max params_json (full message envelope) bytes
+static const int    kA2AInboundMaxPerWindow = 30;     // max tasks/send per sender per window (any skill)
+static const long   kA2AInboundTaskTTLSec   = 86400;  // terminal inbound rows older than this are swept
+static const int    kA2AInboundTaskMaxRows  = 5000;   // hard backstop on retained terminal inbound rows
+
+// Count this sender's requests whose created_at is within the window (inclusive of the current
+// row, which was already inserted). Pure read over inbound_tasks. When `skill` is EMPTY this
+// counts ALL of the sender's tasks/send in the window (the M3 global per-sender flood gate);
+// otherwise it is the per-skill H3 serviced sublimit. The bind index is tracked at runtime so
+// the empty-skill form binds npk@1, since@2 (no `AND skill=?` clause / placeholder) while the
+// per-skill form binds npk@1, skill@2, since@3.
 static int a2aRecentSkillCount(sqlite3* db, const std::string& npk, const std::string& skill,
                                long sinceEpoch) {
     if (!db) return 0;
+    std::string sql = "SELECT COUNT(*) FROM inbound_tasks WHERE sender_npk=? ";
+    if (!skill.empty()) sql += "AND skill=? ";
+    sql += "AND CAST(created_at AS INTEGER) >= ?;";
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM inbound_tasks WHERE sender_npk=? AND skill=? "
-        "AND CAST(created_at AS INTEGER) >= ?;", -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, skill.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(st, 3, sinceEpoch);
+    sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+    int idx = 1;
+    sqlite3_bind_text(st, idx++, npk.c_str(), -1, SQLITE_TRANSIENT);
+    if (!skill.empty()) sqlite3_bind_text(st, idx++, skill.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, idx++, sinceEpoch);
     int n = 0;
     if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
     return n;
+}
+
+// M3 — bound how many TERMINAL inbound_tasks rows persist. (1) TTL sweep: drop terminal rows
+// older than the TTL; in-flight rows (accepted/working/input-required) are NEVER touched. (2)
+// Row-cap backstop: keep only the newest kA2AInboundTaskMaxRows terminal rows. Both deletes are
+// built with std::to_string and use the subquery `id NOT IN (SELECT ... LIMIT k)` form (NOT a
+// bare DELETE ... LIMIT) so they run on stock SQLite, which ships without
+// SQLITE_ENABLE_UPDATE_DELETE_LIMIT. [FIX-C/FIX-F] PK is `id`.
+void a2aEvictOldInboundTasks(sqlite3* db, long nowEpoch) {
+    if (!db) return;
+    // (1) TTL sweep — terminal rows older than the TTL. In-flight rows never touched.
+    {
+        std::string sql =
+            "DELETE FROM inbound_tasks WHERE state IN ('completed','failed','canceled') "
+            "AND CAST(created_at AS INTEGER) < " + std::to_string(nowEpoch - kA2AInboundTaskTTLSec) + ";";
+        sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+    }
+    // (2) Row-cap backstop — keep the newest kA2AInboundTaskMaxRows terminal rows.
+    {
+        std::string sql =
+            "DELETE FROM inbound_tasks WHERE state IN ('completed','failed','canceled') "
+            "AND id NOT IN (SELECT id FROM inbound_tasks WHERE state IN ('completed','failed','canceled') "
+            "ORDER BY CAST(created_at AS INTEGER) DESC LIMIT " + std::to_string(kA2AInboundTaskMaxRows) + ");";
+        sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+    }
 }
 
 void PilotImpl::inboundTaskSetState(const std::string& taskId, const std::string& state,
@@ -300,6 +341,12 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
         std::string argsStr = QJsonDocument(argsObj).toJson(QJsonDocument::Compact).toStdString();
         std::string paramsStr =
             QJsonDocument(messageObj).toJson(QJsonDocument::Compact).toStdString();
+        // M3 — reject an oversized FULL message envelope BEFORE we store or dispatch it, so a
+        // single huge task can never bloat the row or the billable path. Placed AFTER the
+        // idempotency cache check so a redelivery re-evaluates identically; the cap is larger
+        // than the H3 serviced-args cap so a serviced skill still trips its own arg gate first.
+        if (paramsStr.size() > kA2AMaxParamsBytes)
+            return a2aRpcError(rpcId, -32005, "request exceeds size limit");
         std::string ts = a2aNow();
         sqlite3_stmt* ins = nullptr;
         sqlite3_prepare_v2(db_,
@@ -316,6 +363,24 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
         sqlite3_bind_text(ins, 8, ts.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(ins);
         sqlite3_finalize(ins);
+
+        // M3 — GLOBAL per-sender flood gate across ALL skills (not just the serviced sublimit).
+        // H2 already requires every request to be signed + TOFU-pinned, so a flood is
+        // attributable to one npk; this bounds the rows + work a single pinned sender can force
+        // regardless of skill. Guarded by a non-empty authenticatedNpk so pure-FSM unit calls
+        // (empty npk) skip it, mirroring the H3 serviced gate. The serviced agent-ask sublimit
+        // (10) still fires first for that skill because 10 < kA2AInboundMaxPerWindow (30).
+        if (!authenticatedNpk.empty()) {
+            long since = std::stol(a2aNow()) - kA2AServiceWindowSec;
+            if (a2aRecentSkillCount(db_, authenticatedNpk, "", since) > kA2AInboundMaxPerWindow) {
+                inboundTaskSetState(taskId.toStdString(), "failed",
+                    "{\"error\":\"rate limit exceeded; retry later\"}");
+                return a2aRpcError(rpcId, -32006, "rate limit exceeded");
+            }
+        }
+        // Opportunistic maintenance: sweep terminal inbound rows past the TTL / row cap on each
+        // accepted send. `ts` is the insert epoch already computed above.
+        a2aEvictOldInboundTasks(db_, std::stol(ts));
 
         if (skill == "ping") {
             inboundTaskSetState(taskId.toStdString(), "working", "");
@@ -510,6 +575,13 @@ void PilotImpl::inboundTasksRecover() {
     sqlite3_bind_text(st, 1, ts.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(st);
     sqlite3_finalize(st);
+
+    // M3 — boot maintenance, AFTER the recover sweep above so a row it just failed (whose
+    // created_at is unchanged) is only swept if it was already older than the TTL. Prune terminal
+    // inbound rows past the TTL / row cap, and LRU-trim the discovered_agents card cache (TOFU
+    // pins + in-flight outbound cards excluded).
+    a2aEvictOldInboundTasks(db_, std::stol(a2aNow()));
+    a2aEvictDiscoveryCache(db_);
 }
 
 // Owner decision (or expiry) on a linked spend request -> drive the held peer task

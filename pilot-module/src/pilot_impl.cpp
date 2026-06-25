@@ -105,6 +105,12 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             updated_at TEXT NOT NULL
         );
 
+        -- M3: index the inbound_tasks access paths used by the per-sender flood gate
+        -- (sender_npk + created_at window) and the TTL/row-cap eviction sweeps (state +
+        -- created_at). discovered_agents.npk is already PRIMARY KEY, so no extra index there.
+        CREATE INDEX IF NOT EXISTS idx_inbound_tasks_sender_created ON inbound_tasks(sender_npk, created_at);
+        CREATE INDEX IF NOT EXISTS idx_inbound_tasks_state_created  ON inbound_tasks(state, created_at);
+
         CREATE TABLE IF NOT EXISTS outbound_tasks (
             id TEXT PRIMARY KEY,
             agent_address TEXT NOT NULL,

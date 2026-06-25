@@ -1283,3 +1283,158 @@ LOGOS_TEST(inbound_terminal_state_monotonic_under_reentrant_cancel) {
     LOGOS_ASSERT_CONTAINS(r, "canceled");
     LOGOS_ASSERT_TRUE(r.find("completed") == std::string::npos);
 }
+
+// ===================== Wave 2 hardening: M3 resource caps / eviction =================
+
+// Generic single-value COUNT(*) read against the test DB (no per-table helper exists for
+// discovered_agents / pinned_identities). Opens its own connection like the other readers.
+static int countRows(const std::string& dir, const std::string& sql) {
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    sqlite3_stmt* st = nullptr;
+    int n = 0;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW)
+        n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return n;
+}
+
+// M3 (params-size cap): a request whose FULL message envelope (params_json) exceeds
+// kA2AMaxParamsBytes (16384) is rejected with -32005 BEFORE any row is stored. The inner flat
+// args (parts[0].text) are tiny — only a huge SIBLING field bloats the envelope — so this trips
+// the new envelope gate, not the H3 serviced-args (8192) gate, and stores NOTHING.
+LOGOS_TEST(inbound_oversized_envelope_is_rejected_and_not_stored) {
+    std::string dir = inboxDir("oversized_envelope");
+    PilotImpl impl; impl.initialize(dir);
+    std::string huge(20000, 'x');   // sibling key bloats params_json past 16384
+    std::string req =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ovr\",\"params\":{"
+        "\"id\":\"t-ovr\",\"metadata\":{\"skill\":\"ping\"},"
+        "\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":{\"prompt\":\"hi\"}}],"
+        "\"junk\":\"" + huge + "\"}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}";
+    std::string r = impl.processInboundRequest(req);
+    LOGOS_ASSERT_CONTAINS(r, "size limit");
+    LOGOS_ASSERT_CONTAINS(r, "-32005");
+    // No row was stored at all (gate runs before the INSERT): both state and params_json empty.
+    LOGOS_ASSERT_TRUE(taskCol(dir, "t-ovr", "state").empty());
+    LOGOS_ASSERT_TRUE(taskCol(dir, "t-ovr", "params_json").empty());
+}
+
+// M3 (global per-sender flood gate): the cap spans ALL skills, not just the serviced sublimit.
+// The first kA2AInboundMaxPerWindow (30) tasks/send from one authenticated sender complete; the
+// 31st is refused with -32006 (state 'failed') without running; a DIFFERENT sender is unaffected.
+LOGOS_TEST(inbound_any_skill_rate_limited_per_sender) {
+    std::string dir = inboxDir("global_flood");
+    PilotImpl impl; impl.initialize(dir);
+    auto pingReq = [](const std::string& id, const std::string& sender) {
+        return "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"" + id + "\",\"params\":{"
+               "\"id\":\"" + id + "\",\"metadata\":{\"skill\":\"ping\"},\"message\":{}},"
+               "\"_logos\":{\"sender_npk\":\"" + sender + "\",\"reply_topic\":\"/r\"}}";
+    };
+    for (int i = 0; i < 30; ++i) {
+        std::string id = "fl-" + std::to_string(i);
+        impl.processInboundRequest(pingReq(id, "peer"), "peer", false);
+        LOGOS_ASSERT_EQ(taskCol(dir, id, "state"), std::string("completed"));
+    }
+    // The 31st from the same authenticated sender within the window is flood-limited.
+    std::string r = impl.processInboundRequest(pingReq("fl-30", "peer"), "peer", false);
+    LOGOS_ASSERT_CONTAINS(r, "rate limit");
+    LOGOS_ASSERT_CONTAINS(r, "-32006");
+    LOGOS_ASSERT_EQ(taskCol(dir, "fl-30", "state"), std::string("failed"));
+    // A DIFFERENT authenticated sender has its own quota and still completes.
+    impl.processInboundRequest(pingReq("fl-other", "peer2"), "peer2", false);
+    LOGOS_ASSERT_EQ(taskCol(dir, "fl-other", "state"), std::string("completed"));
+}
+
+// M3 (TTL sweep): a2aEvictOldInboundTasks drops TERMINAL rows older than kA2AInboundTaskTTLSec
+// (86400) while leaving in-flight rows and fresh terminal rows untouched.
+LOGOS_TEST(inbound_terminal_tasks_evicted_by_ttl_inflight_survives) {
+    std::string dir = inboxDir("ttl_evict");
+    PilotImpl impl; impl.initialize(dir);   // create schema
+    auto seedTask = [&](const std::string& id, const std::string& state, const std::string& createdAt) {
+        execSql(dir,
+            "INSERT OR REPLACE INTO inbound_tasks "
+            "(id,sender_npk,reply_topic,skill,params_json,state,created_at,updated_at) VALUES ('"
+            + id + "','peer','/r','ping','{}','" + state + "','" + createdAt + "','" + createdAt + "');");
+    };
+    seedTask("old-done",   "completed",      "1000");          // terminal + old   -> swept
+    seedTask("old-wait",   "input-required", "1000");          // in-flight + old  -> survives
+    seedTask("fresh-done", "completed",      "5000000000");    // terminal + fresh -> survives
+
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    a2aEvictOldInboundTasks(db, 5000000000L);   // now == fresh-done; far past old-* + TTL
+    sqlite3_close(db);
+
+    LOGOS_ASSERT_TRUE(taskCol(dir, "old-done", "state").empty());
+    LOGOS_ASSERT_EQ(taskCol(dir, "old-wait", "state"), std::string("input-required"));
+    LOGOS_ASSERT_EQ(taskCol(dir, "fresh-done", "state"), std::string("completed"));
+}
+
+// M3 [FIX-C/FIX-F] (row-cap backstop): with the TTL sweep inert (all rows fresh), the row cap
+// keeps only the newest kA2AInboundTaskMaxRows (5000) terminal rows. Proves the subquery
+// `id NOT IN (SELECT ... LIMIT k)` DELETE actually runs on stock SQLite (a bare DELETE...LIMIT
+// would silently no-op). The constant is file-local in pilot_a2a_inbox.cpp, so 5000 is mirrored
+// here.
+LOGOS_TEST(inbound_rowcap_evicts_terminal_beyond_max) {
+    std::string dir = inboxDir("rowcap_evict");
+    PilotImpl impl; impl.initialize(dir);
+    // Seed 5005 fresh terminal rows with strictly ascending created_at (rc-1 oldest .. rc-5005 newest).
+    execSql(dir,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 5005) "
+        "INSERT INTO inbound_tasks (id,sender_npk,reply_topic,skill,params_json,state,created_at,updated_at) "
+        "SELECT 'rc-'||x,'peer','/r','ping','{}','completed',CAST(1000000000+x AS TEXT),'0' FROM c;");
+
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    a2aEvictOldInboundTasks(db, 1000005105L);   // now > every created_at but within TTL -> only row-cap fires
+    sqlite3_close(db);
+
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM inbound_tasks WHERE state='completed';"), 5000);
+    LOGOS_ASSERT_TRUE(taskCol(dir, "rc-1", "state").empty());     // 5 oldest evicted by the cap
+    LOGOS_ASSERT_TRUE(taskCol(dir, "rc-5", "state").empty());
+    LOGOS_ASSERT_EQ(taskCol(dir, "rc-6", "state"), std::string("completed"));      // just inside the cap
+    LOGOS_ASSERT_EQ(taskCol(dir, "rc-5005", "state"), std::string("completed"));   // newest survives
+}
+
+// M3 [FIX-B/FIX-E] (discovery-cache trim): a2aEvictDiscoveryCache LRU-trims ONLY discovered_agents
+// to kA2ADiscoveredAgentsMax (1000) by last_seen. It NEVER touches the TOFU pin tables, and it
+// NEVER evicts a card backing a non-terminal outbound_task — even when that card's last_seen is
+// stale and outside the cap. A genuinely stale, non-pinned, non-inflight card is evicted. The cap
+// is file-local in pilot_a2a.cpp, so 1005 fresher fillers are seeded to force the trim.
+LOGOS_TEST(discovery_cache_trim_never_evicts_pins_or_inflight) {
+    std::string dir = inboxDir("disc_trim");
+    PilotImpl impl; impl.initialize(dir);   // schema: discovered_agents, pinned_identities, outbound_tasks
+
+    // cached: a discovered_agents card (stale) AND a TOFU pin row.
+    execSql(dir, "INSERT OR REPLACE INTO discovered_agents (npk,card_json,topic,last_seen) VALUES ('cached','{}','t','1000');");
+    execSql(dir, "INSERT OR REPLACE INTO pinned_identities (npk,signing_key,first_seen) VALUES ('cached','k','1');");
+    // pinnedOnly: a pin row with NO card and no outbound task.
+    execSql(dir, "INSERT OR REPLACE INTO pinned_identities (npk,signing_key,first_seen) VALUES ('pinnedOnly','k','1');");
+    // inflight: a discovered_agents card with STALE last_seen + a non-terminal outbound task.
+    execSql(dir, "INSERT OR REPLACE INTO discovered_agents (npk,card_json,topic,last_seen) VALUES ('inflight','{}','t','1001');");
+    seedOutbound(dir, "ob-inflight", "inflight", "agent-ask", 5);   // state 'submitted'
+    // staleVictim: stale, NOT pinned, NOT inflight -> must be evicted once outside the cap.
+    execSql(dir, "INSERT OR REPLACE INTO discovered_agents (npk,card_json,topic,last_seen) VALUES ('staleVictim','{}','t','1002');");
+    // > kA2ADiscoveredAgentsMax (1000) FRESHER cards push the stale rows outside the freshest-N window.
+    execSql(dir,
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 1005) "
+        "INSERT INTO discovered_agents (npk,card_json,topic,last_seen) "
+        "SELECT 'fill-'||x,'{}','t',CAST(2000000000+x AS TEXT) FROM c;");
+
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    a2aEvictDiscoveryCache(db);
+    sqlite3_close(db);
+
+    // [FIX-B] both pin rows survive — the cache trim never touches pinned_identities.
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM pinned_identities WHERE npk='cached';"), 1);
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM pinned_identities WHERE npk='pinnedOnly';"), 1);
+    // [FIX-E] the in-flight card survives despite a stale last_seen.
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM discovered_agents WHERE npk='inflight';"), 1);
+    // A genuinely stale, non-pinned, non-inflight card outside the cap is evicted.
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM discovered_agents WHERE npk='staleVictim';"), 0);
+}
