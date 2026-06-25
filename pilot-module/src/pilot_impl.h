@@ -152,6 +152,15 @@ public:
     // it does NOT notify the owner or drive any linked task — callers own that.
     bool executeSpend(const std::string& requestId);
 
+    // L7 — startup crash reconciliation: every spend stranded in EXECUTING by a crash
+    // (a clean run always drives EXECUTING->terminal synchronously) is moved to the new
+    // terminal TX_UNKNOWN, its linked outbound ('settling'->'pay-unresolved') and inbound
+    // ('input-required'->failed) tasks are un-hung, and the owner is surfaced ONCE. The wallet
+    // exposes no status-by-hash query, so we conservatively mark unknown (still budget-counted)
+    // rather than guess COMPLETED/TX_FAILED. No-op without db_. Public so tests drive it directly
+    // and so pilot_identity.cpp can call it on the startup driver (see §3.0).
+    void reconcileExecutingSpends();
+
     // Phase 5: Blockchain skills
     std::string programQuery(const std::string& programId, const std::string& paramsJson);
     std::string programCall(const std::string& programId, const std::string& instruction, const std::string& paramsJson);
@@ -201,6 +210,11 @@ private:
     bool deliverToOwner(const std::string& payload);   // retrying, honest publish to owner channel
     // Inbound A2A internals (impl in pilot_a2a_inbox.cpp). handleInboundA2A is the public
     // transport entry (declared above so tests can drive the decrypt+dispatch round trip).
+    // I2: build + sign the Agent Card and RETURN it with NO network side effect. agentCard()
+    // (public discovery skill) calls this then publishes; the inbound 'capabilities' read calls
+    // this and replies WITHOUT a discovery-topic write. Private so the QRO generator never wraps
+    // it as a remote method; member callers in other TUs still reach it.
+    std::string buildCard();
     bool replyToPeer(const std::string& topic, const std::string& recipientKey, const std::string& json);
     void inboundTaskSetState(const std::string& taskId, const std::string& state, const std::string& resultJson);
     void inboundTasksRecover();
@@ -256,6 +270,9 @@ private:
     bool storageInitialized_ = false;
     bool deliveryInitialized_ = false;
     bool depsInitialized_ = false;
+    // L6 — count of LLM complete() calls currently blocking this single delivery thread. Plain
+    // int (not atomic): guards SYNCHRONOUS nested-QEventLoop re-entrancy, not OS threads.
+    int llmInFlight_ = 0;
     std::vector<std::pair<std::string,std::string>> chatHistory_;
 };
 

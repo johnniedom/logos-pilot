@@ -30,3 +30,7 @@ public:
 
 std::unique_ptr<LLMProvider> createLLMProvider(const std::string& provider,
                                                 const std::string& model = "");
+
+// L6 — hard per-request timeout (ms) for the blocking LLM HTTP call. PILOT_LLM_TIMEOUT_MS
+// (positive int) else 60000. External linkage so both providers and tests share it.
+int pilotLlmTimeoutMs();

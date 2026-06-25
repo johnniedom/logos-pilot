@@ -560,3 +560,41 @@ LOGOS_TEST(settle_divergent_payout_card_refuses_to_pay) {
     LOGOS_ASSERT_EQ(spendCount(dir), 0);
     LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "ATTACKER_PAYOUT"), 0);
 }
+
+// ===================== Wave 3: L7 reconciliation drives the linked outbound =========
+
+// L7: a spend crash-stranded in EXECUTING, linked to a 'settling' outbound task, is reconciled to
+// TX_UNKNOWN and its hung outbound row is un-hung to 'pay-unresolved' (advanceLinkedOutboundTask
+// only moves 'awaiting-approval'/'settling' rows, so this is the same monotonic driver the owner
+// gate uses).
+LOGOS_TEST(reconcile_executing_drives_linked_outbound_to_pay_unresolved) {
+    std::string dir = outDir("reconcile_linked");
+    PilotImpl impl; impl.initialize(dir);
+
+    // A spend stranded mid-transfer (EXECUTING), and a 'settling' outbound task linked to it.
+    std::string sid = impl.createSpendRequest("PAYEE", 5, "A2A pay");
+    execOut(dir, "UPDATE spend_requests SET state='EXECUTING' WHERE id='" + sid + "';");
+    seedOutbound(dir, "tr", "PEER_VK", "storage-upload", 5, "settling");
+    execOut(dir, "UPDATE outbound_tasks SET spend_request_id='" + sid + "' WHERE id='tr';");
+
+    impl.reconcileExecutingSpends();
+
+    LOGOS_ASSERT_EQ(spendState(dir, sid), std::string("TX_UNKNOWN"));        // surfaced
+    LOGOS_ASSERT_EQ(outCol(dir, "tr", "state"), std::string("pay-unresolved"));   // un-hung
+}
+
+// L8: a committed 'completed' settle ALWAYS carries a linked spend (claim+create+link land
+// atomically), and exactly one spend exists — never a 'settling' row with an empty spend_request_id.
+LOGOS_TEST(settle_completed_creates_and_links_spend_atomically) {
+    std::string dir = outDir("settle_atomic");
+    PilotImpl impl; impl.initialize(dir);
+    seedOutbound(dir, "ta", "PEER_VK", "storage-upload", 5);
+    seedCardKp(dir, "PEER_VK", "PEER_VK", generateECIESKeypair());   // H1: payout == npk
+
+    impl.settleOutboundReply("ta", "completed");
+
+    std::string sid = outCol(dir, "ta", "spend_request_id");
+    LOGOS_ASSERT_FALSE(sid.empty());                       // the link is durable...
+    LOGOS_ASSERT_EQ(spendCount(dir), 1);                   // ...and exactly one spend was created...
+    LOGOS_ASSERT_FALSE(spendState(dir, sid).empty());      // ...and the linked spend row really exists
+}

@@ -55,6 +55,14 @@ static bool transferSucceeded(const QVariant& result) {
     return d.isObject() && d.object().value("success").toBool();
 }
 
+// Parse the tx_hash the transfer result already carries ({"error","success","tx_hash"}, see
+// line 48); previously discarded. Empty on null/unparseable/missing.
+static std::string transferTxHash(const QVariant& result) {
+    if (result.isNull()) return std::string();
+    QJsonDocument d = QJsonDocument::fromJson(result.toString().toUtf8());
+    return d.isObject() ? d.object().value("tx_hash").toString().toStdString() : std::string();
+}
+
 static std::string generateId() {
     auto now = std::chrono::high_resolution_clock::now();
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -117,7 +125,10 @@ std::string PilotImpl::createSpendRequest(const std::string& recipient, int64_t 
 // Sum of amounts committed within the current rolling period. COMPLETED/EXECUTING/
 // APPROVED are the states that have spent (or are committed to spend) real tokens;
 // CREATED/HELD/NOTIFIED are still gated and TX_FAILED/REJECTED/EXPIRED never moved
-// funds. Shared by walletSend and the inbound A2A auto-approve gate.
+// funds. TX_UNKNOWN (a crash-stranded EXECUTING reconciled by reconcileExecutingSpends,
+// L7) is ALSO counted: its funds MAY have moved, so we conservatively keep it against the
+// budget rather than free money that may already be spent (no automatic retirement —
+// PM3-F3, see §3.13). Shared by walletSend and the inbound A2A auto-approve gate.
 int64_t PilotImpl::periodSpent() {
     if (!db_) return 0;
     int64_t periodStart = std::stoll(currentTimestamp()) - spendPeriodSeconds_;
@@ -125,7 +136,7 @@ int64_t PilotImpl::periodSpent() {
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
         "SELECT COALESCE(SUM(amount), 0) FROM spend_requests "
-        "WHERE state IN ('COMPLETED', 'EXECUTING', 'APPROVED') AND created_at > ?;",
+        "WHERE state IN ('COMPLETED', 'EXECUTING', 'APPROVED', 'TX_UNKNOWN') AND created_at > ?;",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, psStr.c_str(), -1, SQLITE_TRANSIENT);
     int64_t total = 0;
@@ -158,7 +169,7 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     // Idempotency: never re-run a request that already reached (or is mid-) execution.
     if (state == "COMPLETED") return true;
     if (state == "EXECUTING" || state == "TX_FAILED" ||
-        state == "REJECTED" || state == "EXPIRED")
+        state == "REJECTED" || state == "EXPIRED" || state == "TX_UNKNOWN")
         return false;
 
     auto setSpendState = [&](const char* st) {
@@ -178,9 +189,23 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     auto* wallet = logosAPI_ ? logosAPI_->getClient("logos_execution_zone") : nullptr;
     if (!wallet) { setSpendState("TX_FAILED"); return false; }
 
+    // transfer_private is a single synchronous submit+confirm RPC, so the hash is unknowable
+    // until it returns — there is no pre-broadcast hash to persist, and a crash strictly before
+    // this write leaves the spend stranded in EXECUTING with NO hash (reconcileExecutingSpends
+    // surfaces those). Persist tx_hash atomically with the terminal state.
     QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
     bool ok = transferSucceeded(result);
-    setSpendState(ok ? "COMPLETED" : "TX_FAILED");
+    std::string txHash = transferTxHash(result);
+    std::string now = currentTimestamp();
+    sqlite3_stmt* term = nullptr;
+    sqlite3_prepare_v2(db_,
+        "UPDATE spend_requests SET state=?, tx_hash=?, updated_at=? WHERE id=?;", -1, &term, nullptr);
+    sqlite3_bind_text(term, 1, ok ? "COMPLETED" : "TX_FAILED", -1, SQLITE_STATIC);
+    sqlite3_bind_text(term, 2, txHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(term, 3, now.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(term, 4, requestId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(term);
+    sqlite3_finalize(term);
     return ok;
 }
 
@@ -468,6 +493,57 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
+// L7 — a clean run always drives EXECUTING->terminal synchronously, so any spend still EXECUTING
+// at startup was crash-stranded. The wallet exposes NO status-by-hash query and a stranded
+// EXECUTING never captured a hash, so we cannot auto-resolve COMPLETED/TX_FAILED: move it to the
+// terminal TX_UNKNOWN (still budget-counted by periodSpent), un-hang its linked outbound
+// ('settling'->'pay-unresolved') and inbound ('input-required'->failed) tasks, and surface ONCE
+// to the owner so a human can verify on chain. No-op without db_. SCOPE: resolves ONLY EXECUTING;
+// a row stranded 'settling' against a CREATED spend (crash after settle-COMMIT, before
+// executeSpend) is a separate known residual (see §3.13 follow-up).
+void PilotImpl::reconcileExecutingSpends() {
+    if (!db_) return;
+    struct Row { std::string id, recipient, txHash; int64_t amount; };
+    std::vector<Row> rows;
+    sqlite3_stmt* sel = nullptr;
+    sqlite3_prepare_v2(db_,
+        "SELECT id, recipient, amount, tx_hash FROM spend_requests WHERE state='EXECUTING';",
+        -1, &sel, nullptr);
+    while (sqlite3_step(sel) == SQLITE_ROW) {
+        Row r;
+        if (sqlite3_column_text(sel, 0)) r.id = reinterpret_cast<const char*>(sqlite3_column_text(sel, 0));
+        if (sqlite3_column_text(sel, 1)) r.recipient = reinterpret_cast<const char*>(sqlite3_column_text(sel, 1));
+        r.amount = sqlite3_column_int64(sel, 2);
+        if (sqlite3_column_text(sel, 3)) r.txHash = reinterpret_cast<const char*>(sqlite3_column_text(sel, 3));
+        if (!r.id.empty()) rows.push_back(r);
+    }
+    sqlite3_finalize(sel);
+
+    for (const auto& r : rows) {
+        std::string now = currentTimestamp();
+        sqlite3_stmt* u = nullptr;
+        sqlite3_prepare_v2(db_,
+            "UPDATE spend_requests SET state='TX_UNKNOWN', updated_at=? WHERE id=? AND state='EXECUTING';",
+            -1, &u, nullptr);
+        sqlite3_bind_text(u, 1, now.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(u, 2, r.id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(u);
+        sqlite3_finalize(u);
+        if (sqlite3_changes(db_) == 0) continue;   // never double-surface
+
+        advanceLinkedOutboundTask(db_, r.id, "pay-unresolved");
+        resumeInboundTask(r.id, false,
+            "interrupted mid-execution before restart; funds may or may not have moved - verify on chain");
+        std::string msg = "Spend " + r.id + " was interrupted mid-execution (amount " +
+            std::to_string(r.amount) + " LEZ to " + r.recipient + ").";
+        if (!r.txHash.empty()) msg += " tx_hash: " + r.txHash + ".";
+        msg += " The wallet exposes no transaction-status query, so the outcome cannot be "
+               "auto-reconciled — the funds MAY or MAY NOT have moved. The amount stays counted "
+               "against the budget until you confirm on chain.";
+        sendToOwner(msg);
+    }
+}
+
 void PilotImpl::recoverPendingTransactions() {
     if (!db_ || !logosAPI_) return;
 
@@ -475,7 +551,8 @@ void PilotImpl::recoverPendingTransactions() {
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
-        "SELECT id, state, recipient, amount FROM spend_requests WHERE state NOT IN ('COMPLETED', 'REJECTED', 'TX_FAILED', 'EXPIRED');",
+        "SELECT id, state, recipient, amount FROM spend_requests WHERE state NOT IN "
+        "('COMPLETED', 'REJECTED', 'TX_FAILED', 'EXPIRED', 'TX_UNKNOWN');",
         -1, &stmt, nullptr);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {

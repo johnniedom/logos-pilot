@@ -53,6 +53,34 @@ private:
     std::string taskId_;
 };
 
+// L6: an LLM whose complete() RE-ENTERS processInboundRequest with a SECOND inbound agent-ask
+// while this (outer) agent-ask is in-flight. The concurrency bound must refuse the nested call
+// BEFORE it nests a second blocking complete() on the single delivery thread, so the nested task
+// ends 'failed' (busy) and the outer still completes. The one-shot guard keeps a regressed (un-
+// bounded) build from recursing forever — it would instead complete the nested task, which the
+// test catches. isConfigured()==true so agent-ask runs the real dispatch path.
+class ReentrantAskLLM : public LLMProvider {
+public:
+    explicit ReentrantAskLLM(PilotImpl* impl) : impl_(impl) {}
+    std::string complete(const std::string&, const std::vector<LLMMessage>&) override {
+        if (!nested_) {
+            nested_ = true;
+            impl_->processInboundRequest(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask-nested\",\"params\":{"
+                "\"id\":\"t-ask-nested\",\"metadata\":{\"skill\":\"agent-ask\"},"
+                "\"message\":{\"prompt\":\"nested\"}},"
+                "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        }
+        return "ANSWER: outer";
+    }
+    std::string model() const override { return "reentrant-ask-1"; }
+    std::string providerName() const override { return "reentrant-ask"; }
+    bool isConfigured() const override { return true; }
+private:
+    PilotImpl* impl_;
+    bool nested_ = false;
+};
+
 // Inbound A2A task server. The pure state machine (processInboundRequest) is also
 // proven standalone in /tmp/a2a/test_inbox.cpp; this runs it through the real
 // PilotImpl + on-disk SQLite in the module harness.
@@ -1437,4 +1465,113 @@ LOGOS_TEST(discovery_cache_trim_never_evicts_pins_or_inflight) {
     LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM discovered_agents WHERE npk='inflight';"), 1);
     // A genuinely stale, non-pinned, non-inflight card outside the cap is evicted.
     LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM discovered_agents WHERE npk='staleVictim';"), 0);
+}
+
+// ===================== Wave 3: L8 atomic money-state transitions =====================
+
+// L8 (outbound recover step 0): an unlinked 'settling' row (spend_request_id='') never moved
+// money, so the self-heal re-arms it to 'submitted' on restart — still unlinked, no spend created.
+// (A LINKED settling row is left to step (2)/L7 instead.)
+LOGOS_TEST(outbound_recover_self_heals_settling_without_spend) {
+    std::string dir = inboxDir("recover_selfheal");
+    {
+        PilotImpl impl; impl.initialize(dir);
+        execSql(dir,
+            "INSERT OR REPLACE INTO outbound_tasks "
+            "(id, agent_address, skill, price, reply_topic, state, payout, spend_request_id, created_at, updated_at) "
+            "VALUES ('obSH','doerAgent','storage-upload',5,'/r','settling','','','0','0');");
+    }
+    PilotImpl impl2; impl2.initialize(dir);   // initialize() -> outboundTasksRecover() step (0)
+
+    LOGOS_ASSERT_EQ(outboundCol(dir, "obSH", "state"), std::string("submitted"));   // re-armed
+    LOGOS_ASSERT_TRUE(outboundCol(dir, "obSH", "spend_request_id").empty());        // still unlinked
+    LOGOS_ASSERT_EQ(countRows(dir, "SELECT COUNT(*) FROM spend_requests;"), 0);     // no money moved
+}
+
+// L8 (inbound wallet-send txn): the create + link + input-required + HELD writes land together as
+// one committed unit, so a peer's wallet-send is never observed half-applied.
+LOGOS_TEST(inbound_wallet_send_create_link_hold_are_atomic) {
+    std::string dir = inboxDir("walletsend_atomic");
+    PilotImpl impl; impl.initialize(dir);
+    std::string r = impl.processInboundRequest(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-atom\",\"params\":{"
+        "\"id\":\"t-atom\",\"metadata\":{\"skill\":\"wallet-send\"},"
+        "\"message\":{\"recipient\":\"payeeAtom\",\"amount\":40,\"reason\":\"job\"}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+
+    LOGOS_ASSERT_CONTAINS(r, "input-required");
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-atom", "state"), std::string("input-required"));   // input-required
+    std::string sid = taskCol(dir, "t-atom", "spend_request_id");
+    LOGOS_ASSERT_FALSE(sid.empty());                                                   // linked
+    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "payeeAtom"), 1);                      // created (one)
+    LOGOS_ASSERT_EQ(spendStateById(dir, sid), std::string("HELD"));                    // HELD
+}
+
+// ===================== Wave 3: I2 capabilities returns card without broadcast ========
+
+// I2: an inbound 'capabilities' read returns the FULL signed Agent Card via buildCard() — the peer
+// still gets the complete card; only the discovery-topic broadcast (which lives solely in
+// agentCard()) is dropped. We seed an identity so buildCard() emits a real card.
+LOGOS_TEST(inbound_capabilities_returns_card_without_broadcast) {
+    std::string dir = inboxDir("capabilities_card");
+    { PilotImpl boot; boot.initialize(dir); }   // create schema (no wallet -> returns false)
+    execSql(dir, "INSERT OR REPLACE INTO agent_identity (id,npk,account_id,created_at) "
+                 "VALUES (1,'agentnpk','acct','0');");
+    ECIESKeypair kp = generateECIESKeypair();
+    execSql(dir, "INSERT OR REPLACE INTO config (key,value) VALUES ('ecies.pub','" + kp.publicKeyHex + "');");
+    execSql(dir, "INSERT OR REPLACE INTO config (key,value) VALUES ('ecies.priv','" + kp.privateKeyHex + "');");
+    PilotImpl impl; impl.initialize(dir);        // loadIdentity() restores npk + ECIES key
+
+    std::string r = impl.processInboundRequest(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-cap\",\"params\":{"
+        "\"id\":\"t-cap\",\"metadata\":{\"skill\":\"capabilities\"},\"message\":{}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+
+    LOGOS_ASSERT_CONTAINS(r, "completed");
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-cap", "state"), std::string("completed"));
+    std::string card = taskCol(dir, "t-cap", "result_json");
+    LOGOS_ASSERT_CONTAINS(card, "agentnpk");                          // full card, real identity
+    LOGOS_ASSERT_CONTAINS(card, "signature");                        // signed
+    LOGOS_ASSERT_TRUE(card.find("not initialized") == std::string::npos);
+}
+
+// I2: the empty-npk not-initialized stub is preserved on the inbound capabilities leg — buildCard()
+// returns the same error stub the old agentCard() did before an identity exists.
+LOGOS_TEST(inbound_capabilities_uninitialized_returns_error_not_card) {
+    std::string dir = inboxDir("capabilities_uninit");
+    PilotImpl impl; impl.initialize(dir);   // no identity seeded -> agentNpk_ stays empty
+    std::string r = impl.processInboundRequest(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-capx\",\"params\":{"
+        "\"id\":\"t-capx\",\"metadata\":{\"skill\":\"capabilities\"},\"message\":{}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+
+    std::string card = taskCol(dir, "t-capx", "result_json");
+    LOGOS_ASSERT_CONTAINS(card, "not initialized");                  // stub preserved
+    LOGOS_ASSERT_TRUE(card.find("signature") == std::string::npos);  // no real card emitted
+}
+
+// ===================== Wave 3: L6 in-flight LLM bound (no nested event loop) =========
+
+// L6: an inbound agent-ask FLOOD can never nest QEventLoops on the single delivery thread. The
+// injected LLM re-enters with a SECOND agent-ask DURING the first's complete(); the concurrency
+// bound refuses the nested one ('failed' + busy) before it can nest another blocking call, while
+// the outer agent-ask still completes.
+LOGOS_TEST(inbound_agent_ask_concurrency_bounded_no_nested_eventloop) {
+    std::string dir = inboxDir("agentask_concurrency");
+    PilotImpl impl; impl.initialize(dir);
+    pilotSetLLMProvider(impl, std::make_unique<ReentrantAskLLM>(&impl));
+
+    std::string r = impl.processInboundRequest(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask-outer\",\"params\":{"
+        "\"id\":\"t-ask-outer\",\"metadata\":{\"skill\":\"agent-ask\"},"
+        "\"message\":{\"prompt\":\"outer\"}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+
+    // The OUTER agent-ask owns the single in-flight slot and completes.
+    LOGOS_ASSERT_CONTAINS(r, "completed");
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-ask-outer", "state"), std::string("completed"));
+    // The NESTED agent-ask (fired from inside the outer's blocking complete()) was refused by the
+    // bound BEFORE nesting a second event loop: it failed with a 'busy' error.
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-ask-nested", "state"), std::string("failed"));
+    LOGOS_ASSERT_CONTAINS(taskCol(dir, "t-ask-nested", "result_json"), "busy");
 }

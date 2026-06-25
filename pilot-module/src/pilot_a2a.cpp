@@ -224,7 +224,7 @@ QString verifyCardStatus(const QJsonObject& card, sqlite3* db) {
     return (!pinned.empty() && pinned == key) ? QStringLiteral("valid") : QStringLiteral("invalid");
 }
 
-std::string PilotImpl::agentCard() {
+std::string PilotImpl::buildCard() {
     if (agentNpk_.empty()) return "{\"error\": \"not initialized\"}";
 
     // A2A messaging identity is the ECIES key (the one we HOLD the private half of and can
@@ -381,8 +381,17 @@ std::string PilotImpl::agentCard() {
     }
 
     std::string cardStr = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+    return cardStr;
+}
 
-    if (logosAPI_) {
+std::string PilotImpl::agentCard() {
+    // Public discovery skill: build the signed card, then PUBLISH it to the shared discovery
+    // topic so peers can find us. The inbound 'capabilities' request instead calls buildCard()
+    // and replies WITHOUT this network write (I2). The !agentNpk_.empty() guard preserves the
+    // prior behavior of never broadcasting a not-initialized stub (the old early-return sat
+    // before this publish).
+    std::string cardStr = buildCard();
+    if (!agentNpk_.empty() && logosAPI_) {
         auto* delivery = logosAPI_->getClient("delivery_module");
         if (delivery && delivery->isConnected()) {
             delivery->invokeRemoteMethod(
@@ -391,8 +400,61 @@ std::string PilotImpl::agentCard() {
                 QString::fromStdString(cardStr), RPC_TIMEOUT);
         }
     }
-
     return cardStr;
+}
+
+// L2 — verify-before-cache guard for discovered_agents. agentDiscover keys every network card
+// on _logos.npk; a raw INSERT OR REPLACE lets a forged same-npk card (attacker signing_key,
+// verifies 'invalid' against the TOFU pin) EVICT a genuine last-known-valid row, after which
+// settlement reads the forgery, fails verification, and records pay-failed (denial-of-payment).
+// Caches `card` UNLESS doing so would overwrite an existing row whose stored card_json still
+// verifies 'valid' with a card that does NOT itself verify 'valid'. A 'valid' card always
+// (re)writes its own row; first contact (no prior valid row) always caches (unsigned/interop
+// peers stay discoverable); verifyCardStatus(card,db) TOFU-pins on first contact as a side effect.
+//
+// KNOWN LIMITATION (PM3-F2, non-fund-loss): on a TRUE first contact where an attacker's forged
+// same-npk card is processed BEFORE the genuine card in a single discovery pass, the forgery is
+// TOFU-pinned and cached as the 'valid' row; the genuine card then verifies 'invalid' against the
+// attacker pin and is refused, making the forgery sticky. This is the pre-existing TOFU
+// first-contact race, NOT a new payment risk: H1 (discoveredPayoutFor requires payout==_logos.npk)
+// and the pinned-key reply-signature binding both still refuse payment to a forged key.
+//
+// Returns true iff a row was written. db==nullptr or npk-less card -> false.
+bool a2aCacheDiscoveredCard(sqlite3* db, const QJsonObject& card,
+                            const std::string& topic, const std::string& lastSeen) {
+    if (!db) return false;
+    std::string npk = card["_logos"].toObject()["npk"].toString().toStdString();
+    if (npk.empty()) return false;
+
+    if (verifyCardStatus(card, db) != QStringLiteral("valid")) {
+        bool existingValid = false;
+        sqlite3_stmt* chk = nullptr;
+        if (sqlite3_prepare_v2(db,
+                "SELECT card_json FROM discovered_agents WHERE npk = ?;", -1, &chk, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(chk, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(chk) == SQLITE_ROW && sqlite3_column_text(chk, 0)) {
+                std::string exStr = reinterpret_cast<const char*>(sqlite3_column_text(chk, 0));
+                QJsonDocument exDoc = QJsonDocument::fromJson(QByteArray::fromStdString(exStr));
+                if (exDoc.isObject() && verifyCardStatus(exDoc.object(), db) == QStringLiteral("valid"))
+                    existingValid = true;
+            }
+        }
+        sqlite3_finalize(chk);
+        if (existingValid) return false;   // L2: never let a non-valid card evict a validated row
+    }
+
+    std::string cardJson = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+    sqlite3_stmt* ins = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO discovered_agents (npk, card_json, topic, last_seen) VALUES (?, ?, ?, ?);",
+            -1, &ins, nullptr) != SQLITE_OK) { sqlite3_finalize(ins); return false; }
+    sqlite3_bind_text(ins, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins, 2, cardJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins, 3, topic.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins, 4, lastSeen.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(ins);
+    sqlite3_finalize(ins);
+    return true;
 }
 
 std::string PilotImpl::agentDiscover(const std::string& topic) {
@@ -455,19 +517,12 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
                 QString npk = agentCard["_logos"].toObject()["npk"].toString();
                 if (npk.isEmpty()) continue;
 
-                std::string cardJson = QJsonDocument(agentCard).toJson(QJsonDocument::Compact).toStdString();
-                if (db_) {
-                    sqlite3_stmt* ins = nullptr;
-                    sqlite3_prepare_v2(db_,
-                        "INSERT OR REPLACE INTO discovered_agents (npk, card_json, topic, last_seen) VALUES (?, ?, ?, ?);",
-                        -1, &ins, nullptr);
-                    sqlite3_bind_text(ins, 1, npk.toStdString().c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 2, cardJson.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 3, discoveryTopic.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 4, ts.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(ins);
-                    sqlite3_finalize(ins);
-                }
+                // L2: verify-before-cache. Never let a non-valid card (e.g. a forged same-npk
+                // card that verifies 'invalid' against the TOFU pin) EVICT a last-known-valid row
+                // — that would make settlement read the forgery, fail verification, and record
+                // pay-failed (denial-of-payment). The helper also TOFU-pins on first contact.
+                if (db_)
+                    a2aCacheDiscoveredCard(db_, agentCard, discoveryTopic, ts);
 
                 // Flag signature validity on the returned card (cache above kept the
                 // unannotated original so it can be re-verified later). DB-aware so first
@@ -990,6 +1045,7 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
         return;
     }
 
+    sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);  // L8: claim+create+link as one unit, committed before the wallet RPC
     // Atomically claim the task for settlement: submitted -> settling, exactly once. If
     // we don't win the claim (already settling/paid/awaiting-approval/pay-failed/canceled/
     // unknown), do nothing — this is what prevents a double-spend across a repeated
@@ -1003,7 +1059,7 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
     sqlite3_bind_text(claim, 2, taskId.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(claim);
     sqlite3_finalize(claim);
-    if (sqlite3_changes(db_) == 0) return;
+    if (sqlite3_changes(db_) == 0) { sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr); return; }
 
     std::string agentAddress, skill;
     int64_t price = 0;
@@ -1034,12 +1090,12 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
     };
 
     // No declared price -> nothing to settle (honest: we don't invent a price).
-    if (price <= 0) { setOutbound("accepted-nopay", "", ""); return; }
+    if (price <= 0) { setOutbound("accepted-nopay", "", ""); sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr); return; }
 
     // PAYOUT (M5): pay the doer's DECLARED Agent Card payout account, never the messaging
     // address (paying that mis-targets / TX_FAILs). No payout on file -> refuse to pay.
     std::string payout = discoveredPayoutFor(agentAddress);
-    if (payout.empty()) { setOutbound("pay-failed", "", ""); return; }
+    if (payout.empty()) { setOutbound("pay-failed", "", ""); sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr); return; }
 
     // Create the spend through the SAME spending-FSM primitives the inbound path uses, and
     // LINK it to this outbound task up front (payout + spend_request_id) BEFORE gating. The
@@ -1052,6 +1108,7 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
     std::string spendId = createSpendRequest(payout, price,
         "A2A pay-on-acceptance: " + skill + " (task " + taskId + ")");
     setOutbound("settling", payout, spendId);
+    sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);  // L8: claim+create+link durable as one unit; gate runs in its own autocommit (never a write lock across a wallet RPC)
 
     // Same autonomous gate as walletSend/inbound: only when the price fits BOTH the per-tx
     // cap AND the remaining per-period budget do we pay without the owner. Any ambiguity
@@ -1088,6 +1145,20 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
 //      APPROVED) is LEFT for retry / the owner gate.
 void PilotImpl::outboundTasksRecover() {
     if (!db_) return;
+
+    // (0) L8 self-heal: an unlinked 'settling' row (no spend_request_id) never moved money, so
+    // resetting it to 'submitted' safely re-arms settlement. Runs before (1) so healed rows get
+    // re-subscribed this same pass. Rows WITH a linked spend are untouched (reconciled by (2)).
+    {
+        std::string ts = nowTimestamp();
+        sqlite3_stmt* heal = nullptr;
+        sqlite3_prepare_v2(db_,
+            "UPDATE outbound_tasks SET state='submitted', updated_at=? "
+            "WHERE state='settling' AND COALESCE(spend_request_id,'')='';", -1, &heal, nullptr);
+        sqlite3_bind_text(heal, 1, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(heal);
+        sqlite3_finalize(heal);
+    }
 
     // (1) Re-subscribe reply topics for still-open outbound tasks.
     auto* delivery = logosAPI_ ? logosAPI_->getClient("delivery_module") : nullptr;

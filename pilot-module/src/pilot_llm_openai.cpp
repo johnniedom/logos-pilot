@@ -3,6 +3,7 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QEventLoop>
+#include <QTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -50,7 +51,20 @@ public:
         QNetworkReply* reply = manager.post(request, payload);
         QEventLoop loop;
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        // L6 — hard total deadline so this nested loop on the delivery thread can never hang.
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(pilotLlmTimeoutMs());
         loop.exec();
+
+        if (!reply->isFinished()) {
+            reply->abort();
+            reply->deleteLater();
+            QJsonObject errObj;
+            errObj["error"] = QString("LLM request timed out");
+            return QJsonDocument(errObj).toJson(QJsonDocument::Compact).toStdString();
+        }
 
         if (reply->error() != QNetworkReply::NoError) {
             std::string err = reply->errorString().toStdString();

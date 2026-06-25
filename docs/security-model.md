@@ -78,7 +78,7 @@ a single spending gate before any funds move.
 
 A spend is **autonomous only if it fits BOTH limits**. The period total is computed
 from spends that have actually committed tokens (states `COMPLETED`, `EXECUTING`,
-`APPROVED`); gated states (`CREATED`, `HELD`, `NOTIFIED`) and dead states
+`APPROVED`, `TX_UNKNOWN`); gated states (`CREATED`, `HELD`, `NOTIFIED`) and dead states
 (`TX_FAILED`, `REJECTED`, `EXPIRED`) do not count against it.
 
 - **Below both limits → autonomous.** Executed without owner involvement.
@@ -107,6 +107,10 @@ CREATED ─┬─(within limits)──────────────► EX
 - **EXECUTING** — private transfer submitted on-chain.
 - **COMPLETED** — transfer confirmed.
 - **TX_FAILED** — transfer failed (funds not moved; reported, not faked).
+- **TX_UNKNOWN** — interrupted mid-execution (crash while EXECUTING); outcome
+  unverifiable (the wallet exposes no status-by-hash query), still budget-counted; no
+  automatic retirement — owner verifies on chain. Surfaced once on the next startup by
+  `reconcileExecutingSpends()`.
 - **REJECTED** — owner sent `/reject <id>`.
 - **EXPIRED** — no owner decision within the timeout.
 

@@ -86,6 +86,12 @@ bool PilotImpl::initialize(const std::string& dataDir) {
     initDatabase(effectiveDir);
     inboundTasksRecover();     // fail inbound A2A tasks that died with the previous process
     outboundTasksRecover();    // re-arm/reconcile outbound A2A settlement after a restart (M7)
+    // L7 — resolve/surface spends crash-stranded in EXECUTING. Placed here (NOT inside
+    // recoverPendingTransactions, which is gated on logosAPI_ AND only runs on the loadIdentity()
+    // branch) so it fires on every startup path, incl. degraded restart (no transport yet) and
+    // createIdentity(). db_-only; runs strictly after outboundTasksRecover()'s step (2), preserving
+    // the L7⊕L8 ordering invariant. sendToOwner() inside is a safe no-op without an owner channel.
+    reconcileExecutingSpends();
     initLLM();
 
     // Runtime third-party skills (Usability #1). Builtins are already registered in the

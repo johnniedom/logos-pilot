@@ -4,6 +4,14 @@
 std::unique_ptr<LLMProvider> createAnthropicProvider(const std::string& modelOverride);
 std::unique_ptr<LLMProvider> createOpenAIProvider(const std::string& modelOverride);
 
+int pilotLlmTimeoutMs() {
+    if (const char* env = std::getenv("PILOT_LLM_TIMEOUT_MS")) {
+        int v = std::atoi(env);
+        if (v > 0) return v;
+    }
+    return 60000;
+}
+
 static void setupOpenAICompat(const char* baseUrl, const char* srcEnv) {
     setenv("OPENAI_BASE_URL", baseUrl, 1);
     if (srcEnv && std::getenv(srcEnv) && !std::getenv("OPENAI_API_KEY"))

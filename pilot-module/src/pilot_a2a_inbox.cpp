@@ -391,7 +391,7 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
         }
         if (skill == "capabilities") {
             inboundTaskSetState(taskId.toStdString(), "working", "");
-            std::string cardStr = agentCard();
+            std::string cardStr = buildCard();
             inboundTaskSetState(taskId.toStdString(), "completed", cardStr);
             QJsonDocument cd = QJsonDocument::fromJson(QByteArray::fromStdString(cardStr));
             return a2aRpcTask(rpcId, taskId, "completed",
@@ -474,6 +474,7 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
                 return a2aRpcError(rpcId, -32602, "wallet-send missing recipient");
             }
 
+            sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);  // L8: create+link+input-required+HELD as one unit
             std::string sid = createSpendRequest(recipient, amount,
                 "A2A wallet-send task " + taskId.toStdString() + " from " +
                 a2aFlattenForPrompt(senderNpk.toStdString()));
@@ -512,6 +513,7 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
             sqlite3_bind_text(hold, 2, sid.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_step(hold);
             sqlite3_finalize(hold);
+            sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);  // L8: owner notification (RPC) runs after COMMIT
 
             sendToOwner(a2aWalletSendApprovalMessage(
                 skill.toStdString(),

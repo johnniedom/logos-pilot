@@ -159,3 +159,85 @@ LOGOS_TEST(card_without_identity_key_unbound) {
     card["signature"] = sig;
     LOGOS_ASSERT_EQ(verifyCardStatus(card).toStdString(), std::string("unbound"));
 }
+
+// ===================== Wave 3: L2 verify-before-cache (discovered_agents) ============
+// a2aCacheDiscoveredCard (pilot_a2a.cpp) is the pure DB free function agentDiscover delegates the
+// cache write to. These drive it against in-memory SQLite. verifyCardStatus(card,db) CREATEs the
+// pinned_identities table itself; the cache needs discovered_agents, created here.
+
+static sqlite3* openDiscDb() {
+    sqlite3* db = nullptr;
+    sqlite3_open(":memory:", &db);
+    sqlite3_exec(db,
+        "CREATE TABLE discovered_agents (npk TEXT PRIMARY KEY, card_json TEXT NOT NULL, "
+        "topic TEXT NOT NULL, last_seen TEXT NOT NULL);", nullptr, nullptr, nullptr);
+    return db;
+}
+
+static std::string discCol(sqlite3* db, const std::string& npk, const char* col) {
+    std::string sql = std::string("SELECT ") + col + " FROM discovered_agents WHERE npk = ?;";
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+    std::string v;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        v = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return v;
+}
+
+// L2 (core DoP guard): a genuine card is cached and TOFU-pinned on first contact. A FORGED
+// same-npk card (attacker key, verifies 'invalid' against the pin) must NOT evict it — the stored
+// row keeps the genuine signing_key and still verifies 'valid'. Pre-fix the raw INSERT OR REPLACE
+// let the forgery overwrite the row, after which settlement read the forgery and recorded
+// pay-failed (denial-of-payment).
+LOGOS_TEST(discovery_cache_forged_card_cannot_evict_valid_row) {
+    sqlite3* db = openDiscDb();
+    ECIESKeypair genuine = generateECIESKeypair();
+    ECIESKeypair attacker = generateECIESKeypair();
+
+    // First contact: genuine card cached + pins npk-genuine-identity -> genuine key.
+    QJsonObject genuineCard = makeCard(genuine.publicKeyHex, genuine.privateKeyHex, genuine.publicKeyHex);
+    LOGOS_ASSERT_TRUE(a2aCacheDiscoveredCard(db, genuineCard, "/t", "100"));
+
+    // Forged same-npk card (self-signed by the attacker -> 'valid' standalone, 'invalid' vs the
+    // pin) is REFUSED: it never overwrites the genuine validated row.
+    QJsonObject forged = makeCard(attacker.publicKeyHex, attacker.privateKeyHex, attacker.publicKeyHex);
+    LOGOS_ASSERT_FALSE(a2aCacheDiscoveredCard(db, forged, "/t", "200"));
+
+    // The genuine row survives intact: its signing_key is unchanged and it still verifies 'valid'.
+    std::string stored = discCol(db, "npk-genuine-identity", "card_json");
+    QJsonObject storedCard = QJsonDocument::fromJson(QByteArray::fromStdString(stored)).object();
+    LOGOS_ASSERT_EQ(storedCard["_logos"].toObject()["signing_key"].toString().toStdString(),
+                    genuine.publicKeyHex);
+    LOGOS_ASSERT_EQ(verifyCardStatus(storedCard, db).toStdString(), std::string("valid"));
+    sqlite3_close(db);
+}
+
+// L2 (no over-blocking of the genuine peer): a 'valid' card re-published under its OWN pin still
+// rewrites its row — the guard only refuses NON-valid cards. last_seen advances on the refresh.
+LOGOS_TEST(discovery_cache_valid_card_refreshes_own_row) {
+    sqlite3* db = openDiscDb();
+    ECIESKeypair genuine = generateECIESKeypair();
+    QJsonObject card = makeCard(genuine.publicKeyHex, genuine.privateKeyHex, genuine.publicKeyHex);
+
+    LOGOS_ASSERT_TRUE(a2aCacheDiscoveredCard(db, card, "/t", "100"));
+    LOGOS_ASSERT_EQ(discCol(db, "npk-genuine-identity", "last_seen"), std::string("100"));
+    // Re-publish (same valid card, same pin) rewrites the row with the fresher last_seen.
+    LOGOS_ASSERT_TRUE(a2aCacheDiscoveredCard(db, card, "/t", "500"));
+    LOGOS_ASSERT_EQ(discCol(db, "npk-genuine-identity", "last_seen"), std::string("500"));
+    sqlite3_close(db);
+}
+
+// L2 (interop): an UNSIGNED card on TRUE first contact (no prior valid row) is still cached, so
+// unsigned/interop peers stay discoverable — the guard only blocks a non-valid card that would
+// EVICT an existing validated row.
+LOGOS_TEST(discovery_cache_unsigned_first_contact_still_cached) {
+    sqlite3* db = openDiscDb();
+    QJsonObject logos; logos["npk"] = QString("npk-unsigned"); logos["signing_key"] = QString("ab12");
+    QJsonObject card; card["name"] = QString("X"); card["_logos"] = logos;   // no signature -> 'unsigned'
+
+    LOGOS_ASSERT_TRUE(a2aCacheDiscoveredCard(db, card, "/t", "100"));
+    LOGOS_ASSERT_FALSE(discCol(db, "npk-unsigned", "card_json").empty());   // row exists
+    sqlite3_close(db);
+}

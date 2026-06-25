@@ -45,6 +45,12 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
     if (rc != SQLITE_OK)
         throw std::runtime_error("Failed to open pilot database");
 
+    // L8 — safety margin on the WAL RESERVED lock. Production uses a single db_ connection (no
+    // self-contention), so this is not a runtime fix; it hardens any future second writer and
+    // prevents spurious SQLITE_BUSY in test inspector connections. The atomicity guarantee of the
+    // new settlement / inbound-wallet-send transactions comes from BEGIN IMMEDIATE/COMMIT, not this.
+    sqlite3_busy_timeout(db_, 5000);
+
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA synchronous=FULL;", nullptr, nullptr, nullptr);
 
@@ -76,7 +82,8 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             state TEXT NOT NULL DEFAULT 'CREATED',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL
+            expires_at TEXT NOT NULL,
+            tx_hash TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS stored_files (
@@ -184,6 +191,13 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         nullptr, nullptr, nullptr);
     sqlite3_exec(db_,
         "ALTER TABLE outbound_tasks ADD COLUMN spend_request_id TEXT;",
+        nullptr, nullptr, nullptr);
+
+    // L7 — record the on-chain transfer hash atomically with the terminal spend write (audit +
+    // future status query). Duplicate-column error on a fresh DB (CREATE already added it) is
+    // deliberately ignored, exactly like every other ADD COLUMN migration above.
+    sqlite3_exec(db_,
+        "ALTER TABLE spend_requests ADD COLUMN tx_hash TEXT NOT NULL DEFAULT '';",
         nullptr, nullptr, nullptr);
 
     // Migrate DBs created before pinned_identities (first-contact identity pinning, TOFU).
@@ -358,6 +372,18 @@ std::string PilotImpl::buildLLMSystemPrompt() {
     return prompt;
 }
 
+namespace {
+// L6: serialize/bound blocking LLM calls on the delivery thread. The 'concurrency' guarded is a
+// nested QEventLoop (inside complete()) pumping a fresh inbound agent-ask back into this object,
+// not OS threads, so a non-atomic int is correct. Bound 1 = strict serialize of the billable path.
+constexpr int kMaxConcurrentLLMCalls = 1;
+struct InFlightGuard {
+    int& c;
+    explicit InFlightGuard(int& counter) : c(counter) { ++c; }
+    ~InFlightGuard() { --c; }
+};
+}  // namespace
+
 std::string PilotImpl::processOwnerMessage(const std::string& message) {
     if (message.empty()) return "{\"action\": \"none\"}";
 
@@ -380,18 +406,31 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     }
 
     std::string systemPrompt = buildLLMSystemPrompt();
-    chatHistory_.push_back({"user", message});
-    if (chatHistory_.size() > 40)
-        chatHistory_.erase(chatHistory_.begin(), chatHistory_.begin() + 2);
 
+    // I1: build the LLM request from a SNAPSHOT of history plus this turn, appending the new
+    // user message ONLY to the local request vector — do NOT mutate shared chatHistory_ yet.
+    // complete() blocks on a nested QEventLoop that keeps pumping the delivery thread, so a
+    // re-entrant owner message can run processOwnerMessage() again while we are parked here.
+    // Committing the user turn now would let that re-entrant call interleave its push_backs
+    // between our user message and our assistant reply, breaking role alternation.
     std::vector<LLMMessage> messages;
     for (const auto& [role, content] : chatHistory_)
         messages.push_back({role, content});
+    messages.push_back({"user", message});
 
+    // L6: the owner's blocking call registers as in-flight (so a nested inbound agent-ask is
+    // refused by the bound) but the owner is NEVER itself refused — owner is privileged.
+    InFlightGuard _inflight(llmInFlight_);
     std::string response = llm_->complete(systemPrompt, messages);
 
+    // I1: commit this turn AFTER complete() as one contiguous (user, assistant) unit. A
+    // re-entrant call that ran during complete() has already appended its own complete pair,
+    // so ours lands after it with alternation intact.
+    chatHistory_.push_back({"user", message});
     if (!response.empty() && response.find("\"error\"") == std::string::npos)
         chatHistory_.push_back({"assistant", response});
+    while (chatHistory_.size() > 40)
+        chatHistory_.erase(chatHistory_.begin(), chatHistory_.begin() + 2);
 
     if (response.empty() || response.find("\"error\"") != std::string::npos) {
         std::string errDetail = response;
@@ -424,6 +463,13 @@ std::string PilotImpl::agentAsk(const std::string& prompt) {
     if (!llm_ || !llm_->isConfigured())
         return "{\"error\":\"LLM not configured\"}";
 
+    // L6 — bound concurrent in-flight LLM calls so an inbound agent-ask FLOOD can never nest
+    // QEventLoops on the single delivery thread. Refuse BEFORE starting a second blocking call.
+    // Honest error -> a2aResultIsSuccess()==false -> inbound dispatcher marks the task 'failed'
+    // (peer retries), mirroring the H3/M3 rate-limit contract.
+    if (llmInFlight_ >= kMaxConcurrentLLMCalls)
+        return "{\"error\":\"LLM busy; concurrency limit reached, retry later\"}";
+
     const std::string systemPrompt =
         "You are a helpful assistant answering a single question for an external party over an "
         "agent-to-agent channel. Give a direct, concise, plain-text answer. You have NO access "
@@ -432,6 +478,7 @@ std::string PilotImpl::agentAsk(const std::string& prompt) {
 
     std::vector<LLMMessage> messages;
     messages.push_back({"user", prompt});
+    InFlightGuard _inflight(llmInFlight_);
     std::string answer = llm_->complete(systemPrompt, messages);
 
     if (answer.empty() || answer.find("\"error\"") != std::string::npos) {

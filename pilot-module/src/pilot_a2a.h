@@ -86,4 +86,10 @@ QString a2aSenderDisplay(bool authenticated, bool firstContact, const QString& s
 void a2aEvictOldInboundTasks(sqlite3* db, long nowEpoch);
 void a2aEvictDiscoveryCache(sqlite3* db);
 
+// L2 — verify-before-cache guard for the discovered_agents card cache (see pilot_a2a.cpp).
+// Refuses to let a non-'valid' card evict an existing row that still verifies 'valid', closing a
+// forged-same-npk denial-of-payment. Returns true iff a row was written. Defined in pilot_a2a.cpp.
+bool a2aCacheDiscoveredCard(sqlite3* db, const QJsonObject& card,
+                            const std::string& topic, const std::string& lastSeen);
+
 #endif  // PILOT_A2A_H
