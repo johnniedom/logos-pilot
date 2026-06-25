@@ -466,6 +466,52 @@ LOGOS_TEST(inbound_agent_ask_honest_error_without_llm) {
     LOGOS_ASSERT_TRUE(taskCol(dir, "t-ask2", "spend_request_id").empty());
 }
 
+// H3: the SAFE auto-run path (agent-ask) is billable LLM work. Post-H2 a caller must be an
+// authenticated, TOFU-pinned npk, so we rate-limit per sender: the first kA2AServiceMaxPerWindow
+// (10) succeed, the next is refused WITHOUT running the LLM, and a DIFFERENT sender is unaffected.
+LOGOS_TEST(inbound_service_rate_limited_after_burst) {
+    std::string dir = inboxDir("svc_ratelimit");
+    PilotImpl impl; impl.initialize(dir);
+    pilotSetLLMProvider(impl, std::make_unique<FakeLLM>());
+    auto askReq = [](const std::string& id, const std::string& sender) {
+        return "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"" + id + "\",\"params\":{"
+               "\"id\":\"" + id + "\",\"metadata\":{\"skill\":\"agent-ask\"},"
+               "\"message\":{\"prompt\":\"hi\"}},"
+               "\"_logos\":{\"sender_npk\":\"" + sender + "\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}";
+    };
+    for (int i = 0; i < 10; ++i) {
+        std::string id = "rl-" + std::to_string(i);
+        impl.processInboundRequest(askReq(id, "peer"), "peer", false);
+        LOGOS_ASSERT_EQ(taskCol(dir, id, "state"), std::string("completed"));
+    }
+    // The 11th from the same authenticated sender within the window is rate-limited (no LLM run).
+    std::string r = impl.processInboundRequest(askReq("rl-10", "peer"), "peer", false);
+    LOGOS_ASSERT_CONTAINS(r, "rate limit");
+    LOGOS_ASSERT_EQ(taskCol(dir, "rl-10", "state"), std::string("failed"));
+    LOGOS_ASSERT_TRUE(taskCol(dir, "rl-10", "result_json").find("answer") == std::string::npos);
+    // A DIFFERENT authenticated sender has its own quota and still completes.
+    impl.processInboundRequest(askReq("rl-other", "peer2"), "peer2", false);
+    LOGOS_ASSERT_EQ(taskCol(dir, "rl-other", "state"), std::string("completed"));
+}
+
+// H3: an oversized serviced request is refused BEFORE the billable LLM runs, so a single huge
+// prompt cannot inflate cost. The size cap applies regardless of authentication.
+LOGOS_TEST(inbound_service_prompt_too_large_is_rejected) {
+    std::string dir = inboxDir("svc_toobig");
+    PilotImpl impl; impl.initialize(dir);
+    pilotSetLLMProvider(impl, std::make_unique<FakeLLM>());
+    std::string big(9000, 'x');   // argsStr exceeds kA2AMaxServiceBytes (8192)
+    std::string req =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-big\",\"params\":{"
+        "\"id\":\"t-big\",\"metadata\":{\"skill\":\"agent-ask\"},"
+        "\"message\":{\"prompt\":\"" + big + "\"}},"
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}";
+    std::string r = impl.processInboundRequest(req);
+    LOGOS_ASSERT_CONTAINS(r, "size limit");
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-big", "state"), std::string("failed"));
+    LOGOS_ASSERT_TRUE(taskCol(dir, "t-big", "result_json").find("answer") == std::string::npos);
+}
+
 // FIX 3 HONEST SUCCESS CONTRACT: the inbound 'completed vs failed' verdict (a2aResultIsSuccess)
 // pays the doer ONLY on an EXPLICIT, positive success signal. A serviced skill that reports it
 // did NOT do the work — {"joined":false}, {"success":false}, status:failed — must mark the task

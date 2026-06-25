@@ -168,6 +168,32 @@ std::string a2aWalletSendApprovalMessage(const std::string& skill, const std::st
            "\nExpires: 60 min\n/approve " + spendId + "\n/reject " + spendId;
 }
 
+// H3 — abuse limits on the SAFE auto-run (priced) skills (agent-ask). H2 already requires every
+// inbound request to be signed and TOFU-pinned, so a flood is now attributable to a pinned npk;
+// these caps bound the unpaid LLM cost a single pinned sender can inflict, and the size of any one
+// request, BEFORE we run a billable completion. (Moving the LLM off the delivery thread is L6.)
+static const size_t kA2AMaxServiceBytes     = 8192;   // max serviced-skill args payload (~prompt)
+static const long   kA2AServiceWindowSec    = 60;     // rolling rate-limit window (seconds)
+static const int    kA2AServiceMaxPerWindow = 10;     // max serviced requests per sender per window
+
+// Count this sender's serviced requests of `skill` whose created_at is within the window
+// (inclusive of the current row, which was already inserted). Pure read over inbound_tasks.
+static int a2aRecentSkillCount(sqlite3* db, const std::string& npk, const std::string& skill,
+                               long sinceEpoch) {
+    if (!db) return 0;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM inbound_tasks WHERE sender_npk=? AND skill=? "
+        "AND CAST(created_at AS INTEGER) >= ?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, skill.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 3, sinceEpoch);
+    int n = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
 void PilotImpl::inboundTaskSetState(const std::string& taskId, const std::string& state,
                                     const std::string& resultJson) {
     if (!db_) return;
@@ -321,6 +347,24 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson,
         for (const auto& svc : a2aServiceCatalog())
             if (skill == QString::fromUtf8(svc.id)) { serviced = true; break; }
         if (serviced) {
+            // H3 — bound abuse of the billable LLM path BEFORE running it. An oversized request is
+            // refused outright; an authenticated sender that exceeds its per-window quota is
+            // rate-limited (unauthenticated callers can no longer reach here at all, post-H2). This
+            // turns the previously-unmetered free-drain into a bounded, per-identity cost.
+            if (argsStr.size() > kA2AMaxServiceBytes) {
+                inboundTaskSetState(taskId.toStdString(), "failed",
+                    "{\"error\":\"request exceeds size limit\"}");
+                return a2aRpcError(rpcId, -32005, "request exceeds size limit");
+            }
+            if (!authenticatedNpk.empty()) {
+                long since = std::stol(a2aNow()) - kA2AServiceWindowSec;
+                if (a2aRecentSkillCount(db_, authenticatedNpk, skill.toStdString(), since)
+                        > kA2AServiceMaxPerWindow) {
+                    inboundTaskSetState(taskId.toStdString(), "failed",
+                        "{\"error\":\"rate limit exceeded; retry later\"}");
+                    return a2aRpcError(rpcId, -32006, "rate limit exceeded");
+                }
+            }
             inboundTaskSetState(taskId.toStdString(), "working", "");
             std::string regName = skill.toStdString();
             for (auto& ch : regName) if (ch == '-') ch = '.';
