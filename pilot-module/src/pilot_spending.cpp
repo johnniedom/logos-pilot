@@ -274,6 +274,24 @@ bool PilotImpl::rejectSpend(const std::string& requestId) {
     return changed;
 }
 
+// Quietly release a HELD/NOTIFIED spend (e.g. a peer withdrew its task via tasks/cancel) so a
+// later owner /approve can no longer move funds for it (L3). Unlike rejectSpend this does NOT
+// notify the owner (a "Transaction ... rejected." message for a peer-withdrawn task would be
+// misleading peer-driven spam, P7) and does NOT resumeInboundTask (the task is already canceled).
+bool PilotImpl::releaseHeldSpend(const std::string& requestId) {
+    if (!db_) return false;
+    std::string now = currentTimestamp();
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_,
+        "UPDATE spend_requests SET state = 'REJECTED', updated_at = ? "
+        "WHERE id = ? AND state IN ('HELD', 'NOTIFIED');", -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, now.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, requestId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return sqlite3_changes(db_) > 0;
+}
+
 // Proactively cancel any pending request whose 60-minute approval window has
 // passed. Without this the deadline shown to the owner ("Expires: 60 min") is
 // only enforced lazily at approve-time — a stale request would otherwise sit in

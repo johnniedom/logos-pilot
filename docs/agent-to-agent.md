@@ -104,6 +104,12 @@ input/output modes, skills) it carries a `_logos` block:
   `{nullifier_public_key, viewing_public_key}` shape the wallet returns), so a
   requester's `doPrivateTransfer` routes it straight to `transfer_private`. It is
   deliberately **not** the waku messaging id and **not** a bare owned account id.
+  **In this build `payout` MUST equal `_logos.npk` (the card's payment identity).**
+  A genuine card always sets them equal; `discoveredPayoutFor()` **refuses to pay**
+  any card whose `payout != npk`, so a card cannot redirect funds to a third account
+  even after passing the signature/TOFU gate (H1). A distinct, separately-payable
+  payout account is a tracked follow-up that would require binding `payout` into the
+  TOFU pin.
 - `signing_key` — the public key that signs *this* card (`agentEciesPub_`).
 - `payment` / `payment_timing` — `"lez"`, `"on-acceptance"`.
 
@@ -288,6 +294,17 @@ On the doer side, `replyToPeer()` signs the reply's canonical bytes (envelope
 *with* `_logos.signing_key`, *without* `_logos.signature`) using ES256K and
 attaches `_logos.signature`. If it cannot sign, it sends **unsigned** rather than
 fabricate — and the asker will correctly refuse to settle.
+
+**Symmetrically, inbound requests are authenticated (H2).** The doer's inbox ECIES
+key is *also* public, so an ECIES-decryptable request authenticates nothing either.
+Every outbound request (`agentTask` / `agentSubscribe` / `agentCancel`) is therefore
+signed via `signA2AEnvelope()` (the same canonical-bytes scheme as a reply), and
+`handleInboundA2A()` drops any request that is not validly signed — verifying it via
+`verifyInboundRequest()` against a **dedicated `pinned_request_identities` TOFU
+namespace**, never the card pin, so a request can never poison the payout pin.
+`tasks/cancel` and `tasks/sendSubscribe` additionally require the authenticated
+sender to equal the task's stored `sender_npk`, so a third party cannot cancel a
+peer's task or read its paid-for result.
 
 ### The asker's gate (`verifyAndSettleReply`)
 

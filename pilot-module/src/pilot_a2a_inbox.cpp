@@ -91,12 +91,90 @@ static bool a2aRiskyOwnerGated(const QString& skill) {
            skill.startsWith("program-");
 }
 
+// Authenticate an INBOUND A2A request (H2): require a valid ES256K signature in _logos.signature
+// over the canonical request bytes (envelope minus _logos.signature) produced by the request's
+// _logos.signing_key, then TOFU-pin (_logos.sender_npk -> signing_key) in a DEDICATED
+// pinned_request_identities table — NEVER the card pin (pinned_identities) — so a request can
+// never poison the card/payout pin (P4). Mirrors verifyCardStatus's write-before-read TOFU (P5).
+// db==nullptr -> signature-only (bare unit harness) with *firstContact=true. Returns true only
+// for a signed, pin-consistent request; ambiguity -> false (drop).
+bool verifyInboundRequest(const QJsonObject& req, sqlite3* db, bool* firstContact) {
+    if (firstContact) *firstContact = false;
+    QJsonObject logos = req["_logos"].toObject();
+    std::string key = logos["signing_key"].toString().toStdString();
+    std::string sig = logos["signature"].toString().toStdString();
+    std::string npk = logos["sender_npk"].toString().toStdString();
+    if (key.empty() || sig.empty()) return false;
+    QJsonObject env = req;
+    QJsonObject l2 = env["_logos"].toObject();
+    l2.remove("signature");                                   // canonical excludes the signature
+    env["_logos"] = l2;
+    std::string canonical = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    if (!verifySignature(bytes, sig, key)) return false;      // (message, signatureHex, publicKeyHex)
+    if (!db) { if (firstContact) *firstContact = true; return true; }   // bare harness: signature-only
+    if (npk.empty()) return true;                             // signed, nothing to pin
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS pinned_request_identities ("
+        "npk TEXT PRIMARY KEY, signing_key TEXT NOT NULL, first_seen TEXT NOT NULL);",
+        nullptr, nullptr, nullptr);
+    std::string ts = a2aNow();
+    sqlite3_stmt* ins = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO pinned_request_identities (npk, signing_key, first_seen) "
+            "VALUES (?, ?, ?);", -1, &ins, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(ins, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 2, key.c_str(),  -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 3, ts.c_str(),   -1, SQLITE_TRANSIENT);
+        sqlite3_step(ins);
+    }
+    sqlite3_finalize(ins);
+    if (firstContact) *firstContact = (sqlite3_changes(db) > 0);   // newly pinned by this message
+    std::string pinned;
+    sqlite3_stmt* sel = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "SELECT signing_key FROM pinned_request_identities WHERE npk = ?;",
+            -1, &sel, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(sel, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(sel) == SQLITE_ROW && sqlite3_column_text(sel, 0))
+            pinned = reinterpret_cast<const char*>(sqlite3_column_text(sel, 0));
+    }
+    sqlite3_finalize(sel);
+    return !pinned.empty() && pinned == key;   // TOFU: first-seen key wins; mismatch -> drop
+}
+
+// Injection-safe, trust-tagged sender label for an owner prompt (L4). PURE function of the H2
+// verdict — NO DB access (the verdict already came from verifyInboundRequest). A stranger's very
+// first request is never shown as a "known peer".
+QString a2aSenderDisplay(bool authenticated, bool firstContact, const QString& senderNpk) {
+    std::string flat = a2aFlattenForPrompt(senderNpk.toStdString());
+    if (!authenticated) return QString::fromStdString("UNVERIFIED " + flat);
+    if (firstContact)   return QString::fromStdString("authenticated, first contact " + flat);
+    return QString::fromStdString("authenticated known peer " + flat);
+}
+
+// Inbound wallet-send owner-approval prompt (M4): includes the payee `recipient` (previously
+// omitted — the single most security-relevant field) and an optional `reason`, matching
+// walletSend's own owner message. Flattens skill/recipient/reason; senderDisplay is pre-sanitized.
+std::string a2aWalletSendApprovalMessage(const std::string& skill, const std::string& senderDisplay,
+                                         int64_t amount, const std::string& recipient,
+                                         const std::string& reason, const std::string& spendId) {
+    std::string r = a2aFlattenForPrompt(reason);
+    return "Peer agent task needs approval:\nSkill: " + a2aFlattenForPrompt(skill) +
+           "\nFrom: " + senderDisplay +
+           "\nAmount: " + std::to_string(amount) + " LEZ" +
+           "\nTo: " + a2aFlattenForPrompt(recipient) +
+           (r.empty() ? std::string() : ("\nReason: " + r)) +
+           "\nExpires: 60 min\n/approve " + spendId + "\n/reject " + spendId;
+}
+
 void PilotImpl::inboundTaskSetState(const std::string& taskId, const std::string& state,
                                     const std::string& resultJson) {
     if (!db_) return;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(db_,
-        "UPDATE inbound_tasks SET state=?, result_json=?, updated_at=? WHERE id=?;", -1, &st, nullptr);
+        "UPDATE inbound_tasks SET state=?, result_json=?, updated_at=? "
+        "WHERE id=? AND state NOT IN ('completed','failed','canceled');", -1, &st, nullptr);
     std::string ts = a2aNow();
     sqlite3_bind_text(st, 1, state.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, resultJson.c_str(), -1, SQLITE_TRANSIENT);
@@ -106,7 +184,9 @@ void PilotImpl::inboundTaskSetState(const std::string& taskId, const std::string
     sqlite3_finalize(st);
 }
 
-std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
+std::string PilotImpl::processInboundRequest(const std::string& requestJson,
+                                             const std::string& authenticatedNpk,
+                                             bool senderFirstContact) {
     if (!db_) return a2aRpcError("", -32603, "agent not initialized");
 
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(requestJson));
@@ -119,9 +199,22 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
         const QString taskId = req["params"].toObject()["id"].toString();
         std::string state = a2aCol(db_, taskId.toStdString(), "state");
         if (state.empty()) return a2aRpcError(rpcId, -32001, "task not found");
+        // OWNERSHIP BINDING (H2): only the original requester may cancel. Checked BEFORE the
+        // -32002 terminal guard so a non-owner learns nothing about task state. Empty
+        // authenticatedNpk == direct pure-FSM unit call -> binding skipped.
+        if (!authenticatedNpk.empty() &&
+            a2aCol(db_, taskId.toStdString(), "sender_npk") != authenticatedNpk)
+            return a2aRpcError(rpcId, -32003, "unauthorized");
         if (state == "completed" || state == "failed" || state == "canceled")
             return a2aRpcError(rpcId, -32002, "task not cancelable");
+        // Mark canceled FIRST (L3): resumeInboundTask only touches 'input-required', so the
+        // canceled terminal is never clobbered; L5's monotonic guard double-protects it.
         inboundTaskSetState(taskId.toStdString(), "canceled", "");
+        // L3 — quietly release any HELD spend a linked inbound wallet-send parked, so a later
+        // owner /approve cannot move funds for a withdrawn task. releaseHeldSpend (NOT
+        // rejectSpend) -> no misleading owner "rejected" notification (P7). Empty sid -> no-op.
+        std::string sid = a2aCol(db_, taskId.toStdString(), "spend_request_id");
+        if (!sid.empty()) releaseHeldSpend(sid);
         return a2aRpcTask(rpcId, taskId, "canceled", QJsonValue());
     }
 
@@ -129,6 +222,12 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
         const QString taskId = req["params"].toObject()["id"].toString();
         std::string state = a2aCol(db_, taskId.toStdString(), "state");
         if (state.empty()) return a2aRpcError(rpcId, -32001, "task not found");
+        // OWNERSHIP BINDING (H2): only the original requester may read a task's result_json,
+        // so a third party can't exfiltrate the paid-for answer. Empty authenticatedNpk ==
+        // direct pure-FSM unit call -> binding skipped.
+        if (!authenticatedNpk.empty() &&
+            a2aCol(db_, taskId.toStdString(), "sender_npk") != authenticatedNpk)
+            return a2aRpcError(rpcId, -32003, "unauthorized");
         std::string result = a2aCol(db_, taskId.toStdString(), "result_json");
         QJsonDocument rd = QJsonDocument::fromJson(QByteArray::fromStdString(result));
         return a2aRpcTask(rpcId, taskId, QString::fromStdString(state),
@@ -236,10 +335,16 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
             // array, unparseable) is 'failed' (no pay). Ambiguity -> 'failed', NEVER 'completed'.
             std::string state = a2aResultIsSuccess(result) ? "completed" : "failed";
             inboundTaskSetState(taskId.toStdString(), state, result);
-            QJsonValue rv = rd.isObject() ? QJsonValue(rd.object())
-                          : (rd.isArray() ? QJsonValue(rd.array())
-                                          : QJsonValue(QString::fromStdString(result)));
-            return a2aRpcTask(rpcId, taskId, QString::fromStdString(state), rv);
+            // Re-read the PERSISTED state (L5): a re-entrant terminal (e.g. a tasks/cancel that
+            // arrived during the dispatch) may have won the monotonic UPDATE, so reply with what
+            // actually stuck and ship rv=null when our terminal lost the race.
+            std::string persisted = a2aCol(db_, taskId.toStdString(), "state");
+            QJsonValue rv = (persisted == state)
+                ? (rd.isObject() ? QJsonValue(rd.object())
+                   : (rd.isArray() ? QJsonValue(rd.array())
+                                   : QJsonValue(QString::fromStdString(result))))
+                : QJsonValue();
+            return a2aRpcTask(rpcId, taskId, QString::fromStdString(persisted), rv);
         }
 
         // AGENT-SPENDING skill: performing wallet-send spends the AGENT'S OWN funds. A
@@ -253,6 +358,7 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
         if (skill == "wallet-send") {
             int64_t amount = static_cast<int64_t>(argsObj["amount"].toDouble());
             std::string recipient = argsObj["recipient"].toString().toStdString();
+            std::string reason = argsObj["reason"].toString().toStdString();   // M4: shown to owner
             if (recipient.empty()) {
                 inboundTaskSetState(taskId.toStdString(), "failed",
                     "{\"error\":\"wallet-send missing recipient\"}");
@@ -260,7 +366,8 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
             }
 
             std::string sid = createSpendRequest(recipient, amount,
-                "A2A wallet-send task " + taskId.toStdString() + " from " + senderNpk.toStdString());
+                "A2A wallet-send task " + taskId.toStdString() + " from " +
+                a2aFlattenForPrompt(senderNpk.toStdString()));
 
             // Link the spend request to the task up front so resumeInboundTask can find
             // the task on owner approve/reject/expiry regardless of which gate we take.
@@ -297,9 +404,10 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
             sqlite3_step(hold);
             sqlite3_finalize(hold);
 
-            sendToOwner("Peer agent task needs approval:\nSkill: " + skill.toStdString() +
-                "\nFrom: " + senderNpk.toStdString() + "\nAmount: " + std::to_string(amount) +
-                " LEZ\nExpires: 60 min\n/approve " + sid + "\n/reject " + sid);
+            sendToOwner(a2aWalletSendApprovalMessage(
+                skill.toStdString(),
+                a2aSenderDisplay(!authenticatedNpk.empty(), senderFirstContact, senderNpk).toStdString(),
+                amount, recipient, reason, sid));
             QJsonObject pend; pend["reason"] = QString("awaiting owner approval");
             return a2aRpcTask(rpcId, taskId, "input-required", pend);
         }
@@ -326,8 +434,8 @@ std::string PilotImpl::processInboundRequest(const std::string& requestJson) {
             sqlite3_finalize(up);
 
             sendToOwner("Peer agent requests a privileged skill (owner approval required):\n"
-                "Skill: " + skill.toStdString() +
-                "\nFrom: " + senderNpk.toStdString() +
+                "Skill: " + a2aFlattenForPrompt(skill.toStdString()) +
+                "\nFrom: " + a2aSenderDisplay(!authenticatedNpk.empty(), senderFirstContact, senderNpk).toStdString() +
                 "\nThis skill touches local files, this agent's messaging identity, or on-chain "
                 "state, so it will NOT run autonomously for a stranger.\nTask id: " +
                 taskId.toStdString());
@@ -465,11 +573,20 @@ void PilotImpl::handleInboundA2A(const std::string& encryptedPayload) {
         request.assign(plain.begin(), plain.end());
     } catch (...) { return; }
 
-    std::string reply = processInboundRequest(request);
-
     QJsonDocument reqDoc = QJsonDocument::fromJson(QByteArray::fromStdString(request));
     if (!reqDoc.isObject()) return;
-    QJsonObject logosExt = reqDoc.object()["_logos"].toObject();
+    QJsonObject reqObj = reqDoc.object();
+
+    // AUTHENTICATE every network request before dispatch (H2). Drop unsigned / forged-signature /
+    // pin-mismatch requests (ambiguity -> inaction). firstContact feeds the owner prompt's trust
+    // label so a stranger's very first request is never shown as a known peer (L4).
+    bool firstContact = false;
+    if (!verifyInboundRequest(reqObj, db_, &firstContact)) return;
+
+    QJsonObject logosExt = reqObj["_logos"].toObject();
+    std::string authNpk = logosExt["sender_npk"].toString().toStdString();
+    std::string reply = processInboundRequest(request, authNpk, firstContact);
+
     std::string replyTopic = logosExt["reply_topic"].toString().toStdString();
     // Encrypt the reply to the requester's ECIES key (the single A2A reply keypair),
     // NOT its wallet/messaging npk. The requester decrypts with agentEciesPriv_.

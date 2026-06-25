@@ -86,6 +86,39 @@ static std::string nowTimestamp() {
     return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
 }
 
+// Flatten a peer-controlled string before it goes into an owner prompt (L4/shared): strip CR/LF
+// so a malicious npk/skill/recipient/reason can't inject extra lines (e.g. a fake "/approve").
+std::string a2aFlattenForPrompt(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) out += (c == '\n' || c == '\r') ? ' ' : c;
+    return out;
+}
+
+// Sign an OUTBOUND A2A request envelope (H2). Same ES256K-over-canonical-bytes scheme as
+// replyToPeer / the Agent Card: publish our ECIES public key as _logos.signing_key, drop any
+// prior _logos.signature, sign the compact bytes (signing_key present, signature absent), then
+// re-attach _logos.signature. verifyInboundRequest on the doer reproduces these exact bytes. We
+// NEVER fabricate a signature: with no key (or a signing failure) the request goes out unsigned
+// and a hardened doer will (correctly) drop it.
+std::string signA2AEnvelope(QJsonObject env, const std::string& eciesPub, const std::string& eciesPriv) {
+    if (eciesPub.empty() || eciesPriv.empty())
+        return QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();   // unsigned (no key)
+    QJsonObject logos = env["_logos"].toObject();
+    logos["signing_key"] = QString::fromStdString(eciesPub);
+    logos.remove("signature");                                                   // canonical excludes the sig
+    env["_logos"] = logos;
+    std::string canonical = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    try {
+        logos["signature"] = QString::fromStdString(signMessage(bytes, eciesPriv));
+        env["_logos"] = logos;
+    } catch (const std::exception&) {
+        // Honest failure: leave the request unsigned rather than fabricate a signature.
+    }
+    return QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+}
+
 // Returns "valid" / "invalid" / "unsigned" / "unbound" for a received Agent Card.
 // This checks AUTHENTICITY, not just integrity (M3). A card is "valid" only when:
 //   1. it carries a signature, AND
@@ -546,7 +579,7 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
                "(the address is a wallet/npk blob the doer cannot decrypt with); "
                "discover its card first\"}";
 
-    std::string requestStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
+    std::string requestStr = signA2AEnvelope(request, agentEciesPub_, agentEciesPriv_);   // H2: sign outbound request
     std::vector<uint8_t> plainBytes(requestStr.begin(), requestStr.end());
     std::string encPayload;
     try {
@@ -619,7 +652,7 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
                "(the address is a wallet/npk blob the doer cannot decrypt with); "
                "discover its card first\"}";
 
-    std::string reqStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
+    std::string reqStr = signA2AEnvelope(request, agentEciesPub_, agentEciesPriv_);   // H2: sign outbound request
     std::vector<uint8_t> subPlain(reqStr.begin(), reqStr.end());
     std::string subPayload;
     try {
@@ -667,7 +700,7 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
     std::string routingKey = a2aRoutingKeyFor(agentAddress);
     if (routingKey.empty()) return false;   // unroutable (npk/wallet blob, no card) -> don't dead-drop
 
-    std::string cancelStr = QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
+    std::string cancelStr = signA2AEnvelope(request, agentEciesPub_, agentEciesPriv_);   // H2: sign outbound request
     std::vector<uint8_t> cancelPlain(cancelStr.begin(), cancelStr.end());
     std::string cancelPayload;
     try {
@@ -767,7 +800,15 @@ int64_t PilotImpl::discoveredPriceFor(const std::string& agentAddress, const std
 // unpinned-changed/ambiguous card; the caller then refuses to pay rather than pay an
 // unauthenticated payout or mis-target the messaging address (M5).
 std::string PilotImpl::discoveredPayoutFor(const std::string& agentAddress) {
-    return matchedCardLogos(db_, agentAddress)["payout"].toString().toStdString();
+    QJsonObject logos = matchedCardLogos(db_, agentAddress);
+    std::string payout = logos["payout"].toString().toStdString();
+    std::string npk    = logos["npk"].toString().toStdString();
+    // H1: pay ONLY when the card's payout account is bound to the card's payment identity.
+    // A genuine card always sets payout == _logos.npk (agentCard sets both to agentNpk_); a
+    // forged card with a divergent payout could redirect funds to an attacker account even
+    // after passing the TOFU/signature gate, so refuse it (empty -> the caller pays nobody).
+    if (npk.empty() || payout != npk) return std::string();
+    return payout;
 }
 
 // ECIES routing/encryption key for an outbound A2A message to `agentAddress` (see header).
@@ -1021,8 +1062,9 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
     // NOTIFIED and the outbound task waits in 'awaiting-approval' until approveSpend or
     // rejectSpend advances it to a terminal 'paid'/'pay-failed' (M6).
     holdForApproval(spendId,
-        "A2A payment needs approval:\nSkill: " + skill + "\nAmount: " + std::to_string(price) +
-        " LEZ\nTo (payout): " + payout + "\nExpires: 60 min\n/approve " + spendId +
+        "A2A payment needs approval:\nSkill: " + a2aFlattenForPrompt(skill) +
+        "\nAmount: " + std::to_string(price) +
+        " LEZ\nTo (payout): " + a2aFlattenForPrompt(payout) + "\nExpires: 60 min\n/approve " + spendId +
         "\n/reject " + spendId,
         "Awaiting owner approval");
     setOutbound("awaiting-approval", payout, spendId);

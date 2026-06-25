@@ -230,17 +230,18 @@ LOGOS_TEST(settle_completed_targets_payout_not_messaging_address) {
     std::string dir = outDir("payout_target");
     PilotImpl impl; impl.initialize(dir);
     seedOutbound(dir, "t1", "PEER_VK", "storage-upload", 5);
-    seedCard(dir, "PEER_VK", "PAYOUT_ACCT");
+    // H1: the payout account is bound to the card identity (payout == npk == PEER_VK).
+    ECIESKeypair kp = seedCardKp(dir, "PEER_VK", "PEER_VK", generateECIESKeypair());
 
     impl.settleOutboundReply("t1", "completed");
 
     // B2: the settle path fired (the row left 'submitted'); previously 'completed' was
     // ignored and the loop never paid.
     LOGOS_ASSERT_TRUE(outCol(dir, "t1", "state") != std::string("submitted"));
-    // M5: the resolved payout target is the card's declared payout account...
-    LOGOS_ASSERT_EQ(outCol(dir, "t1", "payout"), std::string("PAYOUT_ACCT"));
-    // ...and never the messaging address (PEER_VK) the task was addressed to.
-    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "PEER_VK"), 0);
+    // M5/H1: the resolved payout target is the card's declared, identity-bound payout account...
+    LOGOS_ASSERT_EQ(outCol(dir, "t1", "payout"), std::string("PEER_VK"));
+    // ...and never the card's signing/messaging ECIES key.
+    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, kp.publicKeyHex), 0);
     // Honest wallet-less terminal: pay-failed AFTER targeting the payout. Live + funded
     // wallet -> 'paid' (two-agent run).
     LOGOS_ASSERT_EQ(outCol(dir, "t1", "state"), std::string("pay-failed"));
@@ -315,7 +316,7 @@ LOGOS_TEST(settle_same_reply_twice_is_idempotent) {
     std::string dir = outDir("idempotent");
     PilotImpl impl; impl.initialize(dir);
     seedOutbound(dir, "t6", "PEER_VK", "storage-upload", 5);
-    seedCard(dir, "PEER_VK", "PAYOUT_ACCT");
+    seedCard(dir, "PEER_VK", "PEER_VK");   // H1: payout bound to identity (payout == npk)
 
     impl.settleOutboundReply("t6", "completed");
     std::string state1 = outCol(dir, "t6", "state");
@@ -334,7 +335,7 @@ LOGOS_TEST(settle_input_required_does_not_pay_or_block) {
     std::string dir = outDir("input_then_done");
     PilotImpl impl; impl.initialize(dir);
     seedOutbound(dir, "t7", "PEER_VK", "storage-upload", 5);
-    seedCard(dir, "PEER_VK", "PAYOUT_ACCT");
+    seedCard(dir, "PEER_VK", "PEER_VK");   // H1: payout == npk
 
     impl.settleOutboundReply("t7", "input-required");
     LOGOS_ASSERT_EQ(outCol(dir, "t7", "state"), std::string("submitted"));   // still settleable
@@ -342,7 +343,7 @@ LOGOS_TEST(settle_input_required_does_not_pay_or_block) {
 
     impl.settleOutboundReply("t7", "completed");
     LOGOS_ASSERT_TRUE(outCol(dir, "t7", "state") != std::string("submitted"));
-    LOGOS_ASSERT_EQ(outCol(dir, "t7", "payout"), std::string("PAYOUT_ACCT"));
+    LOGOS_ASSERT_EQ(outCol(dir, "t7", "payout"), std::string("PEER_VK"));
 }
 
 // FIX 2(a) TERMINAL-ONLY TRIGGER: a progress reply must NOT pay. 'accepted' and 'working'
@@ -352,7 +353,7 @@ LOGOS_TEST(settle_accepted_does_not_pay_then_completed_does) {
     std::string dir = outDir("accepted_then_done");
     PilotImpl impl; impl.initialize(dir);
     seedOutbound(dir, "t8", "PEER_VK", "storage-upload", 5);
-    seedCard(dir, "PEER_VK", "PAYOUT_ACCT");
+    seedCard(dir, "PEER_VK", "PEER_VK");   // H1: payout == npk
 
     impl.settleOutboundReply("t8", "accepted");
     LOGOS_ASSERT_EQ(outCol(dir, "t8", "state"), std::string("submitted"));   // not settled
@@ -365,7 +366,7 @@ LOGOS_TEST(settle_accepted_does_not_pay_then_completed_does) {
 
     impl.settleOutboundReply("t8", "completed");                            // terminal success -> settle
     LOGOS_ASSERT_TRUE(outCol(dir, "t8", "state") != std::string("submitted"));
-    LOGOS_ASSERT_EQ(outCol(dir, "t8", "payout"), std::string("PAYOUT_ACCT"));
+    LOGOS_ASSERT_EQ(outCol(dir, "t8", "payout"), std::string("PEER_VK"));
     LOGOS_ASSERT_EQ(spendCount(dir), 1);                                     // exactly one spend opened
 }
 
@@ -461,7 +462,7 @@ LOGOS_TEST(settle_failed_after_awaiting_approval_cancels_held_spend) {
     PilotImpl impl; impl.initialize(dir);
     impl.setSpendingLimits(10, 500, 86400);    // price 40 > per-tx 10 -> owner gate
     seedOutbound(dir, "tc", "PEER_VK", "storage-upload", 40);
-    seedCard(dir, "PEER_VK", "PAYOUT_ACCT");
+    ECIESKeypair kp = seedCardKp(dir, "PEER_VK", "PEER_VK", generateECIESKeypair());   // H1: payout == npk
 
     impl.settleOutboundReply("tc", "completed");   // parks awaiting-approval, spend HELD
     LOGOS_ASSERT_EQ(outCol(dir, "tc", "state"), std::string("awaiting-approval"));
@@ -472,8 +473,10 @@ LOGOS_TEST(settle_failed_after_awaiting_approval_cancels_held_spend) {
     impl.settleOutboundReply("tc", "failed");      // contradictory terminal retracts payment
     LOGOS_ASSERT_EQ(outCol(dir, "tc", "state"), std::string("pay-failed"));   // no orphan
     LOGOS_ASSERT_EQ(spendState(dir, sid), std::string("REJECTED"));           // held spend canceled
-    // The retracted payment never reached execution -> no COMPLETED transfer to the payout.
-    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "PEER_VK"), 0);
+    // The retracted payment never reached execution. Under H1 (payout == npk == PEER_VK) the
+    // REJECTED row targets PEER_VK, so we assert against the card's signing key — which is NEVER
+    // a payout recipient — to prove no transfer was ever opened to the doer's key.
+    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, kp.publicKeyHex), 0);
 }
 
 // FIX 1 (the BLOCKER) GENUINE REPLY SETTLES: a 'completed' reply SIGNED by the doer's pinned
@@ -487,12 +490,12 @@ LOGOS_TEST(verify_genuine_signed_reply_settles) {
     seedOutbound(dir, "ts1", "PEER_VK", "storage-upload", 5);
     // seedCardKp pins PEER_VK -> kp on first contact (verifyCardStatus inside matchedCardLogos),
     // so kp is the AUTHORITATIVE signing_key the reply is verified against.
-    ECIESKeypair kp = seedCardKp(dir, "PEER_VK", "PAYOUT_ACCT", generateECIESKeypair());
+    ECIESKeypair kp = seedCardKp(dir, "PEER_VK", "PEER_VK", generateECIESKeypair());   // H1: payout == npk
 
     impl.verifyAndSettleReply("ts1", makeSignedReply("ts1", "completed", kp, /*sign=*/true));
 
     LOGOS_ASSERT_TRUE(outCol(dir, "ts1", "state") != std::string("submitted"));   // settled
-    LOGOS_ASSERT_EQ(outCol(dir, "ts1", "payout"), std::string("PAYOUT_ACCT"));    // payout targeted
+    LOGOS_ASSERT_EQ(outCol(dir, "ts1", "payout"), std::string("PEER_VK"));        // payout targeted (== npk)
     LOGOS_ASSERT_EQ(spendCount(dir), 1);                                          // exactly one spend
 }
 
@@ -535,4 +538,25 @@ LOGOS_TEST(verify_wrong_key_signed_reply_does_not_settle) {
     LOGOS_ASSERT_EQ(outCol(dir, "ts3", "payout"), std::string(""));
     LOGOS_ASSERT_EQ(spendCount(dir), 0);
     LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "PAYOUT_ACCT"), 0);
+}
+
+// H1 DIVERGENT-PAYOUT CARD REFUSES TO PAY: a card that is internally 'valid' AND pinned, but
+// whose _logos.payout != _logos.npk, could redirect funds to a third account. discoveredPayoutFor
+// now refuses such a card (returns ""), so a 'completed' reply settles to 'pay-failed' and opens
+// NO spend — never the divergent payout. This is the dedicated negative test that pins the
+// "a card cannot redirect payout" property in this wave.
+LOGOS_TEST(settle_divergent_payout_card_refuses_to_pay) {
+    std::string dir = outDir("divergent_payout");
+    PilotImpl impl; impl.initialize(dir);
+    seedOutbound(dir, "td", "PEER_VK", "storage-upload", 5);
+    // Valid, first-contact-pinned card — but payout (ATTACKER_PAYOUT) is NOT bound to the card
+    // identity (npk PEER_VK). H1 refuses to redirect funds to that unbound third account.
+    seedCardKp(dir, "PEER_VK", "ATTACKER_PAYOUT", generateECIESKeypair());
+
+    impl.settleOutboundReply("td", "completed");
+
+    LOGOS_ASSERT_EQ(outCol(dir, "td", "state"), std::string("pay-failed"));
+    LOGOS_ASSERT_EQ(outCol(dir, "td", "payout"), std::string(""));
+    LOGOS_ASSERT_EQ(spendCount(dir), 0);
+    LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "ATTACKER_PAYOUT"), 0);
 }

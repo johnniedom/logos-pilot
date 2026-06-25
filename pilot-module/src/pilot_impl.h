@@ -59,6 +59,11 @@ public:
     std::string createSpendRequest(const std::string& recipient, int64_t amount, const std::string& reason);
     bool approveSpend(const std::string& requestId);
     bool rejectSpend(const std::string& requestId);
+    // Quietly move a HELD/NOTIFIED spend to REJECTED WITHOUT notifying the owner or resuming a
+    // linked task (L3/P7): used when a peer withdraws its task (tasks/cancel) so a later owner
+    // /approve can no longer move funds for a canceled task. Unlike rejectSpend this emits no
+    // "Transaction ... rejected." owner message (which would be misleading peer-driven spam).
+    bool releaseHeldSpend(const std::string& requestId);
     int expireStaleSpends();   // auto-cancel pending requests past their deadline; returns count
     std::string getPendingSpends();
     bool setSpendingLimits(int64_t perTransaction, int64_t perPeriod, int64_t periodSeconds);
@@ -98,7 +103,14 @@ public:
 
     // Inbound A2A task server: handle a decrypted JSON-RPC request from a peer agent,
     // returning the JSON-RPC reply. Public so tests drive the state machine directly.
-    std::string processInboundRequest(const std::string& requestJson);
+    // authenticatedNpk is the transport-authenticated sender (from verifyInboundRequest, H2);
+    // empty for direct FSM unit calls, in which case ownership binding is skipped and the owner
+    // prompt renders the sender UNVERIFIED. tasks/cancel and tasks/sendSubscribe require it to
+    // equal the task's stored sender_npk. senderFirstContact is true only on the first
+    // authenticated contact for this npk (feeds the owner prompt's trust label, L4).
+    std::string processInboundRequest(const std::string& requestJson,
+                                      const std::string& authenticatedNpk = "",
+                                      bool senderFirstContact = false);
 
     // Inbound A2A transport entry: decrypt a raw ECIES payload from our inbox topic with
     // agentEciesPriv_ — the SAME ECIES key our Agent Card advertises as BOTH the inbox id

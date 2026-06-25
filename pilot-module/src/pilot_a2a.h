@@ -9,6 +9,7 @@
 #include <QString>
 #include <QJsonObject>
 #include <string>
+#include <cstdint>
 
 struct sqlite3;
 
@@ -21,6 +22,20 @@ struct sqlite3;
 // array, is success. Ambiguity -> failed, NEVER completed. Single-source so the inbound
 // dispatcher and the unit tests share ONE definition. External linkage (defined in pilot_a2a.cpp).
 bool a2aResultIsSuccess(const std::string& result);
+
+// Owner-prompt sanitizer (L4/shared): flatten any peer-controlled string before it is
+// interpolated into an owner notification, so a malicious npk/skill/recipient/reason cannot
+// inject extra lines (e.g. a fake "/approve <sid>") into the human approval prompt. Replaces
+// CR/LF with a space. Defined in pilot_a2a.cpp; used by every owner-prompt builder in both TUs.
+std::string a2aFlattenForPrompt(const std::string& s);
+
+// Inbound wallet-send owner-approval prompt builder (M4). Includes the payee `recipient`
+// (the single most security-relevant field, previously omitted) and an optional `reason`,
+// matching walletSend's own owner message. Flattens skill/recipient/reason internally;
+// `senderDisplay` is supplied already-sanitized by a2aSenderDisplay. Defined in pilot_a2a_inbox.cpp.
+std::string a2aWalletSendApprovalMessage(const std::string& skill, const std::string& senderDisplay,
+                                         int64_t amount, const std::string& recipient,
+                                         const std::string& reason, const std::string& spendId);
 
 // Agent Card authenticity verdict (M3). Checks that the embedded ECDSA signature verifies AND
 // was produced by the card's OWN published identity key (_logos.signing_key), so a card
@@ -36,5 +51,27 @@ QString verifyCardStatus(const QJsonObject& card);
 // DIFFERENT signing_key is rejected as 'invalid', defeating a from-scratch forgery that reuses a
 // victim's npk with the attacker's own signing_key + payout. Payout-bearing callers use THIS one.
 QString verifyCardStatus(const QJsonObject& card, sqlite3* db);
+
+// Sign an OUTBOUND A2A request envelope (H2). Sets _logos.signing_key to our ECIES public
+// key, removes any prior _logos.signature, computes the ECDSA-secp256k1 signature over the
+// canonical (compact) bytes, and re-attaches _logos.signature — the SAME byte pattern the
+// reply path (replyToPeer) and verifyInboundRequest use, so a doer can authenticate us.
+// Returns the signed envelope as compact JSON. Defined in pilot_a2a.cpp.
+std::string signA2AEnvelope(QJsonObject env, const std::string& eciesPub, const std::string& eciesPriv);
+
+// Authenticate an INBOUND A2A request (H2). Requires a valid ECDSA-secp256k1 signature in
+// _logos.signature over the canonical request bytes (envelope minus _logos.signature) produced
+// by _logos.signing_key, then TOFU-pins (_logos.sender_npk -> signing_key) in a DEDICATED
+// `pinned_request_identities` table — never the card pin (pinned_identities) — so a request can
+// never poison the card/payout pin. Returns true only for a signed, pin-consistent request;
+// db==nullptr => signature-only (bare test harness) and *firstContact=true. *firstContact is set
+// true only on the first authenticated contact for this npk. Defined in pilot_a2a_inbox.cpp.
+bool verifyInboundRequest(const QJsonObject& req, sqlite3* db, bool* firstContact = nullptr);
+
+// Render an injection-safe, trust-tagged sender label for an owner prompt (L4). Pure function
+// of the H2 verdict — NO DB access. "UNVERIFIED <npk>" when unauthenticated, "authenticated,
+// first contact <npk>" on first authenticated contact, "authenticated known peer <npk>"
+// otherwise. Flattens npk via a2aFlattenForPrompt. Defined in pilot_a2a_inbox.cpp.
+QString a2aSenderDisplay(bool authenticated, bool firstContact, const QString& senderNpk);
 
 #endif  // PILOT_A2A_H
