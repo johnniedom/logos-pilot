@@ -2,6 +2,7 @@
 #include "../src/pilot_crypto.h"
 #include <string>
 #include <cstring>
+#include <stdexcept>
 
 LOGOS_TEST(aes_generate_key_correct_sizes) {
     AESKey k = generateFileKey();
@@ -153,4 +154,69 @@ LOGOS_TEST(ecies_serialize_deserialize_roundtrip) {
     LOGOS_ASSERT_TRUE(restored.ciphertext == ct.ciphertext);
     LOGOS_ASSERT_TRUE(restored.iv == ct.iv);
     LOGOS_ASSERT_TRUE(restored.tag == ct.tag);
+}
+
+// --- M2: passphrase-wrapped secret-at-rest (wrapSecret/unwrapSecret/isWrappedSecret) ---
+
+// A wrapped blob is in the enc:v1 format, differs from the plaintext, and round-trips
+// back to the original secret with the right passphrase.
+LOGOS_TEST(wrap_secret_roundtrip_and_format) {
+    std::string secret = generateECIESKeypair().privateKeyHex;
+    std::string blob = wrapSecret(secret, "correct horse battery staple");
+
+    LOGOS_ASSERT_TRUE(isWrappedSecret(blob));
+    LOGOS_ASSERT_EQ(blob.rfind("enc:v1:", 0), size_t(0));
+    LOGOS_ASSERT_TRUE(blob != secret);
+    LOGOS_ASSERT_EQ(unwrapSecret(blob, "correct horse battery staple"), secret);
+}
+
+// Two wraps of the SAME secret differ (fresh random salt + IV each call), yet both
+// unwrap back to the identical plaintext.
+LOGOS_TEST(wrap_secret_unique_per_call) {
+    std::string secret = "00112233445566778899aabbccddeeff";
+    std::string b1 = wrapSecret(secret, "pw");
+    std::string b2 = wrapSecret(secret, "pw");
+
+    LOGOS_ASSERT_TRUE(b1 != b2);
+    LOGOS_ASSERT_EQ(unwrapSecret(b1, "pw"), secret);
+    LOGOS_ASSERT_EQ(unwrapSecret(b2, "pw"), secret);
+}
+
+// The wrong passphrase yields a different derived key -> GCM tag mismatch -> throw.
+LOGOS_TEST(unwrap_wrong_passphrase_throws) {
+    std::string blob = wrapSecret("0011223344556677", "rightpass");
+    bool threw = false;
+    try { unwrapSecret(blob, "wrongpass"); }
+    catch (const std::runtime_error&) { threw = true; }
+    LOGOS_ASSERT_TRUE(threw);
+}
+
+// A single flipped ciphertext nibble breaks the GCM tag -> throw (tamper detection).
+LOGOS_TEST(unwrap_tampered_blob_throws) {
+    std::string blob = wrapSecret("0011223344556677", "pw");
+    std::string tampered = blob;
+    char& last = tampered[tampered.size() - 1];   // last hex char of the ciphertext field
+    last = (last == '0') ? '1' : '0';
+
+    bool threw = false;
+    try { unwrapSecret(tampered, "pw"); }
+    catch (const std::runtime_error&) { threw = true; }
+    LOGOS_ASSERT_TRUE(threw);
+}
+
+// isWrappedSecret is true only for the enc:v1 prefix: raw hex private keys, the empty
+// string, and a wrong version are all rejected.
+LOGOS_TEST(is_wrapped_secret_rejects_legacy_plaintext) {
+    LOGOS_ASSERT_FALSE(isWrappedSecret(generateECIESKeypair().privateKeyHex));
+    LOGOS_ASSERT_FALSE(isWrappedSecret(""));
+    LOGOS_ASSERT_FALSE(isWrappedSecret("enc:v0:deadbeef"));
+}
+
+// A blob with the right prefix but too few fields is malformed -> throw (never silently
+// returns a bogus key).
+LOGOS_TEST(unwrap_malformed_blob_throws) {
+    bool threw = false;
+    try { unwrapSecret("enc:v1:onlyonefield", "pw"); }
+    catch (const std::runtime_error&) { threw = true; }
+    LOGOS_ASSERT_TRUE(threw);
 }

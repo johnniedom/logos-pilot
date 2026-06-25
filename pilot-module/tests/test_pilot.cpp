@@ -1,7 +1,11 @@
 #include <logos_test.h>
 #include "../src/pilot_impl.h"
+#include "../src/pilot_crypto.h"
+#include <sqlite3.h>
 #include <string>
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
 
 LOGOS_TEST(echo_returns_input) {
     PilotImpl impl;
@@ -122,4 +126,80 @@ LOGOS_TEST(messaging_join_fails_without_api) {
 LOGOS_TEST(agent_cancel_fails_without_api) {
     PilotImpl impl;
     LOGOS_ASSERT_FALSE(impl.agentCancel("addr", "task123"));
+}
+
+// --- M2: identity key-at-rest migration (legacy plaintext -> wrapped on load) ---
+
+static std::string pilotMigDir(const std::string& name) {
+    std::string base = "/tmp";
+    if (const char* t = std::getenv("TMPDIR")) base = t;
+    std::string dir = base + "/pilot_idmig_" + name;
+    std::remove((dir + "/pilot.db").c_str());
+    std::remove((dir + "/pilot.db-wal").c_str());
+    std::remove((dir + "/pilot.db-shm").c_str());
+    return dir;
+}
+
+static void pilotMigExec(const std::string& dir, const std::string& sql) {
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+}
+
+static std::string pilotMigConfig(const std::string& dir, const std::string& key) {
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key=?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    std::string v;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        v = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return v;
+}
+
+// A pre-M2 DB stores ecies.priv as raw hex. When the operator now sets
+// PILOT_KEY_PASSPHRASE, loadIdentity must re-wrap the stored value in place (it is no
+// longer plaintext on disk and is fully recoverable) WITHOUT regenerating the identity.
+// PILOT_KEY_PASSPHRASE is cleared BEFORE any assert so a later test in this single-process
+// runner never re-wraps its own seeded plaintext keys.
+LOGOS_TEST(identity_at_rest_migrates_plaintext_to_wrapped) {
+    std::string dir = pilotMigDir("plain2wrapped");
+
+    // 1. Build the schema (initialize returns false with no wallet, but db_ is opened).
+    { PilotImpl seed; seed.initialize(dir); }
+
+    // 2. Seed a legacy plaintext identity: an agent_identity row (so loadIdentity runs the
+    //    config loop) + a raw-hex ecies.priv (the pre-M2 on-disk form) + ecies.pub.
+    ECIESKeypair kp = generateECIESKeypair();
+    pilotMigExec(dir,
+        "INSERT OR REPLACE INTO agent_identity (id, npk, account_id, created_at) "
+        "VALUES (1, 'npk-mig', 'acct-mig', '0');");
+    pilotMigExec(dir,
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('ecies.pub', '" +
+        kp.publicKeyHex + "');");
+    pilotMigExec(dir,
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('ecies.priv', '" +
+        kp.privateKeyHex + "');");
+
+    // 3. Load with a passphrase set -> loadIdentity migrates the stored key in place.
+    setenv("PILOT_KEY_PASSPHRASE", "operator-secret", 1);
+    { PilotImpl impl; impl.initialize(dir); }
+
+    // Capture the on-disk result, then CLEAR the env BEFORE any assert.
+    std::string stored = pilotMigConfig(dir, "ecies.priv");
+    std::string storedPub = pilotMigConfig(dir, "ecies.pub");
+    unsetenv("PILOT_KEY_PASSPHRASE");
+
+    bool wrapped = isWrappedSecret(stored);
+    bool differs = (stored != kp.privateKeyHex);
+    std::string recovered = wrapped ? unwrapSecret(stored, "operator-secret") : std::string();
+
+    LOGOS_ASSERT_TRUE(wrapped);                    // ecies.priv is no longer plaintext on disk
+    LOGOS_ASSERT_TRUE(differs);
+    LOGOS_ASSERT_EQ(recovered, kp.privateKeyHex);  // the identity key is fully recoverable
+    LOGOS_ASSERT_EQ(storedPub, kp.publicKeyHex);   // identity never regenerated (pub untouched)
 }

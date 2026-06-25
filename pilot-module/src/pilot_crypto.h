@@ -43,3 +43,14 @@ std::string signMessage(const std::vector<uint8_t>& message,
 bool verifySignature(const std::vector<uint8_t>& message,
                      const std::string& signatureHex,
                      const std::string& publicKeyHex);
+
+// M2 — at-rest secret sealing. Wrap a hex secret (e.g. the agent's ecies.priv) with a
+// passphrase-derived AES-256-GCM key so pilot.db never holds the raw key when
+// PILOT_KEY_PASSPHRASE is set. Format: "enc:v1:<saltHex>:<ivHex>:<tagHex>:<ctHex>".
+// wrapSecret derives a 32-byte key via PBKDF2-HMAC-SHA256 (>=200000 iters) over the
+// passphrase + a random 16-byte salt; the AES IV/tag come from the existing AES-GCM
+// primitive. unwrapSecret THROWS std::runtime_error on a wrong passphrase, a GCM tag
+// mismatch, or a malformed blob. isWrappedSecret tests only the "enc:v1:" prefix.
+std::string wrapSecret(const std::string& plaintext, const std::string& passphrase);
+std::string unwrapSecret(const std::string& blob, const std::string& passphrase);
+bool isWrappedSecret(const std::string& s);

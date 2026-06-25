@@ -180,6 +180,7 @@ bool PilotImpl::loadIdentity() {
         }
         if (stmt) sqlite3_finalize(stmt);
 
+        std::string eciesPrivStored;   // M2: captured raw; resolved after the cursor closes
         rc = sqlite3_prepare_v2(db_,
             "SELECT key, value FROM config;",
             -1, &stmt, nullptr);
@@ -193,7 +194,7 @@ bool PilotImpl::loadIdentity() {
                 else if (key == "owner.npk") ownerNpk_ = val;
                 else if (key == "owner.name") ownerName_ = val;
                 else if (key == "ecies.pub") agentEciesPub_ = val;
-                else if (key == "ecies.priv") agentEciesPriv_ = val;
+                else if (key == "ecies.priv") eciesPrivStored = val;   // raw; resolved below
                 else if (key == "llm.provider") llmProvider_ = val;
                 else if (key == "llm.model") llmModel_ = val;
                 else if (key == "llm.api_key") {
@@ -213,6 +214,33 @@ bool PilotImpl::loadIdentity() {
             }
         }
         if (stmt) sqlite3_finalize(stmt);
+
+        // M2: resolve the at-rest ECIES private key AFTER the cursor closes (never
+        // decrypt/rewrite mid-cursor). A wrapped key decrypts with PILOT_KEY_PASSPHRASE;
+        // a legacy plaintext key is taken verbatim and re-wrapped in place when a
+        // passphrase is now set (transparent migration — the identity is never
+        // regenerated). A wrapped key with a missing/wrong passphrase leaves
+        // agentEciesPriv_ empty + warns (A2A/owner ECDH degrades this run; the separate
+        // wallet keys are unaffected, so the agent is never bricked).
+        const char* keyPass = std::getenv("PILOT_KEY_PASSPHRASE");
+        if (!eciesPrivStored.empty()) {
+            if (isWrappedSecret(eciesPrivStored)) {
+                if (keyPass && *keyPass) {
+                    try { agentEciesPriv_ = unwrapSecret(eciesPrivStored, keyPass); }
+                    catch (...) {
+                        qWarning() << "[pilot] loadIdentity: ecies.priv decrypt FAILED "
+                                      "(wrong PILOT_KEY_PASSPHRASE?); A2A/owner crypto unavailable this run";
+                    }
+                } else {
+                    qWarning() << "[pilot] loadIdentity: ecies.priv is encrypted but "
+                                  "PILOT_KEY_PASSPHRASE is unset; A2A/owner crypto unavailable this run";
+                }
+            } else {
+                agentEciesPriv_ = eciesPrivStored;                  // legacy plaintext
+                if (keyPass && *keyPass)
+                    persistSecretConfig("ecies.priv", agentEciesPriv_);   // migrate -> wrapped in place
+            }
+        }
 
         if (!llmProvider_.empty() || !llmModel_.empty())
             initLLM();
@@ -338,6 +366,35 @@ bool PilotImpl::initWallet() {
     return false;
 }
 
+// M2: at-rest writer for a secret config value. When PILOT_KEY_PASSPHRASE is set we seal
+// the value with wrapSecret (PBKDF2 + AES-256-GCM) so pilot.db never holds the raw key;
+// otherwise we keep today's plaintext behavior and warn that pilot.db is key material.
+// configKey is ALWAYS a fixed string literal (never peer-controlled), so inlining it in
+// the SQL is safe; the VALUE is always bound.
+bool PilotImpl::persistSecretConfig(const std::string& configKey, const std::string& clearHex) {
+    if (!db_) return false;
+    std::string stored = clearHex;
+    const char* pass = std::getenv("PILOT_KEY_PASSPHRASE");
+    if (pass && *pass) {
+        try { stored = wrapSecret(clearHex, pass); }
+        catch (...) {
+            qWarning() << "[pilot] persistSecretConfig: wrap failed; storing plaintext"
+                       << QString::fromStdString(configKey);
+        }
+    } else {
+        qWarning() << "[pilot]" << QString::fromStdString(configKey)
+                   << "stored UNENCRYPTED at rest (set PILOT_KEY_PASSPHRASE to encrypt);"
+                   << "pilot.db is key material.";
+    }
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql = "INSERT OR REPLACE INTO config (key, value) VALUES ('" + configKey + "', ?);";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, stored.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
 bool PilotImpl::createIdentity() {
     if (!logosAPI_) return false;
 
@@ -393,12 +450,9 @@ bool PilotImpl::createIdentity() {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    sqlite3_prepare_v2(db_,
-        "INSERT OR REPLACE INTO config (key, value) VALUES ('ecies.priv', ?);",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, agentEciesPriv_.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    // M2: ecies.priv is wrapped at rest when PILOT_KEY_PASSPHRASE is set (plaintext
+    // otherwise — today's default). ecies.pub above stays plaintext.
+    persistSecretConfig("ecies.priv", agentEciesPriv_);
 
     return true;
 }

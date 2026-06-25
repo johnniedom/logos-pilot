@@ -180,6 +180,10 @@ private:
     bool initWallet();
     bool loadIdentity();
     bool createIdentity();
+    // M2: write a secret hex value (the agent's ecies.priv) into config, AES-256-GCM
+    // wrapped at rest when PILOT_KEY_PASSPHRASE is set; otherwise stored plaintext with a
+    // warning. configKey is only ever a fixed literal (never peer input).
+    bool persistSecretConfig(const std::string& configKey, const std::string& clearHex);
     bool fundAgentIfNeeded();
     void resetStaleIdentity();   // clear pilot.db identity + funded flag on wallet divergence
     void backupWallet();         // save wallet + keep a recovery copy of its storage file

@@ -383,3 +383,75 @@ ECIESCiphertext eciesDeserialize(const std::string& data) {
     ct.tag = hexToBytes(data.substr(p3 + 1));
     return ct;
 }
+
+// ===== M2: passphrase-wrapped secret-at-rest (PBKDF2-HMAC-SHA256 + AES-256-GCM) =====
+//
+// Sealed form: "enc:v1:<saltHex>:<ivHex>:<tagHex>:<ctHex>". The 32-byte AES key is
+// derived from the passphrase + a fresh random 16-byte salt; the IV (12B) and GCM tag
+// (16B) come straight from the existing AESKey/aesEncrypt primitive — aesEncrypt uses
+// the caller-supplied AESKey.iv and WRITES the authentication tag back into AESKey.tag
+// (it does NOT generate the IV itself), exactly as generateFileKey()/eciesEncrypt rely
+// on. aesDecrypt reads AESKey.{key,iv,tag} and throws std::runtime_error on a tag
+// mismatch — so a wrong passphrase (different derived key) surfaces as that same throw.
+
+static const int kPbkdf2Iters = 200000;
+
+static std::vector<uint8_t> deriveWrapKey(const std::string& passphrase,
+                                          const std::vector<uint8_t>& salt) {
+    std::vector<uint8_t> key(32);
+    if (PKCS5_PBKDF2_HMAC(passphrase.data(), static_cast<int>(passphrase.size()),
+                          salt.data(), static_cast<int>(salt.size()),
+                          kPbkdf2Iters, EVP_sha256(),
+                          static_cast<int>(key.size()), key.data()) != 1)
+        throw std::runtime_error("PBKDF2 key derivation failed");
+    return key;
+}
+
+bool isWrappedSecret(const std::string& s) {
+    return s.rfind("enc:v1:", 0) == 0;
+}
+
+std::string wrapSecret(const std::string& plaintext, const std::string& passphrase) {
+    std::vector<uint8_t> salt(16);
+    if (RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1)
+        throw std::runtime_error("RAND_bytes (salt) failed");
+
+    AESKey key;
+    key.key = deriveWrapKey(passphrase, salt);   // 32 bytes
+    key.iv.resize(12);
+    if (RAND_bytes(key.iv.data(), 12) != 1)
+        throw std::runtime_error("RAND_bytes (iv) failed");
+
+    std::vector<uint8_t> pt(plaintext.begin(), plaintext.end());
+    std::vector<uint8_t> ct = aesEncrypt(pt, key);   // fills key.tag (16 bytes)
+
+    return "enc:v1:" + bytesToHex(salt) + ":" + bytesToHex(key.iv) + ":" +
+           bytesToHex(key.tag) + ":" + bytesToHex(ct);
+}
+
+std::string unwrapSecret(const std::string& blob, const std::string& passphrase) {
+    if (!isWrappedSecret(blob))
+        throw std::runtime_error("unwrapSecret: not an enc:v1 blob");
+
+    std::string body = blob.substr(7);   // strip "enc:v1:"
+    size_t p1 = body.find(':');
+    size_t p2 = (p1 == std::string::npos) ? std::string::npos : body.find(':', p1 + 1);
+    size_t p3 = (p2 == std::string::npos) ? std::string::npos : body.find(':', p2 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos)
+        throw std::runtime_error("unwrapSecret: malformed blob");
+
+    std::vector<uint8_t> salt = hexToBytes(body.substr(0, p1));
+    std::vector<uint8_t> iv   = hexToBytes(body.substr(p1 + 1, p2 - p1 - 1));
+    std::vector<uint8_t> tag  = hexToBytes(body.substr(p2 + 1, p3 - p2 - 1));
+    std::vector<uint8_t> ct   = hexToBytes(body.substr(p3 + 1));
+    if (salt.empty() || iv.size() != 12 || tag.size() != 16)
+        throw std::runtime_error("unwrapSecret: malformed blob fields");
+
+    AESKey key;
+    key.key = deriveWrapKey(passphrase, salt);   // wrong passphrase -> wrong key -> tag fails
+    key.iv = iv;
+    key.tag = tag;
+
+    std::vector<uint8_t> pt = aesDecrypt(ct, key);   // throws on GCM tag mismatch
+    return std::string(pt.begin(), pt.end());
+}

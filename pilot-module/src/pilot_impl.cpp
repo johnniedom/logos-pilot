@@ -37,7 +37,9 @@ std::string PilotImpl::echo(const std::string& input) {
 
 void PilotImpl::initDatabase(const std::string& dataDir) {
     dataDir_ = dataDir;
-    mkdir(dataDir.c_str(), 0755);
+    // M2: keep the data dir owner-only; enforce even if it pre-exists / regardless of umask.
+    mkdir(dataDir.c_str(), 0700);
+    chmod(dataDir.c_str(), 0700);
     std::string dbPath = dataDir + "/pilot.db";
     int rc = sqlite3_open(dbPath.c_str(), &db_);
     if (rc != SQLITE_OK)
@@ -45,6 +47,12 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
 
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA synchronous=FULL;", nullptr, nullptr, nullptr);
+
+    // M2: pilot.db holds key material (the wrapped/plaintext ecies.priv) — restrict it to
+    // the owner. The -wal/-shm sidecars may not exist yet; chmod is best-effort (ignored).
+    chmod(dbPath.c_str(), 0600);
+    chmod((dbPath + "-wal").c_str(), 0600);
+    chmod((dbPath + "-shm").c_str(), 0600);
 
     const char* schema = R"SQL(
         CREATE TABLE IF NOT EXISTS agent_identity (
