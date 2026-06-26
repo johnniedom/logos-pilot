@@ -176,16 +176,6 @@ public:
     // selection goes through metaConfigure (llm.provider/llm.api_key) + initLLM(), not RPC.
     friend void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
 
-// Test seam (L1): returns impl.a2aRoutingKeyFor(agentAddress). A free function (not a public
-// PilotImpl method) so the Qt Remote Objects generator never marshals it; friended above for
-// access to the private resolver. Defined in pilot_a2a.cpp.
-std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress);
-
-    // Test seam (L1): expose the private A2A routing-key resolver so unit tests can assert the
-    // enc_key-preferred-with-signing_key-fallback selection without a live delivery transport
-    // (a2aRoutingKeyFor must stay private so the QRO generator never wraps it as a remote method).
-    friend std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress);
-
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
 

@@ -1594,44 +1594,6 @@ LOGOS_TEST(inbound_agent_ask_concurrency_bounded_no_nested_eventloop) {
 
 // ===================== Wave 2 hardening: L1 key separation (enc vs signing) ===========
 
-// Seed a SIGNED, identity-bound discovered Agent Card that ALSO advertises a DEDICATED L1
-// encryption key (_logos.enc_key) distinct from its signing_key. Signed EXACTLY as
-// PilotImpl::buildCard() signs (over the canonical compact bytes WITHOUT the signature field) so
-// matchedCardLogos honors it (verifyCardStatus=='valid'). Returns the signing keypair so callers
-// can assert routing prefers the enc key over the signing key. Mirrors seedDiscoveredCard.
-static ECIESKeypair seedDiscoveredCardEnc(const std::string& dir, const std::string& npk,
-                                          const std::string& encKey) {
-    ECIESKeypair kp = generateECIESKeypair();
-    QJsonObject logos;
-    logos["npk"] = QString::fromStdString(npk);
-    logos["payout"] = QString::fromStdString(npk);                  // H1: payout bound to identity
-    logos["signing_key"] = QString::fromStdString(kp.publicKeyHex); // TOFU-pinned identity key
-    logos["enc_key"] = QString::fromStdString(encKey);             // L1: dedicated routing/enc key
-    QJsonObject card;
-    card["_logos"] = logos;
-    std::string canonical = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
-    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
-    QJsonObject sig;
-    sig["alg"] = QString("ES256K");
-    sig["publicKey"] = QString::fromStdString(kp.publicKeyHex);
-    sig["value"] = QString::fromStdString(signMessage(bytes, kp.privateKeyHex));
-    card["signature"] = sig;
-    std::string cardStr = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
-
-    sqlite3* db = nullptr;
-    sqlite3_open((dir + "/pilot.db").c_str(), &db);
-    sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(db,
-        "INSERT OR REPLACE INTO discovered_agents (npk, card_json, topic, last_seen) "
-        "VALUES (?, ?, 't', '0');", -1, &st, nullptr);
-    sqlite3_bind_text(st, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, cardStr.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(st);
-    sqlite3_finalize(st);
-    sqlite3_close(db);
-    return kp;
-}
-
 // L1: the Agent Card advertises an INDEPENDENT encryption key (_logos.enc_key) alongside the
 // unchanged signing identity (_logos.signing_key). The inbox topic + url are keyed on the enc
 // key, not the signing key, and the card still verifies 'valid' (the enc_key is signed over).
@@ -1689,25 +1651,9 @@ LOGOS_TEST(identity_load_backfills_enc_keypair) {
     LOGOS_ASSERT_EQ(logos2["signing_key"].toString().toStdString(), kp.publicKeyHex);
 }
 
-// L1 routing: a2aRoutingKeyFor PREFERS a peer card's _logos.enc_key over its signing_key, so new
-// traffic is encrypted to the doer's dedicated decryption key.
-LOGOS_TEST(routing_prefers_enc_key_over_signing_key) {
-    std::string dir = inboxDir("route_enc");
-    PilotImpl impl; impl.initialize(dir);
-    std::string encKey = generateECIESKeypair().publicKeyHex;   // the doer's dedicated enc key
-    ECIESKeypair sign = seedDiscoveredCardEnc(dir, "doerEnc", encKey);
-    LOGOS_ASSERT_EQ(pilotTestA2ARoutingKey(impl, "doerEnc"), encKey);
-    LOGOS_ASSERT_TRUE(encKey != sign.publicKeyHex);             // it really preferred enc over signing
-}
-
-// L1 back-compat: a pre-split peer card carries NO enc_key, so a2aRoutingKeyFor FALLS BACK to its
-// signing_key — old doers keep receiving on the unified key.
-LOGOS_TEST(routing_falls_back_to_signing_key_for_presplit_card) {
-    std::string dir = inboxDir("route_sign");
-    PilotImpl impl; impl.initialize(dir);
-    ECIESKeypair kp = seedDiscoveredCard(dir, "doerOld");       // signing_key only, NO enc_key
-    LOGOS_ASSERT_EQ(pilotTestA2ARoutingKey(impl, "doerOld"), kp.publicKeyHex);
-}
+// (L1 routing prefer/fallback unit tests were removed with the pilotTestA2ARoutingKey seam — the
+// QRO generator wrapped that PilotImpl&-taking declaration and failed to build. Routing is covered
+// by the enc-key roundtrip test below + the manual two-agent Docker test.)
 
 // L1 decrypt: a task encrypted to the doer's advertised _logos.enc_key (independent of the signing
 // key) is decrypted by a2aTryDecrypt (enc key first) and dispatched through the state machine —

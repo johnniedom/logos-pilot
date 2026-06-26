@@ -908,11 +908,6 @@ std::string PilotImpl::a2aRoutingKeyFor(const std::string& agentAddress) {
     return agentAddress;                          // bare ECIES key -> route verbatim
 }
 
-// Test seam (L1): expose the private routing-key resolver. See pilot_impl.h.
-std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress) {
-    return impl.a2aRoutingKeyFor(agentAddress);
-}
-
 // L1 dual-key decrypt: try the dedicated ENCRYPTION key (agentEncPriv_) first — the key our card
 // now advertises as _logos.enc_key and that peers encrypt to — then fall back to the legacy
 // SIGNING key (agentEciesPriv_) for a pre-split peer that still encrypts to _logos.signing_key.
