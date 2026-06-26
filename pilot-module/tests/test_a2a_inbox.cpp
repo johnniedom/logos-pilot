@@ -167,6 +167,22 @@ static void execSql(const std::string& dir, const std::string& sql) {
     sqlite3_close(db);
 }
 
+// Read a single config value by key (L1: enc.pub / enc.priv at-rest assertions). Opens its own
+// connection like the other readers; empty string when the key is absent.
+static std::string configVal(const std::string& dir, const std::string& key) {
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key=?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    std::string v;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        v = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return v;
+}
+
 // Force a spend_request into a specific state (drives executeSpend's idempotency guard).
 static void forceSpendState(const std::string& dir, const std::string& id, const std::string& state) {
     execSql(dir, "UPDATE spend_requests SET state='" + state + "' WHERE id='" + id + "';");
@@ -1574,4 +1590,211 @@ LOGOS_TEST(inbound_agent_ask_concurrency_bounded_no_nested_eventloop) {
     // bound BEFORE nesting a second event loop: it failed with a 'busy' error.
     LOGOS_ASSERT_EQ(taskCol(dir, "t-ask-nested", "state"), std::string("failed"));
     LOGOS_ASSERT_CONTAINS(taskCol(dir, "t-ask-nested", "result_json"), "busy");
+}
+
+// ===================== Wave 2 hardening: L1 key separation (enc vs signing) ===========
+
+// Seed a SIGNED, identity-bound discovered Agent Card that ALSO advertises a DEDICATED L1
+// encryption key (_logos.enc_key) distinct from its signing_key. Signed EXACTLY as
+// PilotImpl::buildCard() signs (over the canonical compact bytes WITHOUT the signature field) so
+// matchedCardLogos honors it (verifyCardStatus=='valid'). Returns the signing keypair so callers
+// can assert routing prefers the enc key over the signing key. Mirrors seedDiscoveredCard.
+static ECIESKeypair seedDiscoveredCardEnc(const std::string& dir, const std::string& npk,
+                                          const std::string& encKey) {
+    ECIESKeypair kp = generateECIESKeypair();
+    QJsonObject logos;
+    logos["npk"] = QString::fromStdString(npk);
+    logos["payout"] = QString::fromStdString(npk);                  // H1: payout bound to identity
+    logos["signing_key"] = QString::fromStdString(kp.publicKeyHex); // TOFU-pinned identity key
+    logos["enc_key"] = QString::fromStdString(encKey);             // L1: dedicated routing/enc key
+    QJsonObject card;
+    card["_logos"] = logos;
+    std::string canonical = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    QJsonObject sig;
+    sig["alg"] = QString("ES256K");
+    sig["publicKey"] = QString::fromStdString(kp.publicKeyHex);
+    sig["value"] = QString::fromStdString(signMessage(bytes, kp.privateKeyHex));
+    card["signature"] = sig;
+    std::string cardStr = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+
+    sqlite3* db = nullptr;
+    sqlite3_open((dir + "/pilot.db").c_str(), &db);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db,
+        "INSERT OR REPLACE INTO discovered_agents (npk, card_json, topic, last_seen) "
+        "VALUES (?, ?, 't', '0');", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, npk.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, cardStr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return kp;
+}
+
+// L1: the Agent Card advertises an INDEPENDENT encryption key (_logos.enc_key) alongside the
+// unchanged signing identity (_logos.signing_key). The inbox topic + url are keyed on the enc
+// key, not the signing key, and the card still verifies 'valid' (the enc_key is signed over).
+LOGOS_TEST(card_advertises_independent_enc_key) {
+    std::string dir = inboxDir("card_enc");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }   // create schema (no wallet -> returns false)
+    seedEciesIdentity(dir, kp);
+    PilotImpl impl; impl.initialize(dir);        // loadIdentity restores npk + ECIES key, backfills enc
+
+    QJsonObject card = QJsonDocument::fromJson(QByteArray::fromStdString(impl.agentCard())).object();
+    QJsonObject logos = card["_logos"].toObject();
+    std::string signingKey = logos["signing_key"].toString().toStdString();
+    std::string encKey = logos["enc_key"].toString().toStdString();
+
+    LOGOS_ASSERT_EQ(signingKey, kp.publicKeyHex);             // signing identity is UNCHANGED (TOFU survives)
+    LOGOS_ASSERT_FALSE(encKey.empty());                       // enc key is advertised
+    LOGOS_ASSERT_TRUE(encKey != signingKey);                  // and is independent of the signing key
+
+    std::string inbox = logos["inbox_topic"].toString().toStdString();
+    LOGOS_ASSERT_CONTAINS(inbox, encKey);                     // inbox keyed on the enc key
+    LOGOS_ASSERT_TRUE(inbox.find(signingKey) == std::string::npos);   // NOT the signing key
+    LOGOS_ASSERT_CONTAINS(card["url"].toString().toStdString(), encKey);
+    LOGOS_ASSERT_TRUE(verifyCardStatus(card) == QString("valid"));    // enc_key is signed over
+}
+
+// L1 backfill: a pre-split DB (ecies.* only) generates+persists a fresh enc keypair on load, and a
+// SECOND boot on the same dir advertises the SAME enc key (never re-rotates). The signing identity
+// stays the seeded ecies key throughout.
+LOGOS_TEST(identity_load_backfills_enc_keypair) {
+    std::string dir = inboxDir("enc_backfill");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }
+    seedEciesIdentity(dir, kp);
+
+    std::string encKeyCard1;
+    {
+        PilotImpl impl; impl.initialize(dir);   // first load -> backfill enc keypair
+        QJsonObject logos = QJsonDocument::fromJson(
+            QByteArray::fromStdString(impl.agentCard())).object()["_logos"].toObject();
+        encKeyCard1 = logos["enc_key"].toString().toStdString();
+        LOGOS_ASSERT_EQ(logos["signing_key"].toString().toStdString(), kp.publicKeyHex);
+    }
+    std::string encPub = configVal(dir, "enc.pub");
+    LOGOS_ASSERT_FALSE(encPub.empty());                       // enc.pub persisted to config
+    LOGOS_ASSERT_FALSE(configVal(dir, "enc.priv").empty());   // enc.priv persisted (plaintext, no passphrase)
+    LOGOS_ASSERT_EQ(encKeyCard1, encPub);                     // the card advertised the backfilled key
+    LOGOS_ASSERT_TRUE(encKeyCard1 != kp.publicKeyHex);        // independent of the signing key
+
+    // A second boot advertises the SAME enc key (no re-rotation) and the SAME signing key.
+    PilotImpl impl2; impl2.initialize(dir);
+    QJsonObject logos2 = QJsonDocument::fromJson(
+        QByteArray::fromStdString(impl2.agentCard())).object()["_logos"].toObject();
+    LOGOS_ASSERT_EQ(logos2["enc_key"].toString().toStdString(), encPub);
+    LOGOS_ASSERT_EQ(logos2["signing_key"].toString().toStdString(), kp.publicKeyHex);
+}
+
+// L1 routing: a2aRoutingKeyFor PREFERS a peer card's _logos.enc_key over its signing_key, so new
+// traffic is encrypted to the doer's dedicated decryption key.
+LOGOS_TEST(routing_prefers_enc_key_over_signing_key) {
+    std::string dir = inboxDir("route_enc");
+    PilotImpl impl; impl.initialize(dir);
+    std::string encKey = generateECIESKeypair().publicKeyHex;   // the doer's dedicated enc key
+    ECIESKeypair sign = seedDiscoveredCardEnc(dir, "doerEnc", encKey);
+    LOGOS_ASSERT_EQ(pilotTestA2ARoutingKey(impl, "doerEnc"), encKey);
+    LOGOS_ASSERT_TRUE(encKey != sign.publicKeyHex);             // it really preferred enc over signing
+}
+
+// L1 back-compat: a pre-split peer card carries NO enc_key, so a2aRoutingKeyFor FALLS BACK to its
+// signing_key — old doers keep receiving on the unified key.
+LOGOS_TEST(routing_falls_back_to_signing_key_for_presplit_card) {
+    std::string dir = inboxDir("route_sign");
+    PilotImpl impl; impl.initialize(dir);
+    ECIESKeypair kp = seedDiscoveredCard(dir, "doerOld");       // signing_key only, NO enc_key
+    LOGOS_ASSERT_EQ(pilotTestA2ARoutingKey(impl, "doerOld"), kp.publicKeyHex);
+}
+
+// L1 decrypt: a task encrypted to the doer's advertised _logos.enc_key (independent of the signing
+// key) is decrypted by a2aTryDecrypt (enc key first) and dispatched through the state machine —
+// the new<->new pay-loop request leg.
+LOGOS_TEST(inbound_roundtrip_via_enc_key_decrypts_and_dispatches) {
+    std::string dir = inboxDir("enc_roundtrip");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }
+    seedEciesIdentity(dir, kp);
+    PilotImpl doer; doer.initialize(dir);        // loadIdentity backfills a fresh enc keypair
+
+    // The asker reads the doer's advertised enc_key and encrypts the SIGNED task to THAT key.
+    QJsonObject dlogos = QJsonDocument::fromJson(
+        QByteArray::fromStdString(doer.agentCard())).object()["_logos"].toObject();
+    std::string encKey = dlogos["enc_key"].toString().toStdString();
+    LOGOS_ASSERT_FALSE(encKey.empty());
+    LOGOS_ASSERT_TRUE(encKey != kp.publicKeyHex);   // enc key is NOT the signing key
+
+    ECIESKeypair peer = generateECIESKeypair();
+    QJsonObject metadata; metadata["skill"] = QString("ping");
+    QJsonObject params;
+    params["id"] = QString("t-enc");
+    params["metadata"] = metadata;
+    params["message"] = QJsonObject();
+    QJsonObject logos;
+    logos["sender_npk"] = QString("peerEnc");
+    logos["sender_ecies"] = QString::fromStdString(peer.publicKeyHex);
+    logos["reply_topic"] = QString("/pilot/1/reply-t-enc/proto");
+    QJsonObject env;
+    env["jsonrpc"] = QString("2.0");
+    env["method"] = QString("tasks/send");
+    env["id"] = QString("t-enc");
+    env["params"] = params;
+    env["_logos"] = logos;
+    std::string req = signRequest(env, peer);
+    std::vector<uint8_t> plain(req.begin(), req.end());
+    std::string payload = eciesSerialize(eciesEncrypt(encKey, plain));   // encrypt to the ENC key
+
+    doer.handleInboundA2A(payload);   // a2aTryDecrypt: enc key first -> verify -> dispatch
+
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-enc", "state"), std::string("completed"));
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-enc", "sender_ecies"), std::string(peer.publicKeyHex));
+}
+
+// L1 x M2: the backfilled enc.priv is sealed at rest through the SAME path as ecies.priv — both are
+// wrapped (enc:v1) when PILOT_KEY_PASSPHRASE is set. The env is cleared BEFORE any assert so a
+// later seeded-plaintext test in this single-process runner is never re-wrapped.
+LOGOS_TEST(migration_backfilled_enc_priv_wrapped_when_passphrase_set) {
+    std::string dir = inboxDir("enc_wrapped");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }
+    seedEciesIdentity(dir, kp);                  // legacy plaintext ecies.* only
+
+    setenv("PILOT_KEY_PASSPHRASE", "operator-secret", 1);
+    { PilotImpl impl; impl.initialize(dir); }    // backfills enc keypair, seals enc.priv + ecies.priv
+    std::string encPriv = configVal(dir, "enc.priv");
+    std::string eciesPriv = configVal(dir, "ecies.priv");
+    unsetenv("PILOT_KEY_PASSPHRASE");            // BEFORE any assert
+
+    LOGOS_ASSERT_TRUE(isWrappedSecret(encPriv));     // enc.priv sealed at rest
+    LOGOS_ASSERT_TRUE(isWrappedSecret(eciesPriv));   // ecies.priv migrated/sealed at rest
+}
+
+// L1 [FIX-A] regression: a WRAPPED-but-unreadable enc.priv (passphrase absent on a later boot) is
+// NEVER regenerated. The backfill guard tests the RAW STORED slots, so the recoverable enc key
+// survives and the advertised enc_key is unchanged — not a fresh random key.
+LOGOS_TEST(migration_wrapped_enc_priv_not_rotated_without_passphrase) {
+    std::string dir = inboxDir("enc_not_rotated");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }
+    seedEciesIdentity(dir, kp);
+
+    std::string encPubBefore;
+    setenv("PILOT_KEY_PASSPHRASE", "operator-secret", 1);
+    { PilotImpl impl; impl.initialize(dir); }    // writes WRAPPED enc.* (recoverable)
+    encPubBefore = configVal(dir, "enc.pub");
+    unsetenv("PILOT_KEY_PASSPHRASE");            // BEFORE any assert
+
+    // Second boot with NO passphrase: enc.priv is wrapped+unreadable, but the RAW slots are present,
+    // so the guard does NOT fire and the key is not rotated.
+    PilotImpl impl2; impl2.initialize(dir);
+    std::string cardEncKey = QJsonDocument::fromJson(
+        QByteArray::fromStdString(impl2.agentCard())).object()["_logos"].toObject()
+        ["enc_key"].toString().toStdString();
+    std::string encPubAfter = configVal(dir, "enc.pub");
+
+    LOGOS_ASSERT_FALSE(encPubBefore.empty());
+    LOGOS_ASSERT_EQ(encPubAfter, encPubBefore);    // enc.pub NOT overwritten (key not regenerated)
+    LOGOS_ASSERT_EQ(cardEncKey, encPubBefore);     // advertised enc_key is the original, not a new random key
 }

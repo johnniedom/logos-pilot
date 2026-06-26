@@ -265,11 +265,17 @@ void PilotImpl::initDeliveryModule() {
         delivery->invokeRemoteMethod("delivery_module", "start",
             QVariantList{}, Timeout(15000));
 
-        // A2A server: also listen on our own inbox (the topic our Agent Card advertises),
-        // so peer agents can send us tasks. The inbox is keyed on agentEciesPub_ — the ECIES
-        // key we HOLD the private half of and decrypt with (handleInboundA2A) — NOT the wallet
-        // npk, matching what agentCard advertises and _logos.signing_key publishes.
-        if (!agentEciesPub_.empty())
+        // A2A server: also listen on our own inbox(es) so peer agents can send us tasks. L1 key
+        // separation: the PRIMARY inbox is keyed on the dedicated ENCRYPTION key (a2aSelfEncKey(),
+        // advertised as _logos.enc_key) — the key new peers encrypt to. We ALSO subscribe the
+        // legacy SIGNING-key inbox (agentEciesPub_) when it differs, so a pre-split peer that still
+        // routes to _logos.signing_key keeps reaching us (a2aTryDecrypt then decrypts via the ecies
+        // fallback). This dual subscribe is load-bearing for the new<->new two-agent pay loop.
+        std::string encKey = a2aSelfEncKey();
+        if (!encKey.empty())
+            delivery->invokeRemoteMethod("delivery_module", "subscribe",
+                QString::fromStdString("/pilot/1/inbox-" + encKey + "/proto"), Timeout(15000));
+        if (!agentEciesPub_.empty() && agentEciesPub_ != encKey)
             delivery->invokeRemoteMethod("delivery_module", "subscribe",
                 QString::fromStdString("/pilot/1/inbox-" + agentEciesPub_ + "/proto"), Timeout(15000));
 
@@ -281,9 +287,13 @@ void PilotImpl::initDeliveryModule() {
                     std::string topic = data[0].toString().toStdString();
                     std::string payload = data[1].toString().toStdString();
 
-                    // Peer task on our inbox -> A2A server. Inbox keyed on agentEciesPub_
-                    // (the key we decrypt with), consistent with the subscribe above.
-                    if (!agentEciesPub_.empty() && topic == "/pilot/1/inbox-" + agentEciesPub_ + "/proto") {
+                    // Peer task on EITHER of our inboxes -> A2A server (L1). The primary inbox is
+                    // keyed on the enc key (a2aSelfEncKey()); the legacy signing-key inbox is also
+                    // accepted for pre-split peers. handleInboundA2A decrypts with either private
+                    // key (a2aTryDecrypt), consistent with the dual subscribe above.
+                    std::string selfEnc = a2aSelfEncKey();
+                    if ((!selfEnc.empty() && topic == "/pilot/1/inbox-" + selfEnc + "/proto") ||
+                        (!agentEciesPub_.empty() && topic == "/pilot/1/inbox-" + agentEciesPub_ + "/proto")) {
                         handleInboundA2A(payload);
                         return;
                     }

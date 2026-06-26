@@ -176,6 +176,16 @@ public:
     // selection goes through metaConfigure (llm.provider/llm.api_key) + initLLM(), not RPC.
     friend void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
 
+// Test seam (L1): returns impl.a2aRoutingKeyFor(agentAddress). A free function (not a public
+// PilotImpl method) so the Qt Remote Objects generator never marshals it; friended above for
+// access to the private resolver. Defined in pilot_a2a.cpp.
+std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress);
+
+    // Test seam (L1): expose the private A2A routing-key resolver so unit tests can assert the
+    // enc_key-preferred-with-signing_key-fallback selection without a live delivery transport
+    // (a2aRoutingKeyFor must stay private so the QRO generator never wraps it as a remote method).
+    friend std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress);
+
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
 
@@ -193,6 +203,11 @@ private:
     // wrapped at rest when PILOT_KEY_PASSPHRASE is set; otherwise stored plaintext with a
     // warning. configKey is only ever a fixed literal (never peer input).
     bool persistSecretConfig(const std::string& configKey, const std::string& clearHex);
+    // L1: decrypt an inbound ECIES payload trying the dedicated encryption key (agentEncPriv_)
+    // first, then the legacy signing key (agentEciesPriv_) for pre-split peers that still
+    // encrypt to _logos.signing_key. Returns true (out = plaintext) on the first key that
+    // decrypts; false (out untouched) when neither key works or both are empty.
+    bool a2aTryDecrypt(const std::string& payload, std::string& out) const;
     bool fundAgentIfNeeded();
     void resetStaleIdentity();   // clear pilot.db identity + funded flag on wallet divergence
     void backupWallet();         // save wallet + keep a recovery copy of its storage file
@@ -259,6 +274,16 @@ private:
     std::string ownerName_;
     std::string agentEciesPub_;
     std::string agentEciesPriv_;
+    // L1 key separation: an INDEPENDENT ECDH/ECIES keypair, distinct from agentEcies* (which
+    // stays the ECDSA SIGNING identity == _logos.signing_key, TOFU-pinned by every peer). Peers
+    // encrypt inbound A2A tasks+replies to this key (advertised as _logos.enc_key); we decrypt
+    // with agentEncPriv_. The signing key is never used for ECDH on new traffic; legacy peers
+    // that still encrypt to the signing key are handled by a2aTryDecrypt's ecies fallback.
+    std::string agentEncPub_;
+    std::string agentEncPriv_;
+    // The encryption/routing key WE advertise and subscribe under. Falls back to the signing
+    // ECIES key for a pre-split DB that has no enc keypair yet (back-compat).
+    std::string a2aSelfEncKey() const { return agentEncPub_.empty() ? agentEciesPub_ : agentEncPub_; }
     std::string llmProvider_;
     std::string llmModel_;
     int64_t spendLimitPerTx_ = 100;

@@ -683,13 +683,12 @@ bool PilotImpl::replyToPeer(const std::string& topic, const std::string& recipie
 // Raw encrypted payload from our inbox topic -> decrypt -> state machine -> reply.
 // Undecryptable/malformed input is dropped (ambiguity defaults to inaction).
 void PilotImpl::handleInboundA2A(const std::string& encryptedPayload) {
-    if (agentEciesPriv_.empty()) return;
+    if (agentEncPriv_.empty() && agentEciesPriv_.empty()) return;
+    // L1: decrypt with the dedicated ENCRYPTION key first (the key our card advertises as
+    // _logos.enc_key and that peers encrypt to), then fall back to the legacy SIGNING key for a
+    // pre-split peer that still encrypts to _logos.signing_key. Undecryptable -> drop (inaction).
     std::string request;
-    try {
-        ECIESCiphertext ct = eciesDeserialize(encryptedPayload);
-        std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
-        request.assign(plain.begin(), plain.end());
-    } catch (...) { return; }
+    if (!a2aTryDecrypt(encryptedPayload, request)) return;
 
     QJsonDocument reqDoc = QJsonDocument::fromJson(QByteArray::fromStdString(request));
     if (!reqDoc.isObject()) return;

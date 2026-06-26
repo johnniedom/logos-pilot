@@ -187,6 +187,7 @@ bool PilotImpl::loadIdentity() {
         if (stmt) sqlite3_finalize(stmt);
 
         std::string eciesPrivStored;   // M2: captured raw; resolved after the cursor closes
+        std::string encPrivStored;     // L1: captured raw; resolved after the cursor closes
         rc = sqlite3_prepare_v2(db_,
             "SELECT key, value FROM config;",
             -1, &stmt, nullptr);
@@ -201,6 +202,8 @@ bool PilotImpl::loadIdentity() {
                 else if (key == "owner.name") ownerName_ = val;
                 else if (key == "ecies.pub") agentEciesPub_ = val;
                 else if (key == "ecies.priv") eciesPrivStored = val;   // raw; resolved below
+                else if (key == "enc.pub") agentEncPub_ = val;
+                else if (key == "enc.priv") encPrivStored = val;       // L1: raw; resolved below
                 else if (key == "llm.provider") llmProvider_ = val;
                 else if (key == "llm.model") llmModel_ = val;
                 else if (key == "llm.api_key") {
@@ -246,6 +249,46 @@ bool PilotImpl::loadIdentity() {
                 if (keyPass && *keyPass)
                     persistSecretConfig("ecies.priv", agentEciesPriv_);   // migrate -> wrapped in place
             }
+        }
+
+        // L1: resolve the dedicated enc.priv the SAME way as ecies.priv above (wrapped key
+        // decrypts with the passphrase; legacy plaintext is re-wrapped in place when a passphrase
+        // is now set; wrapped + missing/wrong passphrase leaves agentEncPriv_ empty + warns).
+        if (!encPrivStored.empty()) {
+            if (isWrappedSecret(encPrivStored)) {
+                if (keyPass && *keyPass) {
+                    try { agentEncPriv_ = unwrapSecret(encPrivStored, keyPass); }
+                    catch (...) {
+                        qWarning() << "[pilot] loadIdentity: enc.priv decrypt FAILED "
+                                      "(wrong PILOT_KEY_PASSPHRASE?); A2A crypto unavailable this run";
+                    }
+                } else {
+                    qWarning() << "[pilot] loadIdentity: enc.priv is encrypted but "
+                                  "PILOT_KEY_PASSPHRASE is unset; A2A crypto unavailable this run";
+                }
+            } else {
+                agentEncPriv_ = encPrivStored;                      // legacy plaintext
+                if (keyPass && *keyPass)
+                    persistSecretConfig("enc.priv", agentEncPriv_); // migrate -> wrapped in place
+            }
+        }
+
+        // L1 migration: a genuinely pre-split DB has NO enc.* rows at all. [FIX-A] Gate the
+        // backfill on the RAW STORED slots, never the resolved in-memory key: a wrapped-but-
+        // unreadable enc.priv (passphrase missing/wrong) leaves agentEncPriv_ empty but
+        // encPrivStored non-empty + agentEncPub_ set from config -> guard is FALSE, so we never
+        // regenerate and never overwrite the recoverable wrapped key. The signing identity
+        // (ecies.pub == _logos.signing_key) is UNCHANGED, so every peer TOFU pin survives.
+        if (db_ && encPrivStored.empty() && agentEncPub_.empty()) {
+            ECIESKeypair enc = generateECIESKeypair();
+            agentEncPub_  = enc.publicKeyHex;
+            agentEncPriv_ = enc.privateKeyHex;
+            sqlite3_stmt* es = nullptr;
+            sqlite3_prepare_v2(db_,
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('enc.pub', ?);", -1, &es, nullptr);
+            sqlite3_bind_text(es, 1, agentEncPub_.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(es); sqlite3_finalize(es);
+            persistSecretConfig("enc.priv", agentEncPriv_);
         }
 
         if (!llmProvider_.empty() || !llmModel_.empty())
@@ -428,9 +471,16 @@ bool PilotImpl::createIdentity() {
     else
         agentViewingKey_ = agentNpk_;
 
-    ECIESKeypair kp = generateECIESKeypair();
+    ECIESKeypair kp = generateECIESKeypair();        // SIGNING identity (== _logos.signing_key); unchanged
     agentEciesPub_ = kp.publicKeyHex;
     agentEciesPriv_ = kp.privateKeyHex;
+    // L1: a SEPARATE encryption keypair, independent of the signing identity above. Peers
+    // encrypt inbound A2A traffic to this key (advertised as _logos.enc_key); we decrypt with
+    // agentEncPriv_. Keeping it distinct means the signing key (the TOFU-pinned identity) is
+    // never the ECDH key on new traffic.
+    ECIESKeypair enc = generateECIESKeypair();
+    agentEncPub_ = enc.publicKeyHex;
+    agentEncPriv_ = enc.privateKeyHex;
 
     auto now = std::chrono::system_clock::now();
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -459,6 +509,17 @@ bool PilotImpl::createIdentity() {
     // M2: ecies.priv is wrapped at rest when PILOT_KEY_PASSPHRASE is set (plaintext
     // otherwise — today's default). ecies.pub above stays plaintext.
     persistSecretConfig("ecies.priv", agentEciesPriv_);
+
+    // L1: the dedicated enc keypair — public key plaintext, private key sealed via the SAME
+    // at-rest path as ecies.priv (the enc.priv is the REAL A2A/owner-inbound ECDH key, so it is
+    // at least as sensitive as the signing key and must seal identically).
+    sqlite3_prepare_v2(db_,
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('enc.pub', ?);",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, agentEncPub_.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    persistSecretConfig("enc.priv", agentEncPriv_);
 
     return true;
 }

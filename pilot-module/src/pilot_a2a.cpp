@@ -227,12 +227,14 @@ QString verifyCardStatus(const QJsonObject& card, sqlite3* db) {
 std::string PilotImpl::buildCard() {
     if (agentNpk_.empty()) return "{\"error\": \"not initialized\"}";
 
-    // A2A messaging identity is the ECIES key (the one we HOLD the private half of and can
-    // decrypt with), unified with _logos.signing_key below. The inbox we advertise — and
-    // that requesters encrypt+address tasks to — is keyed on agentEciesPub_, NOT the wallet
-    // npk: a task encrypted to the npk's viewing key is undecryptable by us (its private
-    // half lives in wallet-ffi). Payment identity (_logos.npk / _logos.payout) stays the npk.
-    std::string inbox = "/pilot/1/inbox-" + agentEciesPub_ + "/proto";
+    // A2A messaging identity is the ECIES/ECDH key (the one we HOLD the private half of and can
+    // decrypt with). L1 key separation: the inbox we advertise — and that requesters encrypt+
+    // address tasks to — is keyed on the dedicated ENCRYPTION key (a2aSelfEncKey(), advertised as
+    // _logos.enc_key), NOT the SIGNING key and NOT the wallet npk. The signing key stays published
+    // as _logos.signing_key for TOFU/authenticity; a pre-split agent (no enc key yet) falls back
+    // to its signing ECIES key here. Payment identity (_logos.npk / _logos.payout) stays the npk.
+    std::string encKey = a2aSelfEncKey();
+    std::string inbox = "/pilot/1/inbox-" + encKey + "/proto";
 
     QJsonObject card;
     card["name"] = QString("Pilot Agent");
@@ -356,8 +358,13 @@ std::string PilotImpl::buildCard() {
 
     // Signing key (M3): the public key that signs THIS card. verifyCardStatus binds the
     // signature to this published identity key, so a card re-signed under a different
-    // key (impersonation) is rejected even if its signature is internally valid.
+    // key (impersonation) is rejected even if its signature is internally valid. Kept EXACTLY
+    // as agentEciesPub_ so every peer's TOFU pin (npk -> signing_key) survives L1 unchanged.
     logos["signing_key"] = QString::fromStdString(agentEciesPub_);
+    // L1: the INDEPENDENT encryption/routing key peers encrypt A2A traffic to (== the inbox we
+    // subscribe). A pre-split peer reading this card has no enc_key and routes to signing_key
+    // instead (a2aRoutingKeyFor falls back). Signed over below, so it is authenticated.
+    logos["enc_key"] = QString::fromStdString(encKey);
     card["_logos"] = logos;
 
     // Sign the canonical card bytes (the card WITHOUT the signature field) so a
@@ -618,10 +625,11 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
 
     QJsonObject logosExt;
     logosExt["sender_npk"] = QString::fromStdString(agentNpk_);
-    // Our ECIES public key (the single A2A reply keypair). The doer stores this and
-    // encrypts EVERY reply to it; we decrypt those replies with agentEciesPriv_. Without
-    // this the doer has no key it can encrypt a reply we can read back (M4).
-    logosExt["sender_ecies"] = QString::fromStdString(agentEciesPub_);
+    // L1: our dedicated ENCRYPTION public key (a2aSelfEncKey()), the key the doer encrypts EVERY
+    // reply to; we decrypt those replies with agentEncPriv_ (a2aTryDecrypt also falls back to the
+    // legacy signing key). Without this the doer has no key it can encrypt a reply we can read
+    // back (M4). Pre-split self falls back to the signing ECIES key inside a2aSelfEncKey().
+    logosExt["sender_ecies"] = QString::fromStdString(a2aSelfEncKey());
     logosExt["reply_topic"] = QString::fromStdString(replyTopic);
     logosExt["timestamp"] = QString::fromStdString(nowTimestamp());
 
@@ -694,9 +702,10 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     // Tell the server where to send the status update — without this the inbound
     // server's reply (handleInboundA2A) has no topic and the update is dropped.
     logosExt["reply_topic"] = QString::fromStdString(replyTopic);
-    // Same ECIES reply key as the original task: the doer encrypts the subscribe reply
-    // to it and we decrypt with agentEciesPriv_ (one A2A reply keypair on both legs).
-    logosExt["sender_ecies"] = QString::fromStdString(agentEciesPub_);
+    // L1: same dedicated ENCRYPTION reply key as the original task (a2aSelfEncKey()): the doer
+    // encrypts the subscribe reply to it and we decrypt with agentEncPriv_ (a2aTryDecrypt falls
+    // back to the legacy signing key for a pre-split doer).
+    logosExt["sender_ecies"] = QString::fromStdString(a2aSelfEncKey());
     logosExt["timestamp"] = QString::fromStdString(nowTimestamp());
 
     QJsonObject request;
@@ -882,7 +891,12 @@ std::string PilotImpl::discoveredPayoutFor(const std::string& agentAddress) {
 // through extractEncryptionKey (which extracts the wallet VIEWING key from an npk blob — a
 // key the doer cannot decrypt with, the original request-leg blocker).
 std::string PilotImpl::a2aRoutingKeyFor(const std::string& agentAddress) {
-    std::string key = matchedCardLogos(db_, agentAddress)["signing_key"].toString().toStdString();
+    // L1: prefer the doer's dedicated ENCRYPTION key (_logos.enc_key) — the key it subscribes its
+    // inbox under and holds the private half of. A pre-split peer card has no enc_key, so fall back
+    // to its _logos.signing_key (the old unified key, which that peer still decrypts with).
+    QJsonObject logos = matchedCardLogos(db_, agentAddress);
+    std::string key = logos["enc_key"].toString().toStdString();
+    if (key.empty()) key = logos["signing_key"].toString().toStdString();   // pre-split peer fallback
     if (!key.empty()) return key;
     // No discovered/valid Agent Card resolved a messaging key. A caller may legitimately have
     // passed a BARE ECIES key directly (a plain hex string), which round-trips verbatim. But if
@@ -894,14 +908,44 @@ std::string PilotImpl::a2aRoutingKeyFor(const std::string& agentAddress) {
     return agentAddress;                          // bare ECIES key -> route verbatim
 }
 
+// Test seam (L1): expose the private routing-key resolver. See pilot_impl.h.
+std::string pilotTestA2ARoutingKey(PilotImpl& impl, const std::string& agentAddress) {
+    return impl.a2aRoutingKeyFor(agentAddress);
+}
+
+// L1 dual-key decrypt: try the dedicated ENCRYPTION key (agentEncPriv_) first — the key our card
+// now advertises as _logos.enc_key and that peers encrypt to — then fall back to the legacy
+// SIGNING key (agentEciesPriv_) for a pre-split peer that still encrypts to _logos.signing_key.
+// Returns true (out = plaintext) on the first key that decrypts; false (out untouched) otherwise.
+bool PilotImpl::a2aTryDecrypt(const std::string& payload, std::string& out) const {
+    ECIESCiphertext ct;
+    try { ct = eciesDeserialize(payload); }
+    catch (...) { return false; }
+    if (!agentEncPriv_.empty()) {
+        try {
+            std::vector<uint8_t> plain = eciesDecrypt(agentEncPriv_, ct);
+            out.assign(plain.begin(), plain.end());
+            return true;
+        } catch (...) { /* not encrypted to the enc key — try the legacy signing key */ }
+    }
+    if (!agentEciesPriv_.empty()) {
+        try {
+            std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
+            out.assign(plain.begin(), plain.end());
+            return true;
+        } catch (...) { /* fall through */ }
+    }
+    return false;
+}
+
 // Requester-side reply consumer (Functionality #8) — ECIES/transport wrapper. A peer
 // server replies on "/pilot/1/reply-<taskId>/proto" with a JSON-RPC status update. We
-// decrypt it with agentEciesPriv_ (the doer encrypted to the sender_ecies we declared on
-// the request, per the A2A contract — M4) and hand the decrypted reply to
-// verifyAndSettleReply, which AUTHENTICATES the doer's signature before settling.
-// Undecryptable/malformed input is dropped (ambiguity -> inaction).
+// decrypt it with a2aTryDecrypt (the enc key first, the legacy signing key as fallback —
+// the doer encrypted to the sender_ecies we declared on the request, per the A2A contract — M4)
+// and hand the decrypted reply to verifyAndSettleReply, which AUTHENTICATES the doer's signature
+// before settling. Undecryptable/malformed input is dropped (ambiguity -> inaction).
 void PilotImpl::handleA2AReply(const std::string& topic, const std::string& payload) {
-    if (!db_ || agentEciesPriv_.empty()) return;
+    if (!db_ || (agentEncPriv_.empty() && agentEciesPriv_.empty())) return;
 
     const std::string prefix = "/pilot/1/reply-";
     const std::string suffix = "/proto";
@@ -910,11 +954,7 @@ void PilotImpl::handleA2AReply(const std::string& topic, const std::string& payl
     std::string taskId = topic.substr(prefix.size(), topic.size() - prefix.size() - suffix.size());
 
     std::string json;
-    try {
-        ECIESCiphertext ct = eciesDeserialize(payload);
-        std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
-        json.assign(plain.begin(), plain.end());
-    } catch (...) { return; }
+    if (!a2aTryDecrypt(payload, json)) return;
 
     // ECIES decryption proves only that the reply was encrypted to our PUBLIC key — which any
     // observer can do. The SIGNATURE check (verifyAndSettleReply) is what proves the doer
