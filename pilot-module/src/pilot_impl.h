@@ -169,6 +169,26 @@ public:
     // LLM-assisted owner message processing
     std::string processOwnerMessage(const std::string& message);
 
+    // M1 — owner-channel authentication, FAIL-OPEN. Given the DECRYPTED owner-channel payload
+    // `raw`, decide whether to process it and yield the inner owner message in `innerOut`.
+    //
+    // FAIL-OPEN by design: the current owner clients (pilot-cli, pilot-ui) send RAW TEXT and do
+    // NOT sign, so a raw-text payload (or any non-envelope) is ACCEPTED unchanged (innerOut=raw,
+    // returns true). This NEVER locks the owner out of their own agent. It only HARDENS the path
+    // for a client that opts in to signing: when `raw` parses as a JSON object carrying a
+    // `message` string AND an `_logos` object with BOTH `signing_key` and `signature`, it is
+    // treated as a SIGNED ENVELOPE and must pass (a) an ECDSA signature over the canonical bytes
+    // (envelope minus `_logos.signature`, Compact — the SAME scheme as signA2AEnvelope /
+    // verifyInboundRequest), (b) a TOFU pin of the owner signing key (config "owner.signing_key"),
+    // and (c) a strictly-monotonic replay nonce (config "owner.last_nonce"); ANY failure returns
+    // false and the caller drops the message. On success innerOut is the inner `message`.
+    //
+    // FOLLOW-UP (fail-closed): once pilot-cli/pilot-ui SIGN every owner message, the fail-open
+    // ELSE branch can be flipped to `return false` to REJECT unsigned owner traffic. That is a
+    // documented client-coordinated change — do NOT make it fail-closed here, or the existing
+    // unsigned clients would be locked out. Public so tests drive it directly.
+    bool verifyOwnerMessage(const std::string& raw, std::string& innerOut);
+
     // Dependency-injection seam for the LLM provider — a FRIEND FREE FUNCTION (declared after
     // this class), NOT a public member: the universal-module code generator wraps every public
     // method for Qt Remote Objects and cannot marshal a std::unique_ptr<LLMProvider>. Tests call

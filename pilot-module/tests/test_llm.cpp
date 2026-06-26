@@ -1,10 +1,16 @@
 #include <logos_test.h>
 #include "../src/pilot_llm.h"
 #include "../src/pilot_impl.h"
+#include "../src/pilot_crypto.h"
 #include <string>
 #include <vector>
 #include <memory>
 #include <cstdlib>
+#include <cstdio>
+#include <QString>
+#include <QByteArray>
+#include <QJsonObject>
+#include <QJsonDocument>
 
 LOGOS_TEST(noop_provider_not_configured) {
     NoOpProvider noop;
@@ -129,4 +135,153 @@ LOGOS_TEST(llm_timeout_ms_defaults_and_env_override) {
     LOGOS_ASSERT_EQ(pilotLlmTimeoutMs(), 60000);     // unparseable -> default
 
     unsetenv("PILOT_LLM_TIMEOUT_MS");                // clean up for other tests
+}
+
+// ===================== M1 — owner-channel authentication (FAIL-OPEN) =================
+//
+// verifyOwnerMessage() must NEVER lock the owner out: raw/unsigned text is accepted as-is
+// (the pilot-cli / pilot-ui clients still send raw text). A client that opts in to signing gets
+// the hardened path — ECDSA signature over the canonical bytes, a TOFU pin of the owner signing
+// key, and a strictly-monotonic replay nonce — and any failed check drops the message.
+
+// A fresh data dir per test so a leftover pilot.db can't carry a stale owner pin / nonce in.
+static std::string ownerAuthDir(const std::string& name) {
+    std::string base = "/tmp";
+    if (const char* t = std::getenv("TMPDIR")) base = t;
+    std::string dir = base + "/pilot_owner_" + name;
+    std::remove((dir + "/pilot.db").c_str());
+    std::remove((dir + "/pilot.db-wal").c_str());
+    std::remove((dir + "/pilot.db-shm").c_str());
+    return dir;
+}
+
+// Build a SIGNED owner envelope exactly as verifyOwnerMessage expects, mirroring the production
+// signA2AEnvelope / verifyInboundRequest canonical-bytes scheme: set _logos.signing_key + nonce,
+// drop any prior _logos.signature, sign the Compact bytes (signature ABSENT), then attach the
+// signature. verifyOwnerMessage reproduces these bytes (envelope minus _logos.signature) and
+// verifies them against signing_key.
+static std::string signOwnerEnvelope(const std::string& message, long long nonce,
+                                     const ECIESKeypair& kp) {
+    QJsonObject env;
+    env["message"] = QString::fromStdString(message);
+    QJsonObject logos;
+    logos["signing_key"] = QString::fromStdString(kp.publicKeyHex);
+    logos["nonce"] = static_cast<double>(nonce);   // JSON has one numeric type (Double)
+    env["_logos"] = logos;
+    std::string canonical = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    logos["signature"] = QString::fromStdString(signMessage(bytes, kp.privateKeyHex));
+    env["_logos"] = logos;
+    return QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+}
+
+// FAIL-OPEN: a legacy raw-text owner message (no envelope) is accepted unchanged so the owner is
+// never locked out. No db / no signing key required for this path.
+LOGOS_TEST(verify_owner_message_raw_text_accepted_fail_open) {
+    PilotImpl impl;
+    std::string inner;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage("/approve x", inner));
+    LOGOS_ASSERT_EQ(inner, std::string("/approve x"));
+
+    // A JSON object that is NOT a signed envelope (no _logos.signature) is ALSO accepted as-is.
+    std::string inner2;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage("{\"message\":\"hi\"}", inner2));
+    LOGOS_ASSERT_EQ(inner2, std::string("{\"message\":\"hi\"}"));
+}
+
+// A correctly SIGNED envelope is accepted, the inner message is unwrapped, the owner key is
+// pinned, and a SECOND signed message from the SAME key with a HIGHER nonce also passes.
+LOGOS_TEST(verify_owner_message_signed_envelope_accepted_and_pins) {
+    std::string dir = ownerAuthDir("signed_ok");
+    PilotImpl impl;
+    impl.initialize(dir);   // opens db_ (the config table that holds owner.signing_key / last_nonce)
+    ECIESKeypair owner = generateECIESKeypair();
+
+    std::string env1 = signOwnerEnvelope("/approve abc", 1, owner);
+    std::string inner;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env1, inner));   // pins owner key, last_nonce -> 1
+    LOGOS_ASSERT_EQ(inner, std::string("/approve abc"));
+
+    std::string env2 = signOwnerEnvelope("hello again", 2, owner);   // same key, higher nonce
+    std::string inner2;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env2, inner2));
+    LOGOS_ASSERT_EQ(inner2, std::string("hello again"));
+}
+
+// A signed envelope whose signature does NOT verify over the presented bytes is dropped. Here the
+// inner `message` is swapped AFTER signing, so the attached signature no longer matches.
+LOGOS_TEST(verify_owner_message_bad_signature_rejected) {
+    std::string dir = ownerAuthDir("bad_sig");
+    PilotImpl impl;
+    impl.initialize(dir);
+    ECIESKeypair owner = generateECIESKeypair();
+
+    std::string env = signOwnerEnvelope("/approve x", 1, owner);
+    QJsonObject obj = QJsonDocument::fromJson(QByteArray::fromStdString(env)).object();
+    obj["message"] = QString("EVIL injected");   // signature was over the ORIGINAL message bytes
+    std::string tampered = QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
+
+    std::string inner;
+    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(tampered, inner));
+}
+
+// A signed envelope from a DIFFERENT key than the pinned owner key is dropped (TOFU mismatch),
+// even though the attacker's signature is internally valid over its own bytes.
+LOGOS_TEST(verify_owner_message_pin_mismatch_rejected) {
+    std::string dir = ownerAuthDir("pin_mismatch");
+    PilotImpl impl;
+    impl.initialize(dir);
+    ECIESKeypair owner    = generateECIESKeypair();
+    ECIESKeypair attacker = generateECIESKeypair();
+
+    std::string env1 = signOwnerEnvelope("legit", 1, owner);
+    std::string inner;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env1, inner));   // pins the owner key
+
+    std::string env2 = signOwnerEnvelope("takeover", 2, attacker);   // valid sig, WRONG key
+    std::string inner2;
+    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(env2, inner2));
+}
+
+// Replay protection: an equal or lower nonce than the stored high-water mark is dropped.
+LOGOS_TEST(verify_owner_message_replay_nonce_rejected) {
+    std::string dir = ownerAuthDir("replay");
+    PilotImpl impl;
+    impl.initialize(dir);
+    ECIESKeypair owner = generateECIESKeypair();
+
+    std::string env5 = signOwnerEnvelope("first", 5, owner);
+    std::string inner;
+    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env5, inner));   // last_nonce -> 5
+
+    std::string envEqual = signOwnerEnvelope("again", 5, owner);   // equal nonce -> replay
+    std::string i2;
+    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(envEqual, i2));
+
+    std::string envLower = signOwnerEnvelope("rollback", 3, owner);   // lower nonce -> replay
+    std::string i3;
+    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(envLower, i3));
+}
+
+// A signed envelope with NO nonce is dropped (replay protection requires a monotonic nonce). The
+// signature is otherwise valid and the key would pin, so this isolates the missing-nonce branch.
+LOGOS_TEST(verify_owner_message_missing_nonce_rejected) {
+    std::string dir = ownerAuthDir("no_nonce");
+    PilotImpl impl;
+    impl.initialize(dir);
+    ECIESKeypair owner = generateECIESKeypair();
+
+    QJsonObject env;
+    env["message"] = QString("no nonce");
+    QJsonObject logos;
+    logos["signing_key"] = QString::fromStdString(owner.publicKeyHex);
+    env["_logos"] = logos;   // deliberately NO nonce
+    std::string canonical = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    logos["signature"] = QString::fromStdString(signMessage(bytes, owner.privateKeyHex));
+    env["_logos"] = logos;
+    std::string noNonce = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
+
+    std::string inner;
+    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(noNonce, inner));
 }

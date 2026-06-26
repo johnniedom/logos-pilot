@@ -13,6 +13,7 @@
 #include <thread>
 #include <chrono>
 #include <QString>
+#include <QByteArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -311,8 +312,14 @@ void PilotImpl::initDeliveryModule() {
                         ECIESCiphertext ct = eciesDeserialize(payload);
                         std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
                         std::string message(plain.begin(), plain.end());
-                        std::string response = processOwnerMessage(message);
-                        sendToOwner(response);
+                        // M1: authenticate the owner payload FAIL-OPEN. Raw/legacy text is accepted
+                        // (owner never locked out); a SIGNED envelope must pass signature + TOFU pin
+                        // + replay nonce, else it is dropped silently (no LLM processing / no cost).
+                        std::string inner;
+                        if (verifyOwnerMessage(message, inner)) {
+                            std::string response = processOwnerMessage(inner);
+                            sendToOwner(response);
+                        }
                     } catch (...) {}
                 });
         }
@@ -393,6 +400,107 @@ struct InFlightGuard {
     ~InFlightGuard() { --c; }
 };
 }  // namespace
+
+// M1 — owner-channel authentication, FAIL-OPEN. See pilot_impl.h for the full contract.
+//
+// FAIL-OPEN: the owner clients (pilot-cli, pilot-ui) currently send RAW TEXT and do NOT sign,
+// so an unsigned/non-envelope payload is ACCEPTED unchanged — the owner is NEVER locked out.
+// A client that opts in to signing gets the hardened path: signature + TOFU pin + replay nonce,
+// any failure -> drop. Flipping to fail-closed (reject unsigned) requires the owner clients to
+// sign first; that is a documented follow-up, NOT done here.
+bool PilotImpl::verifyOwnerMessage(const std::string& raw, std::string& innerOut) {
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(raw));
+    if (doc.isObject()) {
+        QJsonObject env = doc.object();
+        QJsonObject logos = env["_logos"].toObject();
+        const bool isSignedEnvelope =
+            env.contains("message") && env["message"].isString() &&
+            logos.contains("signing_key") && logos["signing_key"].isString() &&
+            logos.contains("signature")   && logos["signature"].isString();
+
+        if (isSignedEnvelope) {
+            // From here this is a SIGNED ENVELOPE: ANY failed check returns false (caller drops it).
+            const std::string key = logos["signing_key"].toString().toStdString();
+            const std::string sig = logos["signature"].toString().toStdString();
+
+            // (a) Canonical bytes = the WHOLE envelope with _logos.signature REMOVED (signing_key
+            // kept), serialized Compact — EXACTLY signA2AEnvelope / verifyInboundRequest. We then
+            // verify with verifySignature(message_bytes, signatureHex, publicKeyHex).
+            QJsonObject canonEnv = env;
+            QJsonObject canonLogos = canonEnv["_logos"].toObject();
+            canonLogos.remove("signature");
+            canonEnv["_logos"] = canonLogos;
+            const std::string canonical =
+                QJsonDocument(canonEnv).toJson(QJsonDocument::Compact).toStdString();
+            const std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+            if (!verifySignature(bytes, sig, key)) return false;   // (message, signatureHex, publicKeyHex)
+
+            // (b) TOFU-pin the owner signing key in the config table under "owner.signing_key"
+            // (SEPARATE from the A2A pin tables). INSERT OR IGNORE creates it on first signed
+            // contact; thereafter the stored value MUST equal the presented key (mismatch -> drop).
+            if (db_) {
+                sqlite3_stmt* ins = nullptr;
+                if (sqlite3_prepare_v2(db_,
+                        "INSERT OR IGNORE INTO config (key, value) VALUES ('owner.signing_key', ?);",
+                        -1, &ins, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(ins, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(ins);
+                }
+                sqlite3_finalize(ins);
+
+                std::string pinned;
+                sqlite3_stmt* sel = nullptr;
+                if (sqlite3_prepare_v2(db_,
+                        "SELECT value FROM config WHERE key='owner.signing_key';",
+                        -1, &sel, nullptr) == SQLITE_OK) {
+                    if (sqlite3_step(sel) == SQLITE_ROW && sqlite3_column_text(sel, 0))
+                        pinned = reinterpret_cast<const char*>(sqlite3_column_text(sel, 0));
+                }
+                sqlite3_finalize(sel);
+                if (pinned.empty() || pinned != key) return false;   // TOFU mismatch -> drop
+            }
+
+            // (c) Replay protection: integer _logos.nonce MUST strictly exceed the stored
+            // "owner.last_nonce" (default 0). A missing / non-increasing nonce on a signed
+            // envelope -> drop. Persist the new high-water nonce on success.
+            if (!logos.contains("nonce") || !logos["nonce"].isDouble()) return false;
+            const long long nonce = static_cast<long long>(logos["nonce"].toDouble());
+            long long last = 0;
+            if (db_) {
+                sqlite3_stmt* sel = nullptr;
+                if (sqlite3_prepare_v2(db_,
+                        "SELECT value FROM config WHERE key='owner.last_nonce';",
+                        -1, &sel, nullptr) == SQLITE_OK) {
+                    if (sqlite3_step(sel) == SQLITE_ROW && sqlite3_column_text(sel, 0))
+                        last = std::strtoll(
+                            reinterpret_cast<const char*>(sqlite3_column_text(sel, 0)), nullptr, 10);
+                }
+                sqlite3_finalize(sel);
+            }
+            if (nonce <= last) return false;   // replay / equal / lower -> drop
+            if (db_) {
+                sqlite3_stmt* up = nullptr;
+                if (sqlite3_prepare_v2(db_,
+                        "INSERT OR REPLACE INTO config (key, value) VALUES ('owner.last_nonce', ?);",
+                        -1, &up, nullptr) == SQLITE_OK) {
+                    const std::string ns = std::to_string(nonce);
+                    sqlite3_bind_text(up, 1, ns.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(up);
+                }
+                sqlite3_finalize(up);
+            }
+
+            // (d) signature + pin + nonce all passed -> accept the inner message.
+            innerOut = env["message"].toString().toStdString();
+            return true;
+        }
+    }
+
+    // FAIL-OPEN: raw text, a non-object, or an object without a _logos.signature is a legacy
+    // unsigned owner message and is accepted unchanged so the owner is never locked out.
+    innerOut = raw;
+    return true;
+}
 
 std::string PilotImpl::processOwnerMessage(const std::string& message) {
     if (message.empty()) return "{\"action\": \"none\"}";
