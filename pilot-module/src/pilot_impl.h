@@ -186,8 +186,10 @@ public:
     // FOLLOW-UP (fail-closed): once pilot-cli/pilot-ui SIGN every owner message, the fail-open
     // ELSE branch can be flipped to `return false` to REJECT unsigned owner traffic. That is a
     // documented client-coordinated change — do NOT make it fail-closed here, or the existing
-    // unsigned clients would be locked out. Public so tests drive it directly.
-    bool verifyOwnerMessage(const std::string& raw, std::string& innerOut);
+    // unsigned clients would be locked out. PRIVATE (declared below) so the QRO generator never
+    // wraps its std::string& out-param; tests reach it via the pilotTestVerifyOwnerMessage friend
+    // free function declared after this class (same idiom as pilotSetLLMProvider).
+    friend bool pilotTestVerifyOwnerMessage(PilotImpl& impl, const std::string& raw, std::string& innerOut);
 
     // Dependency-injection seam for the LLM provider — a FRIEND FREE FUNCTION (declared after
     // this class), NOT a public member: the universal-module code generator wraps every public
@@ -196,12 +198,20 @@ public:
     // selection goes through metaConfigure (llm.provider/llm.api_key) + initLLM(), not RPC.
     friend void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
 
+// Test seam (M1): drives the PRIVATE PilotImpl::verifyOwnerMessage from unit tests. A free function
+// (not a PilotImpl method) so the Qt Remote Objects generator never wraps it; friended in the class
+// for access. Defined in pilot_impl.cpp.
+bool pilotTestVerifyOwnerMessage(PilotImpl& impl, const std::string& raw, std::string& innerOut);
+
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
 
     LogosAPI* logosAPI_ = nullptr;
 
 private:
+    // M1 owner-channel auth (see the comment in the public section + a2a-deferred-handoff.md).
+    // PRIVATE so the QRO generator never wraps it; the pilotTestVerifyOwnerMessage seam reaches it.
+    bool verifyOwnerMessage(const std::string& raw, std::string& innerOut);
     void initDatabase(const std::string& dataDir);
     void initDependencyModules();
     void initStorageModule();

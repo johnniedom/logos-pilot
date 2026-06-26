@@ -180,12 +180,12 @@ static std::string signOwnerEnvelope(const std::string& message, long long nonce
 LOGOS_TEST(verify_owner_message_raw_text_accepted_fail_open) {
     PilotImpl impl;
     std::string inner;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage("/approve x", inner));
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,"/approve x", inner));
     LOGOS_ASSERT_EQ(inner, std::string("/approve x"));
 
     // A JSON object that is NOT a signed envelope (no _logos.signature) is ALSO accepted as-is.
     std::string inner2;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage("{\"message\":\"hi\"}", inner2));
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,"{\"message\":\"hi\"}", inner2));
     LOGOS_ASSERT_EQ(inner2, std::string("{\"message\":\"hi\"}"));
 }
 
@@ -199,12 +199,12 @@ LOGOS_TEST(verify_owner_message_signed_envelope_accepted_and_pins) {
 
     std::string env1 = signOwnerEnvelope("/approve abc", 1, owner);
     std::string inner;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env1, inner));   // pins owner key, last_nonce -> 1
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,env1, inner));   // pins owner key, last_nonce -> 1
     LOGOS_ASSERT_EQ(inner, std::string("/approve abc"));
 
     std::string env2 = signOwnerEnvelope("hello again", 2, owner);   // same key, higher nonce
     std::string inner2;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env2, inner2));
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,env2, inner2));
     LOGOS_ASSERT_EQ(inner2, std::string("hello again"));
 }
 
@@ -222,7 +222,7 @@ LOGOS_TEST(verify_owner_message_bad_signature_rejected) {
     std::string tampered = QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
 
     std::string inner;
-    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(tampered, inner));
+    LOGOS_ASSERT_FALSE(pilotTestVerifyOwnerMessage(impl,tampered, inner));
 }
 
 // A signed envelope from a DIFFERENT key than the pinned owner key is dropped (TOFU mismatch),
@@ -236,11 +236,11 @@ LOGOS_TEST(verify_owner_message_pin_mismatch_rejected) {
 
     std::string env1 = signOwnerEnvelope("legit", 1, owner);
     std::string inner;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env1, inner));   // pins the owner key
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,env1, inner));   // pins the owner key
 
     std::string env2 = signOwnerEnvelope("takeover", 2, attacker);   // valid sig, WRONG key
     std::string inner2;
-    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(env2, inner2));
+    LOGOS_ASSERT_FALSE(pilotTestVerifyOwnerMessage(impl,env2, inner2));
 }
 
 // Replay protection: an equal or lower nonce than the stored high-water mark is dropped.
@@ -252,15 +252,15 @@ LOGOS_TEST(verify_owner_message_replay_nonce_rejected) {
 
     std::string env5 = signOwnerEnvelope("first", 5, owner);
     std::string inner;
-    LOGOS_ASSERT_TRUE(impl.verifyOwnerMessage(env5, inner));   // last_nonce -> 5
+    LOGOS_ASSERT_TRUE(pilotTestVerifyOwnerMessage(impl,env5, inner));   // last_nonce -> 5
 
     std::string envEqual = signOwnerEnvelope("again", 5, owner);   // equal nonce -> replay
     std::string i2;
-    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(envEqual, i2));
+    LOGOS_ASSERT_FALSE(pilotTestVerifyOwnerMessage(impl,envEqual, i2));
 
     std::string envLower = signOwnerEnvelope("rollback", 3, owner);   // lower nonce -> replay
     std::string i3;
-    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(envLower, i3));
+    LOGOS_ASSERT_FALSE(pilotTestVerifyOwnerMessage(impl,envLower, i3));
 }
 
 // A signed envelope with NO nonce is dropped (replay protection requires a monotonic nonce). The
@@ -283,5 +283,5 @@ LOGOS_TEST(verify_owner_message_missing_nonce_rejected) {
     std::string noNonce = QJsonDocument(env).toJson(QJsonDocument::Compact).toStdString();
 
     std::string inner;
-    LOGOS_ASSERT_FALSE(impl.verifyOwnerMessage(noNonce, inner));
+    LOGOS_ASSERT_FALSE(pilotTestVerifyOwnerMessage(impl,noNonce, inner));
 }

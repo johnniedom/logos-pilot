@@ -408,6 +408,13 @@ struct InFlightGuard {
 // A client that opts in to signing gets the hardened path: signature + TOFU pin + replay nonce,
 // any failure -> drop. Flipping to fail-closed (reject unsigned) requires the owner clients to
 // sign first; that is a documented follow-up, NOT done here.
+
+// Test seam (M1): drives the private verifyOwnerMessage from unit tests. A free function (not a
+// PilotImpl method) so the QRO generator never wraps it; friended in pilot_impl.h.
+bool pilotTestVerifyOwnerMessage(PilotImpl& impl, const std::string& raw, std::string& innerOut) {
+    return impl.verifyOwnerMessage(raw, innerOut);
+}
+
 bool PilotImpl::verifyOwnerMessage(const std::string& raw, std::string& innerOut) {
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(raw));
     if (doc.isObject()) {
