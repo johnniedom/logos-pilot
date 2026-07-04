@@ -5,7 +5,7 @@ LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bi
 export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f 2>/dev/null | head -1)
 CFG="--config-dir /tmp/pilot-test/.logoscore"
 DATA="/tmp/pilot-test"
-MODULES="/tmp/pilot-logoscore/modules"
+MODULES="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
 
 PASS=0
 FAIL=0

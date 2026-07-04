@@ -8,8 +8,8 @@ echo ""
 
 LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f 2>/dev/null | head -1)
 export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f 2>/dev/null | head -1)
-MODULES="/tmp/pilot-logoscore/modules"
-MODULES_B="/tmp/pilot-logoscore/modules-b"
+MODULES="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
+MODULES_B="/tmp/pilot-logoscore/modules-b"   # scratch copy for Agent B (repopulated from $MODULES below)
 
 AGENT_A="/tmp/agent-a"
 AGENT_B="/tmp/agent-b"

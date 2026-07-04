@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-MODULES_DIR=/tmp/pilot-logoscore/modules
+# Persistent per-user location by default so installed modules survive a reboot
+# / a /tmp wipe (matches pilot-cli's loadConfig default). Override with PILOT_MODULE_PATH.
+MODULES_DIR="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
 LGPM=$(find /nix/store -maxdepth 3 -name "lgpm" -path "*/bin/*" 2>/dev/null | head -1)
 
 echo "=== Installing Logos modules ==="

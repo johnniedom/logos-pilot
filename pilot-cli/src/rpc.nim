@@ -1,8 +1,12 @@
 import os, osproc, strutils, json
 
 const
-  DEFAULT_DATA_DIR* = "/tmp/pilot-data"
-  DEFAULT_MODULE_PATH* = "/tmp/pilot-logoscore/modules"
+  # Fallbacks used only when $HOME is unset (rare: some CI/sandbox shells).
+  # Normal runs default to a PERSISTENT per-user dir ($HOME/.pilot) — see
+  # loadConfig — so agent identity, wallet and installed modules survive a
+  # reboot / a /tmp wipe instead of silently vanishing.
+  FALLBACK_DATA_DIR* = "/tmp/pilot-data"
+  FALLBACK_MODULE_PATH* = "/tmp/pilot-logoscore/modules"
   DEFAULT_WAKU_ADDR* = "/ip4/127.0.0.1/tcp/30303"
   MODULES* = "capability_module,logos_execution_zone,delivery_module,storage_module,chat_module,pilot"
 
@@ -28,9 +32,14 @@ proc findDir(pattern: string): string =
                        options = {poUsePath}).strip()
 
 proc loadConfig*(): Config =
-  result.dataDir = getEnv("PILOT_DATA_DIR", DEFAULT_DATA_DIR)
+  # Default to a PERSISTENT per-user home ($HOME/.pilot) so the agent survives a
+  # reboot or /tmp wipe; fall back to /tmp only when $HOME is unavailable.
+  let home = getHomeDir()
+  let dataDefault = if home.len > 0: home / ".pilot" else: FALLBACK_DATA_DIR
+  let moduleDefault = if home.len > 0: home / ".pilot" / "modules" else: FALLBACK_MODULE_PATH
+  result.dataDir = getEnv("PILOT_DATA_DIR", dataDefault)
   result.configDir = getEnv("PILOT_CONFIG_DIR", result.dataDir / ".logoscore")
-  result.modulePath = getEnv("PILOT_MODULE_PATH", DEFAULT_MODULE_PATH)
+  result.modulePath = getEnv("PILOT_MODULE_PATH", moduleDefault)
   result.wakuAddr = getEnv("PILOT_WAKU_ADDR", DEFAULT_WAKU_ADDR)
 
   result.logoscore = getEnv("LOGOSCORE")
