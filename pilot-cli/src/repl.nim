@@ -201,7 +201,8 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/upload":
     if parts.len < 3:
       return RED & "  usage: /upload <path> <label>" & RESET
-    return formatJson(daemonCall(cfg, "storageUpload", @[parts[1], parts[2]]))
+    return formatJson(daemonCallWithSpinner(cfg, "storageUpload",
+      @[parts[1], parts[2]], timeoutSec = 45, label = "Uploading"))
   of "/download":
     if parts.len < 3:
       return RED & "  usage: /download <cid-or-label> <path>" & RESET
@@ -253,9 +254,13 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "upload":
     let p = action.getOrDefault("params")
     if not p.isNil:
-      return daemonCall(cfg, "storageUpload",
+      # Same 45s window + spinner as the /upload slash path: a large file's
+      # chunk transfer + finalize can exceed the default 10s daemonCall and
+      # time out silently (no "Uploading..." feedback, no reply).
+      return daemonCallWithSpinner(cfg, "storageUpload",
         @[p.getOrDefault("path").getStr(""),
-          p.getOrDefault("label").getStr("")])
+          p.getOrDefault("label").getStr("")],
+        timeoutSec = 45, label = "Uploading")
   of "files":
     return formatJson(daemonCall(cfg, "storageList"))
   of "history":
