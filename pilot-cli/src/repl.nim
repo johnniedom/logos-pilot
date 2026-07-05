@@ -273,8 +273,13 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
               cid = f["cid"].getStr()
               break
         except: discard
-      return formatJson(daemonCall(cfg, "storageDownload",
-        @[cid, p.getOrDefault("path").getStr("/tmp/download")]))
+      # Match the /download slash path's 45s window: a network fetch can poll up to
+      # ~30s inside storageDownload, so the default 10s daemonCall would time out and
+      # the agent would return nothing ("Thinking..." then silence). Use the spinner
+      # call with the same 45s timeout so conversational downloads behave like manual ones.
+      return formatJson(daemonCallWithSpinner(cfg, "storageDownload",
+        @[cid, p.getOrDefault("path").getStr("/tmp/download")],
+        timeoutSec = 45, label = "Downloading"))
   of "reject":
     let id = action{"params", "id"}.getStr("")
     if id != "": return daemonCall(cfg, "rejectSpend", @[id])
