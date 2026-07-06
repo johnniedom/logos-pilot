@@ -49,7 +49,12 @@ proc formatJson(raw: string): string =
 
     # Balance
     if j.hasKey("balance") and j.hasKey("account"):
-      let bal = j["balance"].getStr("")
+      # Two shapes reach this branch: walletBalance returns a flat {"balance":"100"},
+      # but metaStatus nests it ({"balance":{"account":...,"balance":"100"}}) — getStr
+      # on an object yields "" and rendered a phantom "0" while the wallet held funds.
+      let bal =
+        if j["balance"].kind == JObject: j["balance"].getOrDefault("balance").getStr("")
+        else: j["balance"].getStr("")
       let balStr = if bal == "": "0" else: bal
       # Render the REAL limits from metaStatus (fall back to defaults only if absent).
       var perTx = 100

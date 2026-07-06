@@ -26,7 +26,7 @@ echo "   >>> WATCH THE TERMINAL: r0vm proof generation here is the proof RISC0_D
 "$PILOT" deploy
 
 echo "== 4. Confirm a non-zero on-chain balance =="
-"$PILOT" balance
+"$PILOT" status    # top-level CLI has no `balance` command; status shows the wallet balance
 
 # ---- Illustrative use cases (driven interactively through `pilot chat`) ----------------
 # Skills are invoked via slash commands in `pilot chat` (or `logoscore call pilot <method>`).

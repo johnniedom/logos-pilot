@@ -1,4 +1,4 @@
-import strutils, os, rdstdin
+import strutils, os, rdstdin, terminal
 import rpc, daemon, selector, format
 
 const LLM_PROVIDERS = @[
@@ -71,11 +71,11 @@ proc runDeploy*(cfg: Config, network: string) =
     let (providerName, envKey) = LLM_PROVIDER_KEYS[providerIdx]
     var apiKey = getEnv(envKey)
     if apiKey == "":
-      stdout.write(DIM & "  API key: " & RESET)
-      stdout.flushFile()
-      var input: string
-      discard readLineFromStdin("", input)
-      apiKey = input.strip()
+      # Masked input: the deploy screen is exactly what the demo video records, and a
+      # plain readLine echoed the full key on screen (and into terminal scrollback).
+      apiKey = readPasswordFromStdin(DIM & "  API key: " & RESET).strip()
+      if apiKey.len > 6:
+        echo DIM & "  API key: " & apiKey[0..4] & repeat("•", 12) & "  (hidden)" & RESET
 
     if apiKey != "":
       putEnv(envKey, apiKey)
