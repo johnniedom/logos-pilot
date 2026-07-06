@@ -56,19 +56,19 @@ proc formatJson(raw: string): string =
         if j["balance"].kind == JObject: j["balance"].getOrDefault("balance").getStr("")
         else: j["balance"].getStr("")
       let balStr = if bal == "": "0" else: bal
-      # Render the REAL limits from metaStatus (fall back to defaults only if absent).
-      var perTx = 100
-      var perPeriod = 500
-      var periodHrs = 24
+      # Limit lines render ONLY when the response carries real limits (metaStatus does,
+      # walletBalance doesn't) — never print fabricated defaults as if they were data.
+      var limitLines = ""
       if j.hasKey("limits") and j["limits"].kind == JObject:
-        perTx = j["limits"].getOrDefault("per_tx").getInt(100)
-        perPeriod = j["limits"].getOrDefault("per_period").getInt(500)
+        let perTx = j["limits"].getOrDefault("per_tx").getInt(100)
+        let perPeriod = j["limits"].getOrDefault("per_period").getInt(500)
         let secs = j["limits"].getOrDefault("period_seconds").getInt(86400)
-        periodHrs = max(1, secs div 3600)
+        let periodHrs = max(1, secs div 3600)
+        limitLines = "\n  " & DIM & "Per-tx limit " & RESET & $perTx & " LEZ" &
+                     "\n  " & DIM & "Period limit " & RESET & $perPeriod & " LEZ / " & $periodHrs & "h"
       return BOLD & "  Agent Wallet" & RESET &
              "\n  " & DIM & "Balance      " & RESET & BOLD & balStr & " LEZ" & RESET &
-             "\n  " & DIM & "Per-tx limit " & RESET & $perTx & " LEZ" &
-             "\n  " & DIM & "Period limit " & RESET & $perPeriod & " LEZ / " & $periodHrs & "h" &
+             limitLines &
              "\n" &
              "\n  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
 
