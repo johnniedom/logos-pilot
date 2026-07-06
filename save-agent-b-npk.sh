@@ -7,17 +7,27 @@ set -o pipefail
 LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f 2>/dev/null | head -1)
 export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f 2>/dev/null | head -1)
 MODULES="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
-MODULES_B="/tmp/pilot-logoscore/modules-b"
+# NOT /tmp/pilot-logoscore/modules-b: Docker auto-creates missing bind-mount parents AS ROOT,
+# which left /tmp/pilot-logoscore root-owned — the host user then can't mkdir inside it.
+MODULES_B="/tmp/agent-b-modules"
 AGENT_B="/tmp/agent-b"
 CONTAINER="pilot-agent-b"
 
 # Clean any stale container of the same name, then prep B's module set.
+# The container runs as root, so its leftovers under /tmp are root-owned and a plain
+# rm as the host user fails (Permission denied) — delete them via a root container,
+# the same trick test-two-agents-docker.sh uses.
 docker rm -f $CONTAINER >/dev/null 2>&1
-rm -rf $MODULES_B $AGENT_B
+docker run --rm -v /tmp:/tmp ubuntu:22.04 rm -rf /tmp/agent-b /tmp/agent-b-modules /tmp/pilot-logoscore >/dev/null 2>&1
 mkdir -p $MODULES_B $AGENT_B
 for m in capability_module logos_execution_zone delivery_module chat_module pilot; do
   cp -r $MODULES/$m $MODULES_B/$m 2>/dev/null
 done
+# Fail fast if the copy didn't land — an empty /modules mount is exactly the
+# "Module not found in known modules" container failure.
+if [ ! -f "$MODULES_B/pilot/pilot_plugin.so" ]; then
+  echo "FAIL: module copy to $MODULES_B failed (is $MODULES populated?)"; exit 1
+fi
 
 echo "Starting Agent B (persistent)..."
 docker run -d \
@@ -50,11 +60,22 @@ sleep 3
 docker exec $CONTAINER timeout 30 $LOGOSCORE --config-dir /data/.logoscore call pilot initialize /data > /dev/null 2>&1
 sleep 2
 
-RAW=$(docker exec $CONTAINER timeout 30 $LOGOSCORE --config-dir /data/.logoscore call pilot getAgentNpk 2>&1)
-NPK=$(echo "$RAW" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null)
+# Module init inside the container can lag the first call — retry a few times.
+NPK=""
+for attempt in 1 2 3 4; do
+  RAW=$(docker exec $CONTAINER timeout 30 $LOGOSCORE --config-dir /data/.logoscore call pilot getAgentNpk 2>&1)
+  NPK=$(echo "$RAW" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null)
+  if [ -n "$NPK" ] && ! echo "$NPK" | grep -q '"error"'; then break; fi
+  NPK=""
+  echo "  (attempt $attempt failed, retrying...)"
+  docker exec $CONTAINER timeout 30 $LOGOSCORE --config-dir /data/.logoscore call pilot initialize /data > /dev/null 2>&1
+  sleep 5
+done
 
-if [ -z "$NPK" ] || echo "$NPK" | grep -q '"error"'; then
-  echo "FAIL: could not get NPK"; echo "  → $RAW"; exit 1
+if [ -z "$NPK" ]; then
+  echo "FAIL: could not get NPK"; echo "  → $RAW"
+  echo "--- container log tail ---"; docker logs $CONTAINER 2>&1 | tail -10
+  exit 1
 fi
 
 echo "$NPK" > ~/npk-b.json
