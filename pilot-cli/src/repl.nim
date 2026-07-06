@@ -51,10 +51,19 @@ proc formatJson(raw: string): string =
     if j.hasKey("balance") and j.hasKey("account"):
       let bal = j["balance"].getStr("")
       let balStr = if bal == "": "0" else: bal
+      # Render the REAL limits from metaStatus (fall back to defaults only if absent).
+      var perTx = 100
+      var perPeriod = 500
+      var periodHrs = 24
+      if j.hasKey("limits") and j["limits"].kind == JObject:
+        perTx = j["limits"].getOrDefault("per_tx").getInt(100)
+        perPeriod = j["limits"].getOrDefault("per_period").getInt(500)
+        let secs = j["limits"].getOrDefault("period_seconds").getInt(86400)
+        periodHrs = max(1, secs div 3600)
       return BOLD & "  Agent Wallet" & RESET &
              "\n  " & DIM & "Balance      " & RESET & BOLD & balStr & " LEZ" & RESET &
-             "\n  " & DIM & "Per-tx limit " & RESET & "100 LEZ" &
-             "\n  " & DIM & "Period limit " & RESET & "500 LEZ / 24h" &
+             "\n  " & DIM & "Per-tx limit " & RESET & $perTx & " LEZ" &
+             "\n  " & DIM & "Period limit " & RESET & $perPeriod & " LEZ / " & $periodHrs & "h" &
              "\n" &
              "\n  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
 
@@ -197,7 +206,12 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient> <amount> <reason>" & RESET
-    return formatJson(daemonCall(cfg, "walletSend", @[parts[1], parts[2], parts[3]]))
+    # A wallet send is a chain op: seconds in dev, minutes in real-proof mode. The default
+    # 10s daemonCall would silently time out (like the old storage bug) and gives no feedback.
+    # Spinner + wide window mirror the /upload+/download fix (real-proof also needs the module's
+    # transfer RPC timeout raised — see pilot_spending.cpp doPrivateTransfer).
+    return formatJson(daemonCallWithSpinner(cfg, "walletSend",
+      @[parts[1], parts[2], parts[3]], timeoutSec = 3600, label = "Sending"))
   of "/upload":
     if parts.len < 3:
       return RED & "  usage: /upload <path> <label>" & RESET
@@ -220,11 +234,14 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/approve":
     if parts.len < 2:
       return RED & "  usage: /approve <id>" & RESET
-    return daemonCall(cfg, "approveSpend", @[parts[1]])
+    # approveSpend executes the held transfer synchronously — same wide window + spinner as /send.
+    return daemonCallWithSpinner(cfg, "approveSpend", @[parts[1]],
+      timeoutSec = 3600, label = "Approving")
   of "/reject":
     if parts.len < 2:
       return RED & "  usage: /reject <id>" & RESET
-    return daemonCall(cfg, "rejectSpend", @[parts[1]])
+    return daemonCallWithSpinner(cfg, "rejectSpend", @[parts[1]],
+      timeoutSec = 20, label = "Rejecting")
   of "/quit", "/exit", "/q":
     return "\x00QUIT"
   else:
@@ -244,13 +261,16 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "send":
     let p = action.getOrDefault("params")
     if not p.isNil and p.kind == JObject:
-      return daemonCall(cfg, "walletSend",
+      # Same wide window + spinner as the /send slash path (chain op, not a 10s call).
+      return daemonCallWithSpinner(cfg, "walletSend",
         @[p.getOrDefault("recipient").getStr(""),
           $p.getOrDefault("amount").getInt(0),
-          p.getOrDefault("reason").getStr("")])
+          p.getOrDefault("reason").getStr("")],
+        timeoutSec = 3600, label = "Sending")
   of "approve":
     let id = action{"params", "id"}.getStr(action.getOrDefault("id").getStr(""))
-    return daemonCall(cfg, "approveSpend", @[id])
+    return daemonCallWithSpinner(cfg, "approveSpend", @[id],
+      timeoutSec = 3600, label = "Approving")
   of "upload":
     let p = action.getOrDefault("params")
     if not p.isNil:
@@ -287,7 +307,8 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
         timeoutSec = 45, label = "Downloading"))
   of "reject":
     let id = action{"params", "id"}.getStr("")
-    if id != "": return daemonCall(cfg, "rejectSpend", @[id])
+    if id != "": return daemonCallWithSpinner(cfg, "rejectSpend", @[id],
+      timeoutSec = 20, label = "Rejecting")
   of "pending":
     return formatJson(daemonCall(cfg, "getPendingSpends"))
   of "skills":
@@ -295,7 +316,10 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "status":
     return formatJson(daemonCall(cfg, "metaStatus"))
   of "discover":
-    return formatJson(daemonCall(cfg, "agentDiscover", @["pilot"]))
+    # Network discovery (subscribes + waits for cards) — match the /discover slash path's
+    # spinner + wider window; bare 10s can time out mid-discovery.
+    return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @["pilot"],
+      timeoutSec = 20, label = "Discovering agents"))
   of "none":
     return ""
   else:
@@ -428,10 +452,21 @@ proc runRepl*(cfg: Config, dataDir: string) =
         DIM & "Skip" & RESET & " — decide later (/pending)"
       ])
       if choice == 0:
-        let approveResult = daemonCall(gCfg, "approveSpend", @[reqId])
-        response = GREEN & BOLD & "  Transaction Approved" & RESET &
+        # approveSpend runs the transfer synchronously (minutes in real-proof) — wide window
+        # + spinner, and report the REAL outcome: it can come back TX_FAILED (e.g. stale notes),
+        # so never hardcode "executed".
+        let approveResult = daemonCallWithSpinner(gCfg, "approveSpend", @[reqId],
+          timeoutSec = 3600, label = "Approving")
+        var okStatus = false
+        try: okStatus = parseJson(approveResult){"status"}.getStr("") == "completed"
+        except: discard
+        let statusLine =
+          if okStatus: GREEN & "executed" & RESET
+          else: RED & "failed — no tokens moved (check /balance)" & RESET
+        response = (if okStatus: GREEN else: RED) & BOLD &
+                   (if okStatus: "  Transaction Approved" else: "  Transaction Failed") & RESET &
                    "\n  " & DIM & "ID      " & RESET & reqId &
-                   "\n  " & DIM & "Status  " & RESET & GREEN & "executed" & RESET
+                   "\n  " & DIM & "Status  " & RESET & statusLine
       elif choice == 1:
         discard daemonCall(gCfg, "rejectSpend", @[reqId])
         response = RED & BOLD & "  Transaction Rejected" & RESET &

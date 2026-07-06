@@ -38,11 +38,15 @@ static QVariant doPrivateTransfer(LogosAPIClient* wallet, const std::string& fro
     const bool hasKeys = recipient.find("nullifier_public_key") != std::string::npos
                       || recipient.find("viewing_public_key") != std::string::npos;
     const char* method = hasKeys ? "transfer_private" : "transfer_private_owned";
+    // A shielded transfer generates a real RISC0 proof when RISC0_DEV_MODE=0: ~44 min wall on a
+    // dev box (dev mode returns in seconds). The old 120s cap made every real-proof transfer
+    // report TX_FAILED at the 2-min mark while proving was still in flight. 60 min covers the
+    // documented ~44 min with margin; it is only a ceiling, so dev-mode transfers are unaffected.
     return wallet->invokeRemoteMethod(
         "logos_execution_zone", method,
         QString::fromStdString(fromId),
         QString::fromStdString(recipient),
-        QString::fromStdString(amountToHexLE(amount)), Timeout(120000));
+        QString::fromStdString(amountToHexLE(amount)), Timeout(3600000));
 }
 
 // A transfer result is JSON: {"error":"...","success":bool,"tx_hash":"..."}.

@@ -353,9 +353,13 @@ bool PilotImpl::initWallet() {
         if (cf.is_open()) {
             QJsonObject walletCfg;
             walletCfg["sequencer_addr"] = QString::fromStdString(sequencerAddr);
-            walletCfg["seq_poll_timeout"] = QString("30s");
-            walletCfg["seq_tx_poll_max_blocks"] = 15;
-            walletCfg["seq_poll_max_retries"] = 10;
+            // Inclusion polling must outlast real-proof block production (RISC0_DEV_MODE=0:
+            // blocks carry a real proof and are minutes apart). The old 15-block / 10-retry
+            // budget gave up long before a proven transfer landed. Wider budgets are only
+            // ceilings — dev-mode blocks are instant, so this doesn't slow the fast path.
+            walletCfg["seq_poll_timeout"] = QString("60s");
+            walletCfg["seq_tx_poll_max_blocks"] = 60;
+            walletCfg["seq_poll_max_retries"] = 60;
             walletCfg["seq_block_poll_max_amount"] = 100;
             walletCfg["initial_accounts"] = QJsonArray();
             cf << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();

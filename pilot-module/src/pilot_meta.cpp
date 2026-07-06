@@ -29,6 +29,14 @@ std::string PilotImpl::metaStatus() {
     root["balance"] = QJsonDocument::fromJson(QByteArray::fromStdString(balance)).object();
     root["pending"] = QJsonDocument::fromJson(QByteArray::fromStdString(pending)).object();
 
+    // Real spending limits (the CLI must render these, not a hardcoded 100/500 — they
+    // change with `pilot configure spend.*` and enforcement uses these exact fields).
+    QJsonObject limits;
+    limits["per_tx"] = static_cast<double>(spendLimitPerTx_);
+    limits["per_period"] = static_cast<double>(spendLimitPerPeriod_);
+    limits["period_seconds"] = static_cast<double>(spendPeriodSeconds_);
+    root["limits"] = limits;
+
     if (llm_ && llm_->isConfigured()) {
         QJsonObject llmObj;
         llmObj["provider"] = QString::fromStdString(llm_->providerName());

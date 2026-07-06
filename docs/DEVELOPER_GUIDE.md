@@ -439,7 +439,7 @@ The snippet above is the original shape; on the current stack apply these deltas
 | `PILOT_WAKU_MODE` | Core | `Core` (full relay) or `Edge` (lightweight) |
 | `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` to skip detection in WSL |
 | `PILOT_WAKU_ADDR` | /ip4/127.0.0.1/tcp/30303 | Static Waku peer address |
-| `PILOT_SEQUENCER_ADDR` | http://127.0.0.1:8080 | LEZ sequencer endpoint |
+| `PILOT_SEQUENCER_ADDR` | http://127.0.0.1:3040 | LEZ sequencer endpoint |
 
 ### Running the two-agent test
 

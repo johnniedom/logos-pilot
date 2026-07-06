@@ -46,7 +46,7 @@ call_b() {
 
 # Pre-flight
 if ! curl -s -o /dev/null -w "" http://127.0.0.1:3040/ 2>/dev/null; then
-  echo "  ✗ Sequencer not running on port 8080"
+  echo "  ✗ Sequencer not running on port 3040 (start it: ./run-sequencer.sh)"
   exit 1
 fi
 echo "  ✓ Sequencer reachable"
