@@ -525,6 +525,13 @@ bool PilotImpl::createIdentity() {
     sqlite3_finalize(stmt);
     persistSecretConfig("enc.priv", agentEncPriv_);
 
+    // Persist the wallet NOW, not only after funding: until a save, the fresh private
+    // account exists solely in the wallet module's memory, and fundAgentIfNeeded() is
+    // best-effort (dead sequencer / timeout / process kill => backupWallet() never runs).
+    // Losing the keys here is what made every subsequent boot's divergence guard reset
+    // and re-mint the identity (2026-07-07 identity churn).
+    backupWallet();
+
     return true;
 }
 

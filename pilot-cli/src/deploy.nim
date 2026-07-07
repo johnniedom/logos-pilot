@@ -1,4 +1,4 @@
-import strutils, os, rdstdin, terminal
+import strutils, os, rdstdin, terminal, json
 import rpc, daemon, selector, format
 
 const LLM_PROVIDERS = @[
@@ -50,13 +50,31 @@ proc runDeploy*(cfg: Config, network: string) =
   clearLine()
   recordStartTime(cfg)
 
-  discard daemonCall(cfg, "initialize", @[cfg.dataDir], timeoutSec = 30)
-  let npk = daemonCall(cfg, "getAgentNpk")
-  let accountId = daemonCall(cfg, "getAccountId")
+  # startDaemon already fires `initialize` inside the module; this one is only a safety
+  # net for the "module not responding yet" startup path. Short client timeout: a fresh
+  # wallet (create + register + fund) legitimately outlives any single RPC window, and a
+  # client-side timeout does NOT stop the module's work.
+  discard daemonCall(cfg, "initialize", @[cfg.dataDir], timeoutSec = 5)
+
+  # Poll for the identity instead of declaring failure while the module is still working.
+  # NEVER stop the daemon on a slow start: the fresh keys only reach disk after a wallet
+  # save, so a kill here orphans the identity and the next boot's divergence guard mints
+  # another one (the identity-churn bug of 2026-07-07).
+  var npk = ""
+  var accountId = ""
+  for i in 0 ..< 60:
+    spinTick("Creating identity (registration + chain scan can take a couple of minutes)", i)
+    npk = daemonCall(cfg, "getAgentNpk", timeoutSec = 5)
+    if npk != "" and not npk.contains("error"):
+      accountId = daemonCall(cfg, "getAccountId", timeoutSec = 5)
+      break
+    sleep(2000)
+  clearLine()
 
   if npk == "" or npk.contains("error"):
-    fail("Identity generation failed")
-    stopDaemon(cfg)
+    fail("Agent identity not ready after 2 minutes")
+    info("The module may still be initializing — daemon left running so no work is lost.")
+    info("Check again shortly with: pilot status")
     return
 
   ok("Agent identity created")
@@ -73,9 +91,20 @@ proc runDeploy*(cfg: Config, network: string) =
     if apiKey == "":
       # Masked input: the deploy screen is exactly what the demo video records, and a
       # plain readLine echoed the full key on screen (and into terminal scrollback).
-      apiKey = readPasswordFromStdin(DIM & "  API key: " & RESET).strip()
+      # A hidden prompt gives zero feedback, so a key pasted twice concatenates
+      # silently (a 102-char sk-…sk-…sk- landed in pilot.db this way). If the key's
+      # own prefix reappears inside the value, re-prompt; the echoed length lets a
+      # human catch anything the guard misses.
+      for _ in 0 ..< 3:
+        apiKey = readPasswordFromStdin(DIM & "  API key: " & RESET).strip()
+        let sig = if apiKey.len >= 6: apiKey[0 ..< 6] else: apiKey
+        if apiKey.len >= 12 and apiKey.find(sig, 1) > 0:
+          warn("That looks pasted more than once (" & $apiKey.len & " chars) — try once, then Enter")
+          apiKey = ""
+        else:
+          break
       if apiKey.len > 6:
-        echo DIM & "  API key: " & apiKey[0..4] & repeat("•", 12) & "  (hidden)" & RESET
+        echo DIM & "  API key: " & apiKey[0..4] & repeat("•", 12) & "  (" & $apiKey.len & " chars, hidden)" & RESET
 
     if apiKey != "":
       putEnv(envKey, apiKey)
@@ -127,8 +156,26 @@ proc runDeploy*(cfg: Config, network: string) =
 
   blankLine()
   step("Checking wallet...")
-  let balance = daemonCall(cfg, "walletBalance")
+  # Funding (register + pinata claim + shielded transfer) runs inside the module and the
+  # wallet only hits disk once it COMPLETES. Wait for it honestly instead of printing a
+  # premature 0 and moving on — interrupted funding is how identities were lost.
+  var balance = ""
+  var funded = false
+  for i in 0 ..< 90:
+    spinTick("Funding agent (waiting for the on-chain claim to land)", i)
+    balance = daemonCall(cfg, "walletBalance", timeoutSec = 10)
+    try:
+      let bj = parseJson(balance)
+      if bj.hasKey("balance") and bj["balance"].getStr("0") notin ["", "0"]:
+        funded = true
+        break
+    except: discard
+    sleep(2000)
+  clearLine()
   info(balance)
+  if not funded:
+    warn("Balance still 0 — funding may still be running, or the sequencer is unreachable")
+    info("The daemon keeps working in the background; re-check with: pilot status")
 
   blankLine()
   step("Publishing Agent Card...")
@@ -148,6 +195,9 @@ proc runDeploy*(cfg: Config, network: string) =
   kv("Network", network)
   blankLine()
   echo "  Run " & BOLD & "pilot chat" & RESET & " to start talking to your agent"
+  echo DIM & "  The agent daemon stays running; pilot chat / pilot status attach to it." & RESET
   blankLine()
 
-  stopDaemon(cfg)
+  # Deliberately NOT stopping the daemon here. stopDaemon() escalates to pkill after 5s,
+  # and a kill while funding / wallet writes are in flight corrupts wallet_storage.json
+  # or drops the unsaved account keys — the next boot then resets the identity.
