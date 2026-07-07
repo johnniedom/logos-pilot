@@ -19,7 +19,7 @@ docker-compose up -d
 
 Verify both are running:
 ```bash
-curl -s http://localhost:8080/        # sequencer — should return 404 (alive)
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3040/   # sequencer — any HTTP code = alive; 000 = down
 docker ps                              # should show pilot-nwaku + sequencer
 ```
 
@@ -149,7 +149,7 @@ Expected: 86/86 pass.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PILOT_DATA_DIR` | `/tmp/pilot-data` | Agent data directory (SQLite, wallet, logs) |
-| `PILOT_SEQUENCER_ADDR` | `http://127.0.0.1:8080` | LEZ sequencer endpoint |
+| `PILOT_SEQUENCER_ADDR` | `http://127.0.0.1:3040` | LEZ sequencer endpoint |
 | `PILOT_WAKU_ADDR` | `/ip4/127.0.0.1/tcp/30303` | Waku static peer |
 | `PILOT_TCP_PORT` | `60000` | Waku relay TCP port |
 | `PILOT_WAKU_MODE` | `Core` | `Core` (full relay) or `Edge` (lightweight) |

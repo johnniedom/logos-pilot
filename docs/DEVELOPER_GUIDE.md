@@ -381,7 +381,7 @@ docker run --rm -d \
   -v $MODULES_B:/modules:ro \
   -v /tmp/agent-b:/data \
   -e LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f | head -1) \
-  -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:8080 \
+  -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
   -e PILOT_WAKU_ADDR=/ip4/host.docker.internal/tcp/30303 \
   --add-host=host.docker.internal:host-gateway \
   ubuntu:22.04 \

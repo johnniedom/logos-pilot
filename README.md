@@ -74,7 +74,7 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 
 | Script | When to run | What it does |
 |--------|------------|--------------|
-| `run-sequencer.sh` | First | Starts LEZ sequencer in Docker on port 8080 |
+| `run-sequencer.sh` | First | Boots the standalone LEZ sequencer in dev mode on **:3040** (the endpoint the wallet reads), fresh genesis each start — needs a local logos-execution-zone build (see the script header) |
 | `docker-compose up -d` | First | Starts Waku node on port 30303 |
 | `setup-modules.sh` | After build | Installs all modules from nix cache to `/tmp/pilot-logoscore/modules` |
 | `demo.sh` | Anytime | Automated demo: build + verify + smoke test |
@@ -490,7 +490,7 @@ nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 Tests all 28 methods across phases 1-5 against a live sequencer.
 
 ```bash
-# Requires: sequencer running on port 8080, modules installed
+# Requires: sequencer running on port 3040 (./run-sequencer.sh), modules installed
 ./setup-modules.sh   # one-time: installs all modules from nix cache
 ./test-phases.sh     # runs all 28 tests
 ```

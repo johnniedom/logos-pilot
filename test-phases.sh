@@ -47,8 +47,8 @@ echo "╚═══════════════════════�
 echo ""
 
 # Pre-flight checks
-if ! curl -s -o /dev/null -w "" http://127.0.0.1:8080/ 2>/dev/null; then
-  echo "  ✗ Sequencer not running on port 8080"
+if ! curl -s -o /dev/null -w "" http://127.0.0.1:3040/ 2>/dev/null; then
+  echo "  ✗ Sequencer not running on port 3040"
   echo "    Run ./run-sequencer.sh first"
   exit 1
 fi

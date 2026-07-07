@@ -1,10 +1,39 @@
-#!/bin/bash
-docker run --rm -p 8080:8080 \
-  -e SEQUENCER_LISTEN_ADDR=0.0.0.0:8080 \
-  -e SEQUENCER_DB_PATH=/data/sequencer.db \
-  -e SEQUENCER_SIGNING_KEY_PATH=/data/sequencer.key \
-  -e SEQUENCER_INITIAL_BALANCE=1000 \
-  -e SEQUENCER_CHANNEL_ID=6d656d636f696e00000000000000000000000000000000000000000000000001 \
-  -v sequencer-data:/data \
-  --entrypoint /usr/bin/logos-blockchain-demo-sequencer \
-  ghcr.io/logos-blockchain/logos-blockchain:devnet
+#!/usr/bin/env bash
+# Boot the standalone LEZ sequencer in DEV mode on :3040 — the endpoint the pilot
+# wallet actually reads (PILOT_SEQUENCER_ADDR defaults to http://127.0.0.1:3040).
+#
+# HISTORY: this script used to boot the old Docker demo-sequencer on :8080 — a
+# different service the wallet never talks to, so funding silently failed and
+# balances stayed 0 forever. If you are debugging "balance 0", first confirm your
+# sequencer came from THIS script and answers on :3040.
+#
+# PREREQUISITES (one-time — the LEZ sequencer is a separate project, not bundled here):
+#   1. Clone github.com/logos-blockchain/logos-execution-zone at the rev whose circuits
+#      match the installed pilot wallet module, and build the standalone service:
+#        cargo build --release --features standalone -p sequencer_service
+#   2. Nothing else — dev mode (RISC0_DEV_MODE=1) fakes proofs, no prover needed.
+#      For the real-proof demo use ./run-sequencer-realproof.sh instead.
+#
+# Fresh genesis on every start: rocksdb state is wiped so a wiped pilot wallet and a
+# fresh chain always agree. A long-lived chain also makes every cold module boot
+# replay thousands of blocks before the wallet answers — restart fresh instead.
+set -euo pipefail
+
+LEZ="${LEZ:-$HOME/dev/logos/logos-execution-zone}"
+export RISC0_DEV_MODE=1
+export RUST_LOG="${RUST_LOG:-info}"
+
+# Circuits: honor an exported override, else find a build in the nix store.
+if [ -z "${LOGOS_BLOCKCHAIN_CIRCUITS:-}" ]; then
+  LOGOS_BLOCKCHAIN_CIRCUITS=$(find /nix/store -maxdepth 1 -name '*logos-blockchain-circuits*' -type d 2>/dev/null | head -1)
+fi
+[ -n "$LOGOS_BLOCKCHAIN_CIRCUITS" ] || { echo "ERROR: set LOGOS_BLOCKCHAIN_CIRCUITS=/path/to/logos-blockchain-circuits"; exit 1; }
+export LOGOS_BLOCKCHAIN_CIRCUITS
+
+SEQ="$LEZ/target/release/sequencer_service"
+[ -x "$SEQ" ] || { echo "ERROR: $SEQ not built — see Prerequisites (set LEZ=/path/to/logos-execution-zone)"; exit 1; }
+
+cd "$LEZ"
+rm -rf ./rocksdb ./sequencer/service/rocksdb ./bedrock_signing_key ./sequencer/service/bedrock_signing_key 2>/dev/null || true
+echo "Booting LEZ sequencer_service in DEV mode on :3040 (fresh genesis, circuits: $LOGOS_BLOCKCHAIN_CIRCUITS)"
+exec "$SEQ" sequencer/service/configs/debug/sequencer_config.json
