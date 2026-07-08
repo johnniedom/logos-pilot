@@ -172,7 +172,7 @@ const HELP_TEXT = """
   """ & BOLD & "Commands" & RESET & """
   /balance                     Check wallet balance
   /history                     Transaction history
-  /send <to> <amt> <reason>    Send LEZ tokens
+  /send <to> <amt> <reason>    Send LEZ tokens (<to> = keys JSON or @file, e.g. @~/npk-b.json)
   /approve <id>                Approve pending spend
   /reject <id>                 Reject pending spend
   /upload <path> <label>       Upload a file
@@ -186,7 +186,9 @@ const HELP_TEXT = """
 """
 
 proc dispatchSlash(cfg: Config, input: string): string =
-  let parts = input.strip().split(maxsplit = 3)
+  # splitWhitespace collapses runs of spaces: "/approve  <id>" (double space — easy to
+  # type, seen in the wild) must not turn parts[1] into "" and silently no-op.
+  let parts = input.strip().splitWhitespace(maxsplit = 3)
   if parts.len == 0: return ""
   let cmd = parts[0].toLowerAscii()
 
@@ -210,13 +212,29 @@ proc dispatchSlash(cfg: Config, input: string): string =
     return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @[topic], timeoutSec = 20, label = "Discovering agents"))
   of "/send":
     if parts.len < 4:
-      return RED & "  usage: /send <recipient> <amount> <reason>" & RESET
+      return RED & "  usage: /send <recipient|@keys-file> <amount> <reason>" & RESET
+    # Recipient must be the FULL keys JSON (~200 chars) — but pasting that into the line
+    # editor gets mangled (head eaten -> LLM chat; corrupted keys -> KeyNotFoundError at
+    # approve). @file sidesteps the paste entirely:  /send @~/npk-b.json 20 thanks
+    var recipient = parts[1]
+    if recipient.startsWith("@"):
+      let path = expandTilde(recipient[1..^1])
+      if not fileExists(path):
+        return RED & "  recipient file not found: " & path & RESET
+      recipient = ""
+      for c in readFile(path):
+        if c notin Whitespace: recipient.add(c)
+      if recipient == "":
+        return RED & "  recipient file is empty: " & path & RESET
     # A wallet send is a chain op: seconds in dev, minutes in real-proof mode. The default
     # 10s daemonCall would silently time out (like the old storage bug) and gives no feedback.
     # Spinner + wide window mirror the /upload+/download fix (real-proof also needs the module's
     # transfer RPC timeout raised — see pilot_spending.cpp doPrivateTransfer).
-    return formatJson(daemonCallWithSpinner(cfg, "walletSend",
-      @[parts[1], parts[2], parts[3]], timeoutSec = 3600, label = "Sending"))
+    let sendResp = daemonCallWithSpinner(cfg, "walletSend",
+      @[recipient, parts[2], parts[3]], timeoutSec = 3600, label = "Sending")
+    if sendResp.strip() == "":
+      return RED & "  no response from agent — daemon busy or down (try /status)" & RESET
+    return formatJson(sendResp)
   of "/upload":
     if parts.len < 3:
       return RED & "  usage: /upload <path> <label>" & RESET
@@ -240,8 +258,13 @@ proc dispatchSlash(cfg: Config, input: string): string =
     if parts.len < 2:
       return RED & "  usage: /approve <id>" & RESET
     # approveSpend executes the held transfer synchronously — same wide window + spinner as /send.
-    return daemonCallWithSpinner(cfg, "approveSpend", @[parts[1]],
+    # Never answer with silence: an empty reply reads as "nothing happened" when the module
+    # may be busy, down, or the request already terminal.
+    let approveResp = daemonCallWithSpinner(cfg, "approveSpend", @[parts[1]],
       timeoutSec = 3600, label = "Approving")
+    if approveResp.strip() == "":
+      return RED & "  no response from agent — daemon busy or down (try /status)" & RESET
+    return formatJson(approveResp)
   of "/reject":
     if parts.len < 2:
       return RED & "  usage: /reject <id>" & RESET

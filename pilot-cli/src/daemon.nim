@@ -49,8 +49,18 @@ proc startDaemon*(cfg: Config): bool =
   # the parent bash exit (required when launched from Nim execProcess).
   # Start daemon without -m to avoid loading all modules simultaneously.
   # Modules are loaded individually below with delays to prevent crashes.
+  #
+  # RISC0 env is baked into the script: the wallet (inside logos_execution_zone)
+  # proves transfers in-process, and a daemon booted from a bare shell without
+  # RISC0_DEV_MODE=1 silently grinds a REAL proof per transfer (~45 min, GBs of
+  # RAM) — seen live 2026-07-08. Passthrough keeps real-proof demos possible:
+  # export RISC0_DEV_MODE=0 before deploy and it is honored.
   writeFile(scriptFile,
     "#!/bin/bash\n" &
+    "export RISC0_DEV_MODE=\"${RISC0_DEV_MODE:-1}\"\n" &
+    "if [ -z \"$LOGOS_BLOCKCHAIN_CIRCUITS\" ]; then\n" &
+    "  export LOGOS_BLOCKCHAIN_CIRCUITS=$(find /nix/store -maxdepth 1 -name '*logos-blockchain-circuits*' -type d 2>/dev/null | head -1)\n" &
+    "fi\n" &
     "setsid " & quoteShell(cfg.logoscore) &
     " --config-dir " & quoteShell(cfg.configDir) &
     " -D -m " & quoteShell(cfg.modulePath) &
