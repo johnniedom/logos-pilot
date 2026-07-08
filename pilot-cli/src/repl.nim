@@ -172,7 +172,7 @@ const HELP_TEXT = """
   """ & BOLD & "Commands" & RESET & """
   /balance                     Check wallet balance
   /history                     Transaction history
-  /send <to> <amt> <reason>    Send LEZ tokens (<to> = keys JSON or @file, e.g. @~/npk-b.json)
+  /send <to> <amt> <reason>    Send LEZ tokens (<to> = @contact, @keys-file, or raw keys JSON)
   /approve <id>                Approve pending spend
   /reject <id>                 Reject pending spend
   /upload <path> <label>       Upload a file
@@ -218,9 +218,14 @@ proc dispatchSlash(cfg: Config, input: string): string =
     # approve). @file sidesteps the paste entirely:  /send @~/npk-b.json 20 thanks
     var recipient = parts[1]
     if recipient.startsWith("@"):
-      let path = expandTilde(recipient[1..^1])
+      # @name resolves a saved contact first (<dataDir>/contacts/<name>.json), then a
+      # literal file path — so the demo command is just: /send @b 20 thanks
+      var path = cfg.dataDir / "contacts" / (recipient[1..^1] & ".json")
       if not fileExists(path):
-        return RED & "  recipient file not found: " & path & RESET
+        path = expandTilde(recipient[1..^1])
+      if not fileExists(path):
+        return RED & "  no contact or keys file named " & recipient[1..^1] &
+               DIM & "  (save one: " & cfg.dataDir & "/contacts/<name>.json)" & RESET
       recipient = ""
       for c in readFile(path):
         if c notin Whitespace: recipient.add(c)
