@@ -269,12 +269,38 @@ proc dispatchSlash(cfg: Config, input: string): string =
       timeoutSec = 3600, label = "Approving")
     if approveResp.strip() == "":
       return RED & "  no response from agent — daemon busy or down (try /status)" & RESET
-    return formatJson(approveResp)
+    # approveSpend returns a bare bool over the wire: true = approved AND the
+    # transfer executed; false = not found / already decided / expired / transfer
+    # failed (the module can't say which — point at /pending and /balance).
+    case approveResp.strip()
+    of "true":
+      return GREEN & BOLD & "  Transaction Approved" & RESET &
+             "\n  " & DIM & "ID      " & RESET & parts[1] &
+             "\n  " & DIM & "Status  " & RESET & GREEN & "executed" & RESET
+    of "false":
+      return RED & BOLD & "  Approve Failed" & RESET &
+             "\n  " & DIM & "ID      " & RESET & parts[1] &
+             "\n  " & DIM & "Status  " & RESET & RED &
+             "not approved — request unknown, already decided, expired, or the transfer failed" &
+             RESET & "\n  " & DIM & "Check   " & RESET & "/pending and /balance"
+    else:
+      return formatJson(approveResp)
   of "/reject":
     if parts.len < 2:
       return RED & "  usage: /reject <id>" & RESET
-    return daemonCallWithSpinner(cfg, "rejectSpend", @[parts[1]],
+    # rejectSpend is a bare bool too — before the bool fix this printed nothing at
+    # all on success ("" reply), which read as the command being ignored.
+    let rejectResp = daemonCallWithSpinner(cfg, "rejectSpend", @[parts[1]],
       timeoutSec = 20, label = "Rejecting")
+    case rejectResp.strip()
+    of "true":
+      return RED & BOLD & "  Transaction Rejected" & RESET &
+             "\n  " & DIM & "ID      " & RESET & parts[1] &
+             "\n  " & DIM & "Status  " & RESET & "cancelled — no tokens moved"
+    of "false":
+      return RED & "  reject failed — request unknown or already decided (see /pending)" & RESET
+    else:
+      return formatJson(rejectResp)
   of "/quit", "/exit", "/q":
     return "\x00QUIT"
   else:
@@ -302,8 +328,15 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
         timeoutSec = 3600, label = "Sending")
   of "approve":
     let id = action{"params", "id"}.getStr(action.getOrDefault("id").getStr(""))
-    return daemonCallWithSpinner(cfg, "approveSpend", @[id],
+    # Bool wire result — translate for the owner (and the LLM feedback loop, which
+    # would otherwise be told the bare word "true"/"false" with no context).
+    let r = daemonCallWithSpinner(cfg, "approveSpend", @[id],
       timeoutSec = 3600, label = "Approving")
+    case r.strip()
+    of "true": return "approved — transaction " & id & " executed"
+    of "false": return "approve failed — request " & id &
+                       " unknown, already decided, expired, or the transfer failed"
+    else: return r
   of "upload":
     let p = action.getOrDefault("params")
     if not p.isNil:
@@ -490,9 +523,14 @@ proc runRepl*(cfg: Config, dataDir: string) =
         # so never hardcode "executed".
         let approveResult = daemonCallWithSpinner(gCfg, "approveSpend", @[reqId],
           timeoutSec = 3600, label = "Approving")
-        var okStatus = false
-        try: okStatus = parseJson(approveResult){"status"}.getStr("") == "completed"
-        except: discard
+        # approveSpend returns a bare bool ("true"/"false") over the wire — true
+        # means approved AND executed. (This used to look for {"status":"completed"},
+        # a shape the daemon never sends, so every successful approval rendered as
+        # "Transaction Failed" while the tokens had in fact moved.)
+        var okStatus = approveResult.strip() == "true"
+        if not okStatus:
+          try: okStatus = parseJson(approveResult){"status"}.getStr("") == "completed"
+          except: discard
         let statusLine =
           if okStatus: GREEN & "executed" & RESET
           else: RED & "failed — no tokens moved (check /balance)" & RESET

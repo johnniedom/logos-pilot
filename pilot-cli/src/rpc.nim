@@ -66,7 +66,13 @@ proc extractDaemonResult*(raw: string): string =
       if start >= 0 and finish > start:
         let j = parseJson(raw[start .. finish])
         if j.hasKey("result"):
-          return j["result"].getStr()
+          # Bool-returning module methods (approveSpend/rejectSpend/...) arrive as
+          # JSON booleans; getStr() on those collapses to "" and callers misread a
+          # successful approval as "no response from agent" / "Transaction Failed".
+          # Surface non-string results as their JSON text ("true", "false", ...).
+          if j["result"].kind == JString:
+            return j["result"].getStr()
+          return $j["result"]
     except JsonParsingError:
       discard
     let resIdx = raw.find("\"result\":\"")
