@@ -7,6 +7,7 @@ A Logos Core module that runs an autonomous AI agent with native access to the f
 ## Documentation
 
 - [Architecture](docs/architecture.md) · [Security Model](docs/security-model.md) · [Agent-to-Agent (A2A) Protocol](docs/agent-to-agent.md) · [Payment Model](docs/payment-model.md) · [Owner Channel](docs/owner-channel.md) · [Skill Interface](docs/skill-interface.md)
+- Guides: [Owner Guide](docs/owner-guide.md) (chatting, contacts, approvals) · [Deployment Guide](docs/deployment-guide.md) · [Developer Guide](docs/DEVELOPER_GUIDE.md) · **[Troubleshooting](docs/troubleshooting.md)** (symptom-indexed field fixes)
 - **[Known Limitations](KNOWN_LIMITATIONS.md)** — the complete, honest list of what Pilot does not (yet) do, with upstream-gap evidence and CI/testnet status. Read this first.
 
 ## Quick Start
@@ -74,7 +75,7 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 
 | Script | When to run | What it does |
 |--------|------------|--------------|
-| `run-sequencer.sh` | First | Boots the standalone LEZ sequencer in dev mode on **:3040** (the endpoint the wallet reads), fresh genesis each start — needs a local logos-execution-zone build (see the script header) |
+| `run-sequencer.sh` | First | Boots the standalone LEZ sequencer in dev mode on **:3040** (the endpoint the wallet reads), **fresh genesis each start — an already-funded wallet goes stale with the wiped chain and must be re-funded** (to keep a funded wallet, boot without the wipe: see [docs/troubleshooting.md](docs/troubleshooting.md)) — needs a local logos-execution-zone build (see the script header) |
 | `docker-compose up -d` | First | Starts Waku node on port 30303 |
 | `setup-modules.sh` | After build | Installs all modules from nix cache to `/tmp/pilot-logoscore/modules` |
 | `demo.sh` | Anytime | Automated demo: build + verify + smoke test |
@@ -415,8 +416,10 @@ logoscore call pilot metaSkills
 # Check wallet balance
 logoscore call pilot walletBalance
 
-# Send tokens (below threshold = auto, above = needs approval)
-logoscore call pilot walletSend recipientNpk 50 "payment for services"
+# Send tokens (below threshold = auto, above = needs approval).
+# The recipient is the payee's FULL keys JSON — a bare hex account id only
+# works for accounts this wallet owns (docs/troubleshooting.md "TX_FAILED").
+logoscore call pilot walletSend '{"nullifier_public_key":"<npk-hex>","viewing_public_key":"<vpk-hex>"}' 50 "payment for services"
 
 # Upload a file to encrypted storage
 logoscore call pilot storageUpload /path/to/file.txt "my document"
@@ -458,8 +461,10 @@ Deploy walks you through:
 
 Chat features:
 - Conversation memory (20 turns)
-- Slash commands (`/balance`, `/send`, `/skills`, `/status`, `/discover`, `/help`)
-- Natural language → action dispatch via LLM
+- Slash commands (`/balance`, `/send`, `/approve`, `/reject`, `/pending`, `/upload`, `/download`, `/files`, `/skills`, `/status`, `/discover`, `/help`)
+- **@contacts** — save a payee's keys JSON once as `~/.pilot/contacts/<name>.json`, then `/send @name 20 reason` or plain "send 20 LEZ to @name" both resolve it (see [Owner Guide](docs/owner-guide.md))
+- Interactive approval prompt when a send exceeds the spending limit (Approve / Reject / Skip)
+- Natural language → action dispatch via LLM — with a guardrail: lines containing raw wallet-key material are never passed through the LLM (retyped keys arrive corrupted)
 - Formatted output for skills, balance, status
 - Animated spinner during LLM calls
 
