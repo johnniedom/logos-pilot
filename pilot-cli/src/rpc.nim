@@ -87,6 +87,28 @@ proc extractDaemonResult*(raw: string): string =
     return raw[idx + 8 .. ^1].strip()
   return raw.strip()
 
+# Resolve a send recipient: "@name" -> <dataDir>/contacts/<name>.json, else
+# "@path" -> literal keys file, else pass the string through untouched. File
+# contents are stripped of ALL whitespace (a trailing newline inside the keys
+# JSON reached the wallet verbatim once). Returns (keys, "") or ("", error).
+# Shared by the /send command and the LLM send action so raw key material never
+# has to travel through (and be retyped by) the model.
+proc resolveRecipient*(cfg: Config, recipient: string): tuple[keys, err: string] =
+  if not recipient.startsWith("@"):
+    return (recipient, "")
+  var path = cfg.dataDir / "contacts" / (recipient[1..^1] & ".json")
+  if not fileExists(path):
+    path = expandTilde(recipient[1..^1])
+  if not fileExists(path):
+    return ("", "no contact or keys file named " & recipient[1..^1] &
+            " (save one: " & cfg.dataDir / "contacts" & "/<name>.json)")
+  var keys = ""
+  for c in readFile(path):
+    if c notin Whitespace: keys.add(c)
+  if keys == "":
+    return ("", "recipient file is empty: " & path)
+  return (keys, "")
+
 proc pilotCall*(cfg: Config, methodExpr: string): string =
   let fullCmd = "pilot." & methodExpr
   result = execProcess(cfg.logoscore,

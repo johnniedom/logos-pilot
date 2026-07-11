@@ -29,4 +29,35 @@ doAssert extractDaemonResult(
 # Non-envelope text falls through stripped.
 doAssert extractDaemonResult("  plain text  ") == "plain text"
 
+# ── resolveRecipient: the one seam between "@b" and the wallet ──
+import std/[os, strutils]
+
+let tmp = getTempDir() / "pilot-test-contacts"
+removeDir(tmp)
+createDir(tmp / "contacts")
+var cfg = Config(dataDir: tmp)
+
+# Non-@ strings pass through untouched (raw keys JSON typed directly).
+doAssert resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\"}") ==
+  ("{\"nullifier_public_key\":\"aa\"}", "")
+
+# @name resolves <dataDir>/contacts/<name>.json with ALL whitespace stripped —
+# a trailing newline inside the file once reached the wallet verbatim.
+writeFile(tmp / "contacts" / "b.json",
+  "{\"nullifier_public_key\": \"aa\",\n \"viewing_public_key\": \"bb\"}\n")
+doAssert resolveRecipient(cfg, "@b") ==
+  ("{\"nullifier_public_key\":\"aa\",\"viewing_public_key\":\"bb\"}", "")
+
+# Unknown contact -> error naming what was looked for, no keys.
+let (noKeys, noErr) = resolveRecipient(cfg, "@nobody")
+doAssert noKeys == ""
+doAssert "nobody" in noErr
+
+# Empty contact file -> error, no keys.
+writeFile(tmp / "contacts" / "empty.json", "  \n ")
+let (emptyKeys, emptyErr) = resolveRecipient(cfg, "@empty")
+doAssert emptyKeys == ""
+doAssert "empty" in emptyErr
+
+removeDir(tmp)
 echo "test_rpc: all assertions passed"

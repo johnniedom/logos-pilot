@@ -215,22 +215,10 @@ proc dispatchSlash(cfg: Config, input: string): string =
       return RED & "  usage: /send <recipient|@keys-file> <amount> <reason>" & RESET
     # Recipient must be the FULL keys JSON (~200 chars) — but pasting that into the line
     # editor gets mangled (head eaten -> LLM chat; corrupted keys -> KeyNotFoundError at
-    # approve). @file sidesteps the paste entirely:  /send @~/npk-b.json 20 thanks
-    var recipient = parts[1]
-    if recipient.startsWith("@"):
-      # @name resolves a saved contact first (<dataDir>/contacts/<name>.json), then a
-      # literal file path — so the demo command is just: /send @b 20 thanks
-      var path = cfg.dataDir / "contacts" / (recipient[1..^1] & ".json")
-      if not fileExists(path):
-        path = expandTilde(recipient[1..^1])
-      if not fileExists(path):
-        return RED & "  no contact or keys file named " & recipient[1..^1] &
-               DIM & "  (save one: " & cfg.dataDir & "/contacts/<name>.json)" & RESET
-      recipient = ""
-      for c in readFile(path):
-        if c notin Whitespace: recipient.add(c)
-      if recipient == "":
-        return RED & "  recipient file is empty: " & path & RESET
+    # approve). @contact/@file sidestep the paste entirely:  /send @b 20 thanks
+    let (recipient, rerr) = resolveRecipient(cfg, parts[1])
+    if rerr != "":
+      return RED & "  " & rerr & RESET
     # A wallet send is a chain op: seconds in dev, minutes in real-proof mode. The default
     # 10s daemonCall would silently time out (like the old storage bug) and gives no feedback.
     # Spinner + wide window mirror the /upload+/download fix (real-proof also needs the module's
@@ -320,9 +308,17 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "send":
     let p = action.getOrDefault("params")
     if not p.isNil and p.kind == JObject:
+      # Resolve @contacts here too: the owner says "send 16 to @b" and the LLM
+      # echoes "@b" — previously that reached the wallet literally and failed.
+      # This is the ONLY safe recipient form on the LLM path: raw keys JSON
+      # retyped by the model arrives corrupted (TX_FAILED a live transfer
+      # 2026-07-11, request 8ba72d58508f8cc).
+      let (recipient, rerr) = resolveRecipient(cfg, p.getOrDefault("recipient").getStr(""))
+      if rerr != "":
+        return "send failed — " & rerr
       # Same wide window + spinner as the /send slash path (chain op, not a 10s call).
       return daemonCallWithSpinner(cfg, "walletSend",
-        @[p.getOrDefault("recipient").getStr(""),
+        @[recipient,
           $p.getOrDefault("amount").getInt(0),
           p.getOrDefault("reason").getStr("")],
         timeoutSec = 3600, label = "Sending")
@@ -474,6 +470,15 @@ proc runRepl*(cfg: Config, dataDir: string) =
 
     if line.startsWith("/"):
       response = dispatchSlash(gCfg, line)
+    elif line.contains("nullifier_public_key") or line.contains("viewing_public_key"):
+      # Raw key material must never travel through the LLM: the model retypes
+      # long hex and corrupts it, and a keys blob landing here usually means a
+      # long paste lost its "/send" head to the line editor's input flush
+      # (both burned a live transfer 2026-07-11 — TX_FAILED on garbage keys).
+      response = RED & "  that looks like wallet keys — not passing them to the LLM." & RESET &
+                 "\n  " & DIM & "Use   " & RESET & "/send @<contact> <amount> <reason>" &
+                 "\n  " & DIM & "Setup " & RESET & "save the keys once: " & gCfg.dataDir & "/contacts/<name>.json" &
+                 "\n  " & DIM & "Paste " & RESET & DIM & "if you pasted a /send line, retry after the '>' prompt is idle" & RESET
     else:
       let raw = daemonCallWithSpinner(gCfg, "processOwnerMessage", @[line], timeoutSec = 30)
       var wasAction = false
