@@ -8,6 +8,18 @@ echo ""
 
 LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f 2>/dev/null | head -1)
 export LOGOS_HOST_PATH=$(find /nix/store -maxdepth 3 -name logos_host -path "*liblogos-bin*" -type f 2>/dev/null | head -1)
+
+# Agent B's container gets RISC0_DEV_MODE=1 + circuits via docker -e flags; the
+# HOST Agent A only inherits the launching shell. A bare shell means the wallet
+# side proves for real / can't find its circuits and the pilot module dies or
+# wedges on initialize — every A call then reads "(empty response)" while B is
+# fine (seen live 2026-07-11). Bake the env like pilot-cli's .start-daemon.sh.
+export RISC0_DEV_MODE="${RISC0_DEV_MODE:-1}"
+if [ -z "${LOGOS_BLOCKCHAIN_CIRCUITS:-}" ]; then
+  export LOGOS_BLOCKCHAIN_CIRCUITS=$(find /nix/store -maxdepth 1 -name '*logos-blockchain-circuits*' -type d 2>/dev/null | head -1)
+fi
+[ -d "$HOME/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu" ] && \
+  export PATH="$HOME/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:$PATH"
 MODULES="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
 MODULES_B="/tmp/pilot-logoscore/modules-b"   # scratch copy for Agent B (repopulated from $MODULES below)
 
@@ -35,7 +47,9 @@ check() {
 }
 
 call_a() {
-  local raw=$(timeout 30 $LOGOSCORE $CFG_A call pilot "$@" 2>&1)
+  # 120s to match call_b: a cold agent replays the whole chain inside initialize,
+  # and 30s turned a long chain into bogus "(empty response)" failures.
+  local raw=$(timeout 120 $LOGOSCORE $CFG_A call pilot "$@" 2>&1)
   echo "$raw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "$raw"
 }
 
@@ -94,6 +108,11 @@ echo "  OK    Agent A modules loaded"
 # ═══════════════════════════════════════
 echo ""
 echo "── Starting Agent B (Docker) ──"
+# A stale pilot-agent-b (e.g. --rm never fired because Docker Desktop shut down
+# uncleanly) holds the name and makes docker run fail silently into /dev/null;
+# the status check then reports "did not start" while docker logs shows the OLD
+# container happily syncing — remove any corpse first.
+docker rm -f $CONTAINER >/dev/null 2>&1
 docker run --rm -d \
   --name $CONTAINER \
   -v /nix/store:/nix/store:ro \
@@ -130,15 +149,39 @@ echo ""
 echo "── Phase 1: Initialize Both Agents ──"
 
 R=$(call_a initialize $AGENT_A)
+if [ -z "$R" ]; then   # same slow-cold-boot tolerance as Agent B below
+  for i in $(seq 1 18); do
+    sleep 10
+    R=$(call_a getAccountId)
+    [ -n "$R" ] && break
+  done
+fi
 check "[A] initialize" "$R"
 
 R=$(call_b initialize /data)
+# A cold Agent B self-funds AND replays the whole chain inside initialize — on a
+# loaded box (sequencer + host daemon + Docker) that can outlast one call window
+# and reply empty while B is actually fine. Poll until the identity answers
+# instead of failing the run (and cascading NPK_B="" into bogus
+# "invalid recipient key" failures downstream).
+if [ -z "$R" ]; then
+  for i in $(seq 1 18); do
+    sleep 10
+    R=$(call_b getAccountId)
+    [ -n "$R" ] && break
+  done
+fi
 check "[B] initialize" "$R"
 
 NPK_A=$(call_a getAgentNpk)
 check "[A] getAgentNpk" "$NPK_A"
 
 NPK_B=$(call_b getAgentNpk)
+for i in $(seq 1 6); do
+  [ -n "$NPK_B" ] && break
+  sleep 10
+  NPK_B=$(call_b getAgentNpk)
+done
 check "[B] getAgentNpk" "$NPK_B"
 
 ACCOUNT_A=$(call_a getAccountId)

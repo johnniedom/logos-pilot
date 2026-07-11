@@ -1,6 +1,8 @@
 result
 result-*
 *.bak
+# nim c -r drops the compiled test binary next to its source
+pilot-cli/tests/test_rpc
 build/
 generated_code/
 *.lgx
