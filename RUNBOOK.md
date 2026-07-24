@@ -63,6 +63,19 @@ bash ~/run-sequencer-realproof.sh
 bash ~/demo-realproof.sh
 ```
 
+**Give both terminals the same `KEEP_STATE` setting.** The agent's wallet only means
+anything on the chain it was funded against, so the two must match:
+
+| | Terminal 1 (sequencer) | Terminal 2 (demo) |
+|---|---|---|
+| **Recording a take** (default) | wipes to a fresh chain | starts a fresh wallet in `~/.pilot-demo`, self-funds on camera |
+| **Quick rehearsal** (`KEEP_STATE=1`) | keeps the chain | keeps the wallet |
+
+Mixing them — a fresh chain with a wallet from the previous one — crashes the agent with
+`Found new private account with non default values`. The demo keeps its wallet in
+`~/.pilot-demo` and never touches your everyday agent in `~/.pilot`; the old wallet is
+moved to `~/.pilot-demo.bak-<timestamp>` rather than deleted.
+
 This generates a **real zk proof**: funds a public account → 150, then a shielded
 public→private transfer of 77 → **private balance = 77**.
 ⚠️ **Slow** — the shielded proof takes ~40 min on a 7.6 GB-RAM laptop (RAM-bound; minutes on 16 GB+).
