@@ -94,5 +94,31 @@ let (emptyKeys, emptyErr) = resolveRecipient(cfg, "@empty")
 doAssert emptyKeys == ""
 doAssert "empty" in emptyErr
 
+# ── explainRpcFailure: turn RPC_FAILED into something actionable ──
+# When the sequencer goes unreachable mid-transfer the upstream wallet unwraps a
+# connect error and the whole module process dies. Every later wallet call then
+# returns RPC_FAILED, which reads like the send was rejected. It was not: the
+# module is simply gone and the daemon needs restarting (seen 2026-07-25).
+const RPC_FAIL = """{"code":"RPC_FAILED","message":"callModuleMethod('pilot', 'walletSend') RPC call failed.","status":"error"}"""
+
+let walletDead = explainRpcFailure(RPC_FAIL,
+  "[critical] Module process crashed: logos_execution_zone")
+doAssert "wallet module" in walletDead
+doAssert "nothing was sent" in walletDead.toLowerAscii
+doAssert "3040" in walletDead            # points at the usual cause
+
+# A crash of some other module gets the generic restart advice, not a wallet story.
+let otherDead = explainRpcFailure(RPC_FAIL, "[critical] Module process crashed: storage_module")
+doAssert "storage_module" in otherDead
+doAssert "wallet module" notin otherDead
+
+# RPC_FAILED with a clean log = daemon down / busy.
+let noCrash = explainRpcFailure(RPC_FAIL, "[info] Module loaded: pilot")
+doAssert "not answering" in noCrash
+
+# Anything that is not an RPC failure is left alone.
+doAssert explainRpcFailure("""{"status":"completed"}""", "") == ""
+doAssert explainRpcFailure("", "") == ""
+
 removeDir(tmp)
 echo "test_rpc: all assertions passed"

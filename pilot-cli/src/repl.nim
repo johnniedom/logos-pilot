@@ -538,6 +538,19 @@ proc runRepl*(cfg: Config, dataDir: string) =
             response = text
         except: discard
 
+    # A bare RPC_FAILED reads like the agent refused the request. It means the
+    # module behind the call is gone (see explainRpcFailure) — say so, once, for
+    # every command rather than per call site.
+    if response.contains("RPC_FAILED"):
+      var logTail = ""
+      try:
+        let lines = readFile(gCfg.dataDir / "daemon.log").splitLines()
+        logTail = lines[max(0, lines.len - 40) .. ^1].join("\n")
+      except: discard
+      let hint = explainRpcFailure(response, logTail)
+      if hint != "":
+        response = RED & "  " & hint & RESET
+
     if response == "\x00QUIT":
       cleanup()
       return

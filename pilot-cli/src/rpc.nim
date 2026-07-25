@@ -170,6 +170,27 @@ proc resolveRecipient*(cfg: Config, recipient: string): tuple[keys, err: string]
     return ("", "recipient file is empty: " & path)
   return (keys, "")
 
+# RPC_FAILED means the module behind the call is not there to answer — it does
+# NOT mean the agent rejected the request. The usual cause: the sequencer went
+# unreachable mid-transfer, upstream wallet code unwrapped the connect error
+# (wallet/src/privacy_preserving_tx.rs), and the module process aborted; every
+# later wallet call then reads like a refusal. Say what actually happened and
+# what to do about it. `logTail` is the end of the daemon log; returns "" when
+# the response is not an RPC failure.
+proc explainRpcFailure*(resp, logTail: string): string =
+  if not resp.contains("RPC_FAILED"): return ""
+  var crashed = ""
+  for line in logTail.splitLines():
+    let idx = line.find("Module process crashed:")
+    if idx >= 0: crashed = line[idx + 23 .. ^1].strip()
+  if crashed == "":
+    return "the agent is not answering — the daemon may be down or busy (try /status)"
+  if crashed.contains("logos_execution_zone"):
+    return "the wallet module crashed, so nothing was sent — no tokens moved.\n" &
+           "  Usual cause: the sequencer stopped answering on :3040 mid-transfer.\n" &
+           "  Fix: check the sequencer is up, then /quit and start pilot chat again."
+  return crashed & " crashed — the agent needs a restart (/quit, then start pilot chat again)"
+
 proc pilotCall*(cfg: Config, methodExpr: string): string =
   let fullCmd = "pilot." & methodExpr
   result = execProcess(cfg.logoscore,
