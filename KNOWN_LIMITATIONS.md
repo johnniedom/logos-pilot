@@ -138,18 +138,28 @@ confirm the on-chain behavior the unit/E2E suites do not assert.
 
 ## 5. Testnet evidence & demo video — not met
 
-The following submission criteria are **not satisfied**, because the public
-infrastructure they depend on does not exist yet:
+The following submission criteria are **not satisfied**:
 
 - **F9 — ≥ 3 use cases demoed end-to-end on testnet:** not met.
 - **F10 — ≥ 5 third-party deployments:** not met.
 - **Supportability #1 — public testnet deployment:** not met.
 
-**Why.** There is **no public LEZ testnet endpoint** available yet. The L1 testnet
-that exists is auth-gated. All demonstrations to date run against a **local Docker
-devnet / sequencer** (the full 4-service LEZ stack in dev mode), not a public
-network. Third-party deployment numbers cannot be shown without a public network for
-third parties to deploy against.
+**Why.** Every demonstration to date runs against a **local sequencer**
+(`run-sequencer.sh` in dev mode, `run-sequencer-realproof.sh` with real proofs),
+not a public network.
+
+An earlier revision of this document said no public LEZ testnet existed. **That is
+no longer true**, and the correction matters more than the excuse: a public
+endpoint is live at `https://testnet.lez.logos.co`, serving LEZ **v0.2.0**, and it
+is **not** auth-gated (verified 2026-07-25 — a JSON-RPC POST returns a normal
+`-32601 Method not found`; the auth wall is on the L1 testnet, which is a different
+service). So the blocker on these three criteria is our own remaining work, not
+missing infrastructure.
+
+What is genuinely unknown, rather than assumed: whether the **pinned** wallet
+module and circuits in this repo are wire-compatible with testnet v0.2.0, and how
+an agent obtains an opening balance there — Pilot's self-funding uses a local
+faucet claim that may have no public equivalent. Neither has been tested yet.
 
 In addition:
 
@@ -158,9 +168,10 @@ In addition:
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
   committed.**
 
-**What would close it.** A public LEZ testnet endpoint to deploy against; then the
-local docker demos can be re-run against it, third-party deployments counted, the
-real-proof scripts committed, and the video recorded.
+**What would close it.** Point `wallet_config.json`'s `sequencer_addr` at the
+public testnet, confirm version compatibility and a funding route, re-run the three
+use cases there, and record the narrated real-proof video. Third-party deployment
+numbers then become an outreach problem rather than an infrastructure one.
 
 ---
 
