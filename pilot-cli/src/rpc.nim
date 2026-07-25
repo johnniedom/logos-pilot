@@ -154,8 +154,6 @@ proc salvageSendLine*(line: string): string =
 
 proc resolveRecipient*(cfg: Config, recipient: string): tuple[keys, err: string] =
   if not recipient.startsWith("@"):
-    let err = recipientKeysError(recipient)
-    if err != "": return ("", err)
     return (recipient, "")
   var path = cfg.dataDir / "contacts" / (recipient[1..^1] & ".json")
   if not fileExists(path):

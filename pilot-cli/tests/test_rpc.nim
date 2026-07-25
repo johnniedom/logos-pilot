@@ -41,25 +41,14 @@ var cfg = Config(dataDir: tmp)
 const FULL_KEYS = "{\"nullifier_public_key\":\"aa\",\"viewing_public_key\":\"bb\"}"
 doAssert resolveRecipient(cfg, FULL_KEYS) == (FULL_KEYS, "")
 
-# ── truncated / mangled pastes must never reach the wallet ──
-# A long keys blob pasted into the line editor can arrive with its head eaten or
-# its tail clipped. Those used to travel straight to walletSend and die later at
-# approve time (TX_FAILED on garbage keys, 2026-07-11). Catch them at the seam.
-
-# tail clipped mid-value -> unparseable
-let (cutKeys, cutErr) = resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\",\"viewing_pub")
-doAssert cutKeys == ""
-doAssert "cut off" in cutErr
-
-# head eaten by the line editor -> no leading brace
-let (headKeys, headErr) = resolveRecipient(cfg, "b3dd66d\",\"viewing_public_key\":\"cc\"}")
-doAssert headKeys == ""
-doAssert "cut off" in headErr
-
-# parses, but is missing the second key the wallet needs
-let (halfKeys, halfErr) = resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\"}")
-doAssert halfKeys == ""
-doAssert "viewing_public_key" in halfErr
+# A partial keys blob still passes through resolveRecipient untouched — the
+# wallet, not the CLI, decides what it can spend to. recipientKeysError exists
+# only to tell salvageSendLine whether a paste is intact enough to rebuild.
+doAssert resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\"}") ==
+  ("{\"nullifier_public_key\":\"aa\"}", "")
+doAssert recipientKeysError(FULL_KEYS) == ""
+doAssert recipientKeysError("{\"nullifier_public_key\":\"aa\"}") != ""
+doAssert recipientKeysError("b3dd66d\",\"viewing_public_key\":\"cc\"}") != ""
 
 # ── brace balance: how the REPL knows a pasted /send is still incomplete ──
 doAssert jsonBracesBalanced("/send " & FULL_KEYS & " 20 coffee")

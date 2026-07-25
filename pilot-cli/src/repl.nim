@@ -503,17 +503,10 @@ proc runRepl*(cfg: Config, dataDir: string) =
       # long hex and corrupts it, and a keys blob landing here usually means a
       # long paste lost its "/send" head to the line editor's input flush
       # (both burned a live transfer 2026-07-11 — TX_FAILED on garbage keys).
-      # Reached only when the blob is NOT salvageable (truncated / missing a
-      # field) — intact pastes are rebuilt above. Name the saved contacts so the
-      # owner can retry without touching key material at all.
-      var known: seq[string] = @[]
-      for kind, path in walkDir(gCfg.dataDir / "contacts"):
-        if kind == pcFile and path.endsWith(".json"):
-          known.add("@" & path.splitFile().name)
-      response = RED & "  those keys arrived incomplete — not sending, and not passing them to the LLM." & RESET &
+      response = RED & "  that looks like wallet keys — not passing them to the LLM." & RESET &
                  "\n  " & DIM & "Use   " & RESET & "/send @<contact> <amount> <reason>" &
-                 (if known.len > 0: "\n  " & DIM & "Saved " & RESET & known.join(", ") else:
-                    "\n  " & DIM & "Setup " & RESET & "save the keys once: " & gCfg.dataDir & "/contacts/<name>.json")
+                 "\n  " & DIM & "Setup " & RESET & "save the keys once: " & gCfg.dataDir & "/contacts/<name>.json" &
+                 "\n  " & DIM & "Paste " & RESET & DIM & "if you pasted a /send line, retry after the '>' prompt is idle" & RESET
     else:
       let raw = daemonCallWithSpinner(gCfg, "processOwnerMessage", @[line], timeoutSec = 30)
       var wasAction = false
