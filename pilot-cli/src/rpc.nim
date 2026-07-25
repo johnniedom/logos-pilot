@@ -93,8 +93,69 @@ proc extractDaemonResult*(raw: string): string =
 # JSON reached the wallet verbatim once). Returns (keys, "") or ("", error).
 # Shared by the /send command and the LLM send action so raw key material never
 # has to travel through (and be retyped by) the model.
+# True when every '{' in the line has its '}' — i.e. a pasted keys blob arrived
+# whole. The line editor flushes long pastes in chunks, so a /send can land with
+# its tail still to come; the REPL uses this to keep reading instead of firing a
+# half command at the wallet.
+proc jsonBracesBalanced*(line: string): bool =
+  var depth = 0
+  var inStr = false
+  var esc = false
+  for c in line:
+    if esc: esc = false; continue
+    if c == '\\' and inStr: esc = true
+    elif c == '"': inStr = not inStr
+    elif not inStr:
+      if c == '{': inc depth
+      elif c == '}':
+        dec depth
+        if depth < 0: return false      # a '}' with no opener = head was eaten
+  return depth == 0
+
+# "" when this blob is a keys object the wallet can actually spend to, else a
+# plain-English reason. Guards the one seam where a mangled paste used to sail
+# through to walletSend and only fail minutes later at approve time.
+proc recipientKeysError*(keys: string): string =
+  if keys.len == 0: return "no recipient given"
+  if not keys.startsWith("{") or not keys.endsWith("}") or not jsonBracesBalanced(keys):
+    return "those recipient keys look cut off — paste lost its start or end.\n" &
+           "  Use /send @<contact> <amount> <reason> instead (no pasting)."
+  var parsed: JsonNode
+  try: parsed = parseJson(keys)
+  except: return "those recipient keys look cut off — not valid JSON.\n" &
+                 "  Use /send @<contact> <amount> <reason> instead (no pasting)."
+  if parsed.kind != JObject: return "recipient must be a keys object, not " & $parsed.kind
+  for field in ["nullifier_public_key", "viewing_public_key"]:
+    if not parsed.hasKey(field) or parsed[field].getStr("") == "":
+      return "recipient keys are missing " & field & " — the paste is incomplete.\n" &
+             "  Use /send @<contact> <amount> <reason> instead (no pasting)."
+  return ""
+
+# A long "/send {keys} 20 coffee" paste can lose its "/send " head to the line
+# editor, leaving the keys blob as the first thing on the line — which then looks
+# like chat. Rebuild the command, but ONLY when the keys parse and carry both
+# fields, so corrupted key material is still refused rather than guessed at.
+# Returns "" when the line is not a decapitated send.
+proc salvageSendLine*(line: string): string =
+  let s = line.strip()
+  let open = s.find('{')
+  let close = s.rfind('}')
+  if open < 0 or close < open: return ""
+  let keys = s[open .. close]
+  if recipientKeysError(keys) != "": return ""
+  let tail = s[close + 1 .. ^1].strip()
+  if tail.len == 0: return ""
+  let bits = tail.splitWhitespace()
+  var amount = bits[0]
+  for c in amount:
+    if c notin {'0'..'9', '.'}: return ""
+  let reason = if bits.len > 1: bits[1 .. ^1].join(" ") else: "(no reason given)"
+  return "/send " & keys & " " & amount & " " & reason
+
 proc resolveRecipient*(cfg: Config, recipient: string): tuple[keys, err: string] =
   if not recipient.startsWith("@"):
+    let err = recipientKeysError(recipient)
+    if err != "": return ("", err)
     return (recipient, "")
   var path = cfg.dataDir / "contacts" / (recipient[1..^1] & ".json")
   if not fileExists(path):

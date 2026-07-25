@@ -466,19 +466,54 @@ proc runRepl*(cfg: Config, dataDir: string) =
     line = line.strip()
     if line == "": continue
 
+    # A ~200-char keys paste does not always arrive as one line: the editor
+    # flushes it in chunks, so the command lands split mid-JSON and used to be
+    # sent half-formed. If the braces are still open, keep reading and glue the
+    # chunks back together (no separator — a chunk boundary can fall anywhere).
+    if line.startsWith("/") and not jsonBracesBalanced(line):
+      var joined = line
+      for _ in 0 ..< 20:
+        echo DIM & "  …paste looks incomplete, reading the rest (blank line cancels)" & RESET
+        var more: string
+        if not readLineFromStdin("… ", more): break
+        if more.strip() == "":
+          joined = ""
+          break
+        joined &= more.strip()
+        if jsonBracesBalanced(joined): break
+      if joined == "":
+        echo DIM & "  cancelled" & RESET
+        continue
+      line = joined
+
     var response = ""
 
     if line.startsWith("/"):
       response = dispatchSlash(gCfg, line)
+    elif salvageSendLine(line) != "":
+      # The "/send " head was eaten by the line editor, leaving the keys blob
+      # first on the line — which reads as chat. The keys parsed and carry both
+      # fields, so this is provably intact: rebuild the command instead of
+      # making the owner retype the paste.
+      let rebuilt = salvageSendLine(line)
+      echo DIM & "  (recovered a /send whose start was lost in the paste)" & RESET
+      response = dispatchSlash(gCfg, rebuilt)
     elif line.contains("nullifier_public_key") or line.contains("viewing_public_key"):
       # Raw key material must never travel through the LLM: the model retypes
       # long hex and corrupts it, and a keys blob landing here usually means a
       # long paste lost its "/send" head to the line editor's input flush
       # (both burned a live transfer 2026-07-11 — TX_FAILED on garbage keys).
-      response = RED & "  that looks like wallet keys — not passing them to the LLM." & RESET &
+      # Reached only when the blob is NOT salvageable (truncated / missing a
+      # field) — intact pastes are rebuilt above. Name the saved contacts so the
+      # owner can retry without touching key material at all.
+      var known: seq[string] = @[]
+      for kind, path in walkDir(gCfg.dataDir / "contacts"):
+        if kind == pcFile and path.endsWith(".json"):
+          known.add("@" & path.splitFile().name)
+      response = RED & "  those keys arrived incomplete — not sending, and not passing them to the LLM." & RESET &
                  "\n  " & DIM & "Use   " & RESET & "/send @<contact> <amount> <reason>" &
-                 "\n  " & DIM & "Setup " & RESET & "save the keys once: " & gCfg.dataDir & "/contacts/<name>.json" &
-                 "\n  " & DIM & "Paste " & RESET & DIM & "if you pasted a /send line, retry after the '>' prompt is idle" & RESET
+                 (if known.len > 0: "\n  " & DIM & "Saved " & RESET & known.join(", ") else:
+                    "\n  " & DIM & "Setup " & RESET & "save the keys once: " & gCfg.dataDir & "/contacts/<name>.json")
     else:
       let raw = daemonCallWithSpinner(gCfg, "processOwnerMessage", @[line], timeoutSec = 30)
       var wasAction = false

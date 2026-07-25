@@ -37,9 +37,44 @@ removeDir(tmp)
 createDir(tmp / "contacts")
 var cfg = Config(dataDir: tmp)
 
-# Non-@ strings pass through untouched (raw keys JSON typed directly).
-doAssert resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\"}") ==
-  ("{\"nullifier_public_key\":\"aa\"}", "")
+# A COMPLETE raw keys JSON typed directly passes through untouched.
+const FULL_KEYS = "{\"nullifier_public_key\":\"aa\",\"viewing_public_key\":\"bb\"}"
+doAssert resolveRecipient(cfg, FULL_KEYS) == (FULL_KEYS, "")
+
+# ── truncated / mangled pastes must never reach the wallet ──
+# A long keys blob pasted into the line editor can arrive with its head eaten or
+# its tail clipped. Those used to travel straight to walletSend and die later at
+# approve time (TX_FAILED on garbage keys, 2026-07-11). Catch them at the seam.
+
+# tail clipped mid-value -> unparseable
+let (cutKeys, cutErr) = resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\",\"viewing_pub")
+doAssert cutKeys == ""
+doAssert "cut off" in cutErr
+
+# head eaten by the line editor -> no leading brace
+let (headKeys, headErr) = resolveRecipient(cfg, "b3dd66d\",\"viewing_public_key\":\"cc\"}")
+doAssert headKeys == ""
+doAssert "cut off" in headErr
+
+# parses, but is missing the second key the wallet needs
+let (halfKeys, halfErr) = resolveRecipient(cfg, "{\"nullifier_public_key\":\"aa\"}")
+doAssert halfKeys == ""
+doAssert "viewing_public_key" in halfErr
+
+# ── brace balance: how the REPL knows a pasted /send is still incomplete ──
+doAssert jsonBracesBalanced("/send " & FULL_KEYS & " 20 coffee")
+doAssert not jsonBracesBalanced("/send {\"nullifier_public_key\":\"aa\",")
+doAssert jsonBracesBalanced("/balance")                 # no braces at all = complete
+doAssert not jsonBracesBalanced("{\"a\":{\"b\":1}")     # nested, still open
+
+# ── salvaging a /send whose "/send " head was lost ──
+# Only ever salvaged when the keys parse AND carry both fields, so a corrupted
+# blob is still refused rather than guessed at.
+doAssert salvageSendLine(FULL_KEYS & " 20 coffee") == "/send " & FULL_KEYS & " 20 coffee"
+doAssert salvageSendLine(FULL_KEYS & " 20") == "/send " & FULL_KEYS & " 20 (no reason given)"
+doAssert salvageSendLine("{\"nullifier_public_key\":\"aa\"} 20 coffee") == ""   # incomplete keys
+doAssert salvageSendLine("hello how are you") == ""                             # ordinary chat
+doAssert salvageSendLine(FULL_KEYS) == ""                                       # no amount
 
 # @name resolves <dataDir>/contacts/<name>.json with ALL whitespace stripped —
 # a trailing newline inside the file once reached the wallet verbatim.
