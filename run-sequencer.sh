@@ -17,6 +17,12 @@
 # Fresh genesis on every start: rocksdb state is wiped so a wiped pilot wallet and a
 # fresh chain always agree. A long-lived chain also makes every cold module boot
 # replay thousands of blocks before the wallet answers — restart fresh instead.
+#
+# The catch: the wallet is NOT wiped with it. An agent funded on the previous chain
+# still holds notes for accounts this new chain has never seen, and the next transfer
+# aborts the wallet module mid-send ("Found new private account with non default
+# values"). So this script now warns when it wipes out from under an existing wallet,
+# and KEEP_STATE=1 skips the wipe when you want to keep a funded agent alive.
 set -euo pipefail
 
 LEZ="${LEZ:-$HOME/dev/logos/logos-execution-zone}"
@@ -34,6 +40,20 @@ SEQ="$LEZ/target/release/sequencer_service"
 [ -x "$SEQ" ] || { echo "ERROR: $SEQ not built — see Prerequisites (set LEZ=/path/to/logos-execution-zone)"; exit 1; }
 
 cd "$LEZ"
-rm -rf ./rocksdb ./sequencer/service/rocksdb ./bedrock_signing_key ./sequencer/service/bedrock_signing_key 2>/dev/null || true
-echo "Booting LEZ sequencer_service in DEV mode on :3040 (fresh genesis, circuits: $LOGOS_BLOCKCHAIN_CIRCUITS)"
+WALLET="${PILOT_DATA_DIR:-$HOME/.pilot}/wallet_storage.json"
+if [ "${KEEP_STATE:-}" = "1" ]; then
+  echo "KEEP_STATE=1 — keeping the existing chain (and any agent already funded on it)"
+else
+  if [ -s "$WALLET" ]; then
+    echo
+    echo "  !! $WALLET holds an agent funded on the chain about to be erased."
+    echo "  !! Its next transfer will abort the wallet module. Pick one:"
+    echo "  !!   keep the chain + agent :  KEEP_STATE=1 bash run-sequencer.sh"
+    echo "  !!   start both over        :  rm -rf \"${PILOT_DATA_DIR:-$HOME/.pilot}\"/pilot.db* \\"
+    echo "  !!                              \"${PILOT_DATA_DIR:-$HOME/.pilot}\"/wallet_storage.json*   then re-deploy"
+    echo
+  fi
+  rm -rf ./rocksdb ./sequencer/service/rocksdb ./bedrock_signing_key ./sequencer/service/bedrock_signing_key 2>/dev/null || true
+fi
+echo "Booting LEZ sequencer_service in DEV mode on :3040 (circuits: $LOGOS_BLOCKCHAIN_CIRCUITS)"
 exec "$SEQ" sequencer/service/configs/debug/sequencer_config.json
