@@ -1,4 +1,4 @@
-import os, osproc, strutils, json
+import os, osproc, strutils, json, algorithm
 
 const
   # Fallbacks used only when $HOME is unset (rare: some CI/sandbox shells).
@@ -167,6 +167,48 @@ proc resolveRecipient*(cfg: Config, recipient: string): tuple[keys, err: string]
   if keys == "":
     return ("", "recipient file is empty: " & path)
   return (keys, "")
+
+# Saving an address under a name is the only way to keep long key material off the
+# owner's keyboard entirely: paste it ONCE here, then say "@b" forever after. This
+# is also the right place to validate — a contact written wrong is a wrong recipient
+# on every later send, discovered ~40 minutes into a real-proof transfer.
+# `keysOrPath` accepts the keys JSON itself or a file containing them.
+proc saveContact*(cfg: Config, name, keysOrPath: string): tuple[path, err: string] =
+  var n = name.strip()
+  if n.startsWith("@"): n = n[1 .. ^1]        # "/contact @b <keys>" is the natural spelling
+  if n.len == 0: return ("", "give the contact a name, e.g. b")
+  for c in n:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '-', '_'}:
+      return ("", "contact names can use letters, numbers, - and _ only (got: " & name & ")")
+
+  var raw = keysOrPath.strip()
+  if not raw.startsWith("{") and fileExists(expandTilde(raw)):
+    raw = readFile(expandTilde(raw))
+  var keys = ""
+  for c in raw:
+    if c notin Whitespace: keys.add(c)
+
+  let err = recipientKeysError(keys)
+  if err != "": return ("", err)
+
+  let dir = cfg.dataDir / "contacts"
+  try:
+    createDir(dir)
+    let path = dir / (n & ".json")
+    writeFile(path, keys)
+    return (path, "")
+  except:
+    return ("", "could not write the contact: " & getCurrentExceptionMsg())
+
+# Names of every saved contact, sorted, without the .json.
+proc listContacts*(cfg: Config): seq[string] =
+  result = @[]
+  let dir = cfg.dataDir / "contacts"
+  if not dirExists(dir): return
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".json"):
+      result.add(path.splitFile().name)
+  result.sort()
 
 # RPC_FAILED means the module behind the call is not there to answer — it does
 # NOT mean the agent rejected the request. The usual cause: the sequencer went

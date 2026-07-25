@@ -30,7 +30,7 @@ doAssert extractDaemonResult(
 doAssert extractDaemonResult("  plain text  ") == "plain text"
 
 # ── resolveRecipient: the one seam between "@b" and the wallet ──
-import std/[os, strutils]
+import std/[os, strutils, algorithm]
 
 let tmp = getTempDir() / "pilot-test-contacts"
 removeDir(tmp)
@@ -82,6 +82,46 @@ writeFile(tmp / "contacts" / "empty.json", "  \n ")
 let (emptyKeys, emptyErr) = resolveRecipient(cfg, "@empty")
 doAssert emptyKeys == ""
 doAssert "empty" in emptyErr
+
+# ── saveContact / listContacts: naming an address once, instead of pasting it ──
+# Saving is where validation belongs: a contact written wrong is a wrong recipient
+# on every later send, discovered ~40 minutes into a real-proof transfer.
+
+# Raw keys JSON, saved under the given name.
+let (savedPath, saveErr) = saveContact(cfg, "alice", FULL_KEYS)
+doAssert saveErr == ""
+doAssert savedPath == tmp / "contacts" / "alice.json"
+doAssert readFile(savedPath) == FULL_KEYS
+
+# Whitespace anywhere in the pasted blob is stripped, as resolveRecipient expects.
+doAssert saveContact(cfg, "spaced",
+  "{\"nullifier_public_key\": \"aa\",\n \"viewing_public_key\": \"bb\"}\n")[1] == ""
+doAssert resolveRecipient(cfg, "@spaced") == (FULL_KEYS, "")
+
+# A file of keys can be handed over instead of the keys themselves.
+writeFile(tmp / "npk-b.json", FULL_KEYS & "\n")
+doAssert saveContact(cfg, "fromfile", tmp / "npk-b.json")[1] == ""
+doAssert resolveRecipient(cfg, "@fromfile") == (FULL_KEYS, "")
+
+# Incomplete keys are refused at save time, and nothing is written.
+let (badPath, badErr) = saveContact(cfg, "broken", "{\"nullifier_public_key\":\"aa\"}")
+doAssert badErr != ""
+doAssert badPath == ""
+doAssert not fileExists(tmp / "contacts" / "broken.json")
+
+# Names that would escape the contacts directory or confuse @lookup are refused.
+doAssert saveContact(cfg, "../escape", FULL_KEYS)[1] != ""
+doAssert saveContact(cfg, "", FULL_KEYS)[1] != ""
+doAssert saveContact(cfg, "b b", FULL_KEYS)[1] != ""
+
+# A leading @ IS forgiven — "/contact @b <keys>" is the spelling an owner reaches
+# for, having just typed "/send @b". It saves under the bare name.
+doAssert saveContact(cfg, "@zed", FULL_KEYS)[0] == tmp / "contacts" / "zed.json"
+doAssert resolveRecipient(cfg, "@zed") == (FULL_KEYS, "")
+doAssert saveContact(cfg, "b", FULL_KEYS)[1] == ""
+doAssert "b" in listContacts(cfg)
+doAssert "alice" in listContacts(cfg)
+doAssert listContacts(cfg) == listContacts(cfg).sorted
 
 # ── explainRpcFailure: turn RPC_FAILED into something actionable ──
 # When the sequencer goes unreachable mid-transfer the upstream wallet unwraps a

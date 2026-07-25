@@ -14,6 +14,7 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
   status                       Agent status overview
   verify                       Full verification report
   discover [topic]             Discover peer agents
+  contact <name> <keys|file>   Save an address as @name (list them with: contact)
   configure <key> <value>      Set configuration
   help                         Show this help
 
@@ -138,6 +139,29 @@ proc main() =
       else:
         i += 1
     runDiscover(cfg, topic, timeout, jsonOutput)
+
+  of "contact", "contacts":
+    # Paste the keys once, here — then it is "@name" everywhere, including in
+    # natural-language chat, where raw key material is never allowed through.
+    if rest.len == 0 or (rest.len == 1 and rest[0].toLowerAscii() == "list"):
+      let names = listContacts(cfg)
+      if names.len == 0:
+        info("no saved addresses yet")
+        echo DIM & "  add one: pilot contact b ~/npk-b.json" & RESET
+      else:
+        for n in names: echo "  @" & n
+    elif rest.len >= 2:
+      let (path, err) = saveContact(cfg, rest[0], rest[1 .. ^1].join(" "))
+      if err != "":
+        fail(err)
+        quit(1)
+      let clean = rest[0].strip(chars = {'@'})
+      ok("saved @" & clean)
+      kv("Use", "pilot chat  ->  /send @" & clean & " <amount> <reason>")
+      kv("File", path)
+    else:
+      fail("Usage: pilot contact <name> <keys JSON or file>   (no args lists them)")
+      quit(1)
 
   of "configure", "config":
     if rest.len < 2:

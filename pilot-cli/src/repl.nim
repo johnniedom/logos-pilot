@@ -173,6 +173,8 @@ const HELP_TEXT = """
   /balance                     Check wallet balance
   /history                     Transaction history
   /send <to> <amt> <reason>    Send LEZ tokens (<to> = @contact, @keys-file, or raw keys JSON)
+  /contact <name> <keys>       Save an address as @name (paste the keys once, or give a file)
+  /contacts                    List saved addresses
   /approve <id>                Approve pending spend
   /reject <id>                 Reject pending spend
   /upload <path> <label>       Upload a file
@@ -210,6 +212,26 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/discover":
     let topic = if parts.len > 1: parts[1] else: "pilot"
     return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @[topic], timeoutSec = 20, label = "Discovering agents"))
+  of "/contact":
+    # Saved once here, the address never has to be typed again — and never travels
+    # through the LLM, which is what corrupts long hex.
+    if parts.len < 3:
+      return RED & "  usage: /contact <name> <keys JSON or file>" & RESET &
+             "\n  " & DIM & "e.g.   " & RESET & "/contact b ~/npk-b.json"
+    let (path, cerr) = saveContact(cfg, parts[1], parts[2 .. ^1].join(" "))
+    if cerr != "":
+      return RED & "  " & cerr & RESET
+    return GREEN & "  saved" & RESET & " @" & parts[1].strip(chars = {'@'}) &
+           "\n  " & DIM & "Use    " & RESET & "/send @" & parts[1].strip(chars = {'@'}) & " <amount> <reason>" &
+           "\n  " & DIM & "File   " & RESET & DIM & path & RESET
+  of "/contacts":
+    let names = listContacts(cfg)
+    if names.len == 0:
+      return DIM & "  no saved addresses yet — /contact <name> <keys> to add one" & RESET
+    var listing = "  " & BOLD & "Saved addresses" & RESET
+    for n in names:
+      listing &= "\n    @" & n
+    return listing
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient|@keys-file> <amount> <reason>" & RESET
