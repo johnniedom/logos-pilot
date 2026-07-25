@@ -15,8 +15,19 @@
 set -euo pipefail
 
 LEZ="${LEZ:-$HOME/dev/logos/logos-execution-zone}"
-export RISC0_DEV_MODE=0                 # REAL proofs (NOT dev mode) — the on-camera requirement
 export RUST_LOG="${RUST_LOG:-info}"     # so r0vm prints cycle counts (-> cu-benchmarks)
+
+# REHEARSE=1 walks the exact same path with fake proofs, so a dry run costs minutes instead
+# of ~40 per transfer. It is NOT valid for the recording — the spec requires real proving.
+# Pass the same REHEARSE / KEEP_STATE values to demo-realproof.sh.
+if [ "${REHEARSE:-}" = "1" ]; then
+  export RISC0_DEV_MODE=1
+  echo "################################################################"
+  echo "#  REHEARSAL — RISC0_DEV_MODE=1, proofs are FAKE. Do NOT record. #"
+  echo "################################################################"
+else
+  export RISC0_DEV_MODE=0               # REAL proofs (NOT dev mode) — the on-camera requirement
+fi
 
 # RISC0 prover toolchain: honor an already-exported PATH, else discover an installed extension.
 R0VM_DIR="$(find "$HOME/.risc0/extensions" -maxdepth 1 -type d -name '*cargo-risczero*' 2>/dev/null | head -1)"
@@ -35,7 +46,7 @@ SEQ="$LEZ/target/release/sequencer_service"
 CONFIG="$LEZ/sequencer/service/configs/debug/sequencer_config.json"
 [ -f "$CONFIG" ] || { echo "ERROR: $CONFIG not found — see Prerequisites"; exit 1; }
 
-echo "Booting LEZ sequencer with REAL proofs on :3040 (RISC0_DEV_MODE=0)"
+echo "Booting LEZ sequencer on :3040 (RISC0_DEV_MODE=$RISC0_DEV_MODE)"
 cd "$LEZ"
 # KEEP_STATE=1 preserves the existing chain + already-funded wallet across restarts (for
 # rehearsals). Unset (the default) wipes to a fresh genesis — what the recorded demo wants.

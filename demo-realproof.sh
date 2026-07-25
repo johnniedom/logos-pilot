@@ -11,7 +11,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PILOT="$ROOT/pilot-cli/result/bin/pilot"
-export RISC0_DEV_MODE=0                  # the wallet side must prove for real too
+
+# REHEARSE=1 = dress rehearsal with fake proofs (minutes, not ~40 per transfer). Give the
+# sequencer script the same REHEARSE / KEEP_STATE values — both sides must agree.
+if [ "${REHEARSE:-}" = "1" ]; then
+  export RISC0_DEV_MODE=1
+  echo "################################################################"
+  echo "#  REHEARSAL — RISC0_DEV_MODE=1, proofs are FAKE. Do NOT record. #"
+  echo "################################################################"
+else
+  export RISC0_DEV_MODE=0                # the wallet side must prove for real too
+fi
 
 # The agent's wallet only means anything on the chain it was funded against. Boot a fresh
 # genesis (run-sequencer-realproof.sh with KEEP_STATE unset) while pointing at a wallet that
@@ -67,4 +77,8 @@ echo "                             on-chain transfer (real r0vm proof on screen)
 echo "   C) A2A paid service     : a second agent runs agent.ask and is paid autonomously in LEZ"
 echo "                             (see test-two-agents-docker.sh for the two-agent topology)"
 echo ""
-echo "== Demo complete. Every on-chain step above ran with RISC0_DEV_MODE=0 (real RISC0 proofs). =="
+if [ "$RISC0_DEV_MODE" = "0" ]; then
+  echo "== Demo complete. Every on-chain step above ran with RISC0_DEV_MODE=0 (real RISC0 proofs). =="
+else
+  echo "== Rehearsal complete (RISC0_DEV_MODE=1 — FAKE proofs). Re-run without REHEARSE=1 to record. =="
+fi

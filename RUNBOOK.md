@@ -63,13 +63,24 @@ bash ~/run-sequencer-realproof.sh
 bash ~/demo-realproof.sh
 ```
 
-**Give both terminals the same `KEEP_STATE` setting.** The agent's wallet only means
-anything on the chain it was funded against, so the two must match:
+**Rehearse first.** `REHEARSE=1` walks the identical path with fake proofs, so a dry run
+takes minutes instead of ~40 per transfer. Both terminals print a loud banner in that mode
+and the closing line says "FAKE proofs", so you can't record one by accident:
+
+```bash
+# Terminal 1
+REHEARSE=1 KEEP_STATE=1 bash ~/run-sequencer-realproof.sh
+# Terminal 2
+REHEARSE=1 KEEP_STATE=1 bash ~/demo-realproof.sh
+```
+
+**Give both terminals the same `REHEARSE` and `KEEP_STATE` settings.** The agent's wallet
+only means anything on the chain it was funded against, so the two must match:
 
 | | Terminal 1 (sequencer) | Terminal 2 (demo) |
 |---|---|---|
-| **Recording a take** (default) | wipes to a fresh chain | starts a fresh wallet in `~/.pilot-demo`, self-funds on camera |
-| **Quick rehearsal** (`KEEP_STATE=1`) | keeps the chain | keeps the wallet |
+| **Recording a take** (no flags) | real proofs, wipes to a fresh chain | real proofs, fresh wallet in `~/.pilot-demo`, self-funds on camera |
+| **Rehearsal** (`REHEARSE=1 KEEP_STATE=1`) | fake proofs, keeps the chain | fake proofs, keeps the wallet |
 
 Mixing them — a fresh chain with a wallet from the previous one — crashes the agent with
 `Found new private account with non default values`. The demo keeps its wallet in
