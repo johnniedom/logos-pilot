@@ -153,10 +153,10 @@ third parties to deploy against.
 
 In addition:
 
-- **`RISC0_DEV_MODE=0` real-proof demo scripts are not yet committed**, and the
-  end-to-end **demo video is not yet recorded / committed.** Real-proof generation
-  is only meaningful once a SPEL guest binary exists; `RISC0_DEV_MODE=0` should be
-  set only in that case.
+- The `RISC0_DEV_MODE=0` real-proof scripts **are** committed
+  (`run-sequencer-realproof.sh`, `demo-realproof.sh`, both with a `REHEARSE=1`
+  dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
+  committed.**
 
 **What would close it.** A public LEZ testnet endpoint to deploy against; then the
 local docker demos can be re-run against it, third-party deployments counted, the
@@ -164,10 +164,41 @@ real-proof scripts committed, and the video recorded.
 
 ---
 
+## 6. A wallet transfer does not survive an unreachable sequencer — upstream fragility
+
+**What it is.** If the sequencer stops answering on `:3040` while a transfer is
+being built, the agent does not report a failed transfer and carry on — the wallet
+module **process dies**. Every subsequent wallet call then returns
+`{"code":"RPC_FAILED"}` until the daemon is restarted. The spending FSM behaves
+correctly throughout (the request is marked failed, **no tokens move**), but the
+agent is left without a wallet until an operator restarts it.
+
+**Why.** Upstream wallet code unwraps the transport result rather than propagating
+it: `wallet/src/privacy_preserving_tx.rs:223` — `called 'Result::unwrap()' on an
+'Err' value: client error (Connect) ... Connection refused (os error 111)` —
+which panics inside the module process and aborts it. Observed live on
+2026-07-25 in `~/.pilot/daemon.log`; the same shape as the module abort seen on
+2026-07-14. Pilot cannot catch a panic that aborts the process it lives in.
+
+**What Pilot does about it.** It cannot prevent the abort, so it makes it legible
+and recoverable: the CLI translates `RPC_FAILED` into which module died, that
+nothing was sent, the likely cause and the restart step, instead of showing a raw
+error that reads like a refusal. The demo scripts also refuse to start unless the
+sequencer answers on `:3040` first, since starting the agent against a
+not-yet-listening sequencer is the common way to trigger this.
+
+**What would close it.** Upstream returning a transport error from
+`privacy_preserving_tx` instead of unwrapping, so the module can surface a failed
+transfer and stay alive. With that, the existing FSM path already handles it —
+Pilot needs no redesign.
+
+---
+
 ## How to read this list
 
-- Items **1** and the upstream parts of **2.7** are **platform gaps**, evidenced
-  against pinned upstream revisions — not Pilot defects.
+- Items **1**, the upstream parts of **2.7**, and **6** are **platform gaps**,
+  evidenced against pinned upstream revisions or against a captured crash — not
+  Pilot defects.
 - Items **2 (1–6)**, **3**, **4**, and **5** are **Pilot's own scope and
   verification gaps**, stated so a follow-up question does not catch us out.
 - Where a fix path exists it is named. Where it depends on infrastructure that does

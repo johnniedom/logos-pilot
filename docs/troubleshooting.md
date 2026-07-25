@@ -122,8 +122,55 @@ corrupted.
 handed to the LLM (you get a hint instead), and `@contacts` resolve on both
 the `/send` and natural-language paths.
 
+**Fixes (since `ce8da08`), for pastes that still arrive broken:**
+- **Split across lines** — if a slash command's `{` braces are still open, the
+  REPL prompts `…` and glues the next chunk on until the JSON closes. A blank
+  line cancels.
+- **Head eaten** — a line that *starts* with an intact keys object followed by
+  an amount is rebuilt into the `/send` you meant (`(recovered a /send whose
+  start was lost in the paste)`). Only when the keys parse **and** carry both
+  `nullifier_public_key` and `viewing_public_key`, so corrupted key material is
+  never guessed at.
+- **Truncated / missing a field** — refused at `resolveRecipient` with a plain
+  reason and a list of your saved contacts, instead of reaching `walletSend`
+  and failing minutes later at approve time.
+
 **Habits:** paste only when the prompt is idle, and prefer `@contacts` so
 there is nothing long to paste (see the owner guide's Contacts section).
+
+---
+
+## One send fails, then every wallet command returns `RPC_FAILED`
+
+**Symptom:** a transfer reports `failed — no tokens moved`, and from then on
+`/send`, `/balance` and friends all answer
+`{"code":"RPC_FAILED","message":"callModuleMethod('pilot','walletSend') RPC call failed."}`.
+Restarting `pilot chat` alone does not help if the sequencer is still down.
+
+**Cause:** the sequencer stopped answering on `:3040` while the transfer was
+being built. Upstream wallet code unwraps that connect error
+(`wallet/src/privacy_preserving_tx.rs:223`) and the panic **aborts the
+logos_execution_zone process** — so the agent no longer has a wallet module to
+answer any call. The log shows it plainly:
+
+```
+[wallet-ffi] Failed to get block height: Connection refused (os error 111)
+panicked at wallet/src/privacy_preserving_tx.rs:223: unwrap() on an Err value: client error (Connect)
+[critical] Module process crashed: logos_execution_zone
+```
+
+**No tokens moved.** The spending FSM records the failure correctly; the
+problem is availability, not money.
+
+**Fix:** confirm the sequencer answers first, then restart the agent —
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3040 \
+  -H 'content-type: application/json' -d '{}'      # want 200
+```
+A cold sequencer with a long chain can take ~85 s to start listening; starting
+the agent before that is the usual way to trigger this. Since `4cebd6a` the CLI
+prints this explanation instead of the raw error. Tracked as an upstream
+fragility in `KNOWN_LIMITATIONS.md` §6.
 
 ---
 
