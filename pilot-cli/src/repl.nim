@@ -187,6 +187,31 @@ const HELP_TEXT = """
   /quit                        Exit
 """
 
+# Discovery is subscribe-and-wait, not request/response. A single query returns
+# whatever happens to already be cached, so a network that is merely quiet reads
+# as "no agents found" — which is how a working peer looked dead for hours
+# (2026-07-26). Poll until the deadline, keeping the daemon subscribed between
+# checks so live cards land in its cache, and say what we are waiting for.
+proc discoverWithRetry(cfg: Config, topic: string, seconds: int = 30): string =
+  let deadline = epochTime() + seconds.float
+  var raw = ""
+  var polls = 0
+  while true:
+    inc polls
+    raw = daemonCall(cfg, "agentDiscover", @[topic], timeoutSec = 30)
+    try:
+      let j = parseJson(raw)
+      let found = j.getOrDefault("agents")
+      if not found.isNil and found.kind == JArray and found.len > 0: break
+    except JsonParsingError:
+      discard
+    let left = int(deadline - epochTime())
+    if left <= 0: break
+    spinTick("Listening for agent cards — " & $left & "s left, " & $polls & " checks", polls)
+    sleep(3000)
+  clearLine()
+  return raw
+
 proc dispatchSlash(cfg: Config, input: string): string =
   # splitWhitespace collapses runs of spaces: "/approve  <id>" (double space — easy to
   # type, seen in the wild) must not turn parts[1] into "" and silently no-op.
@@ -216,7 +241,7 @@ proc dispatchSlash(cfg: Config, input: string): string =
     # /discover searched an address nothing publishes to, and always found
     # nobody (2026-07-26).
     let topic = if parts.len > 1: parts[1] else: ""
-    return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @[topic], timeoutSec = 20, label = "Discovering agents"))
+    return formatJson(discoverWithRetry(cfg, topic))
   of "/contact":
     # Saved once here, the address never has to be typed again — and never travels
     # through the LLM, which is what corrupts long hex.
@@ -405,10 +430,10 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
   of "status":
     return formatJson(daemonCall(cfg, "metaStatus"))
   of "discover":
-    # Network discovery (subscribes + waits for cards) — match the /discover slash path's
-    # spinner + wider window; bare 10s can time out mid-discovery.
-    return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @["pilot"],
-      timeoutSec = 20, label = "Discovering agents"))
+    # "" = the shared channel every card is published to; "pilot" built
+    # /pilot/1/discovery-pilot/proto, where nothing publishes. Same retry as the
+    # slash path — one query is not discovery.
+    return formatJson(discoverWithRetry(cfg, ""))
   of "none":
     return ""
   else:
