@@ -288,8 +288,91 @@ echo ""
 echo "── Phase 6: Wallet Transfer ──"
 
 # Cross-agent shielded pay needs B's public keys (npk+vpk), not its account id.
+# check() passed this for the life of the script while the log underneath read
+# "Transfer failed: InsufficientFundsError" — a response that reports failure in
+# prose still satisfies "came back and didn't say error". Assert the SETTLEMENT.
 R=$(call_a walletSend "$NPK_B" 1 "test transfer A to B")
-check "[A→B] walletSend" "$R"
+check_has "[A→B] walletSend settled" "$R" '"status":"(completed|held)"'
+
+echo ""
+
+# ═══════════════════════════════════════
+echo "── Phase 7: A2A Paid Task (the headline claim) ──"
+
+# B must have a language model: agent-ask is the ONLY sellable skill.
+if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+  call_b metaConfigure llm.provider deepseek           > /dev/null
+  call_b metaConfigure llm.api_key "$DEEPSEEK_API_KEY" > /dev/null
+  call_b metaConfigure llm.model deepseek-v4-pro       > /dev/null
+  echo "  OK    Agent B has a language model"
+else
+  echo "  WARN  DEEPSEEK_API_KEY is unset — B cannot answer agent-ask, so the"
+  echo "        paid task below will fail on the WORK, not on the payment path."
+fi
+
+# Hand B's card to A directly — no dependence on broadcast discovery.
+CARD_B=$(call_b agentCard)
+R=$(call_a agentImportCard "$CARD_B")
+check_has "[A] imports B's card" "$R" '"imported":true'
+check_has "[A] B's card verifies" "$R" '"signature_status":"valid"'
+
+NPK_B_CARD=$(echo "$CARD_B" | python3 -c \
+  'import sys,json;print(json.load(sys.stdin)["_logos"]["npk"])' 2>/dev/null)
+if [ -z "$NPK_B_CARD" ]; then
+  echo "  FAIL  [A→B] paid task (no _logos.npk in B's card — nothing to address)"
+  ((FAIL++))
+fi
+
+BAL_A_BEFORE=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
+
+R=$(call_a agentTask "$NPK_B_CARD" "agent-ask" '{"prompt":"In one word: what colour is the sky?"}')
+check_has "[A→B] paid task accepted" "$R" '"state":"submitted"'
+# The price is read from the IMPORTED card. "none-declared" here means the card
+# never made it into the store, which would otherwise only surface much later as
+# a payment that silently never happens.
+check_has "[A] task carries B's declared price" "$R" '"payment":"pending-on-acceptance"'
+
+TASK_ID_A=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+
+# Read the state of THIS task, by id. python3 (not the sqlite3 CLI, which is not
+# on this box) so a missing binary cannot return "" and read as "never paid".
+# Prints a bare state, or UNREADABLE: <why> — the two must never look alike.
+task_state() {
+  python3 - "$1" "$2" <<'PY' 2>&1
+import sqlite3, sys
+db, task = sys.argv[1], sys.argv[2]
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    row = con.execute("SELECT state FROM outbound_tasks WHERE id=?;", (task,)).fetchone()
+    print(row[0] if row else "NO-SUCH-TASK")
+except Exception as e:
+    print("UNREADABLE: %s" % e)
+PY
+}
+
+echo "  ...   Waiting up to 120s for settlement"
+STATE=""
+for i in $(seq 1 12); do
+  sleep 10
+  STATE=$(task_state "$AGENT_A/pilot.db" "$TASK_ID_A")
+  case "$STATE" in
+    paid|pay-failed|pay-unresolved) break ;;
+    UNREADABLE*) break ;;
+  esac
+done
+echo "  ...   Final task state: ${STATE:-<none>}"
+
+check_has "[A] task ledger is readable" "$STATE" '^(paid|pay-failed|pay-unresolved|submitted|settling|NO-SUCH-TASK)$'
+check_has "[A] task reached a terminal payment state" "$STATE" '^(paid|pay-failed)$'
+check_has "[A] task was PAID" "$STATE" '^paid$'
+
+BAL_A_AFTER=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
+echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}"
+if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ "$BAL_A_AFTER" -lt "$BAL_A_BEFORE" ]; then
+  echo "  PASS  [A] balance decreased by the price"; ((PASS++))
+else
+  echo "  FAIL  [A] balance did not move (${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?})"; ((FAIL++))
+fi
 
 echo ""
 
@@ -298,7 +381,11 @@ echo "════════════════════════�
 echo "  Results: $PASS passed, $FAIL failed"
 echo "══════════════════════════════════════"
 
-# Cleanup
+# Cleanup. Save B's log FIRST: the container runs with --rm, so stopping it
+# deletes it and `docker logs pilot-agent-b` — which this script used to print as
+# the way to read B's side — fails with "No such container". Every post-mortem of
+# a failed run needs that log, and it was being thrown away.
+docker logs $CONTAINER > $AGENT_B/daemon.log 2>&1
 timeout 5 $LOGOSCORE $CFG_A stop > /dev/null 2>&1
 docker stop $CONTAINER > /dev/null 2>&1
 pkill -9 -f logos_host_qt 2>/dev/null
@@ -306,6 +393,6 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 
 echo ""
 echo "  Agent A log: $AGENT_A/daemon.log"
-echo "  Agent B log: docker logs $CONTAINER"
+echo "  Agent B log: $AGENT_B/daemon.log  (saved — the container is gone with --rm)"
 
 exit $FAIL
