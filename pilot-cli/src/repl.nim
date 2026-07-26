@@ -210,7 +210,12 @@ proc dispatchSlash(cfg: Config, input: string): string =
   of "/pending":
     return formatJson(daemonCall(cfg, "getPendingSpends"))
   of "/discover":
-    let topic = if parts.len > 1: parts[1] else: "pilot"
+    # Default MUST be "" — the module publishes every Agent Card to the shared
+    # /pilot/1/discovery/proto, while a named topic builds
+    # /pilot/1/discovery-<name>/proto. Defaulting to "pilot" meant the owner's
+    # /discover searched an address nothing publishes to, and always found
+    # nobody (2026-07-26).
+    let topic = if parts.len > 1: parts[1] else: ""
     return formatJson(daemonCallWithSpinner(cfg, "agentDiscover", @[topic], timeoutSec = 20, label = "Discovering agents"))
   of "/contact":
     # Saved once here, the address never has to be typed again — and never travels

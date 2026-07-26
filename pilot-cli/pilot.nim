@@ -122,7 +122,9 @@ proc main() =
     runVerify(cfg, jsonOnly)
 
   of "discover":
-    var topic = "pilot"
+    # "" = the shared discovery topic every Agent Card is published to. A named
+    # topic searches /pilot/1/discovery-<name>/proto, where nothing publishes.
+    var topic = ""
     var timeout = 30
     var jsonOutput = false
     var i = 0

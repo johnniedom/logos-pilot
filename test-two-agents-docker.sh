@@ -46,6 +46,23 @@ check() {
   fi
 }
 
+# check() only asserts "the call came back and didn't say error" — which a response
+# reporting failure in plain prose still satisfies. Discovery returning
+# {"agents":[],"count":0,"note":"no agents found"} passed for the life of this
+# script while finding nobody, which is how a broken A2A path stayed green
+# (2026-07-26). Use this when the RESULT, not the call, is what matters.
+check_has() {
+  local label="$1" result="$2" pattern="$3"
+  if echo "$result" | grep -qE "$pattern"; then
+    echo "  PASS  $label"
+    ((PASS++))
+  else
+    echo "  FAIL  $label (expected /$pattern/)"
+    echo "        → $(echo "$result" | head -c 160)"
+    ((FAIL++))
+  fi
+}
+
 call_a() {
   # 120s to match call_b: a cold agent replays the whole chain inside initialize,
   # and 30s turned a long chain into bogus "(empty response)" failures.
@@ -210,8 +227,12 @@ check "[A] publishes Agent Card" "$R"
 echo "  ...   Waiting 10s for card to propagate"
 sleep 10
 
-R=$(call_b agentDiscover pilot)
-check "[B] discovers agents" "$R"
+# Discovery must FIND something. "" is the shared discovery topic agentCard()
+# publishes to; passing a name builds /pilot/1/discovery-<name>/proto, which no
+# card is ever published to.
+R=$(call_b agentDiscover "")
+check_has "[B] discovers ≥1 agent" "$R" '"count":[1-9]'
+check_has "[B] discovered agent is A" "$R" "$(echo "$NPK_A" | python3 -c "import sys,json;print(json.load(sys.stdin).get('nullifier_public_key','__none__')[:16])" 2>/dev/null || echo '__none__')"
 
 echo ""
 
