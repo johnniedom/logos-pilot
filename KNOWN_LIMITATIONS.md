@@ -205,13 +205,64 @@ Pilot needs no redesign.
 
 ---
 
+## 7. A broadcast Agent Card reaches the peer's node but never its module — ours
+
+**What it is.** Two agents on the same Waku network do not learn each other by
+discovery. Agent A publishes its card; Agent B's `agentDiscover("")` returns
+`{"count":0}` indefinitely. The same loss applies to an inbound A2A **task**, so a
+paid task submitted over broadcast never completes: the asker's row stays
+`submitted` because no reply ever comes.
+
+**Why — measured, not inferred (2026-07-26).** The suspicion was that the relay
+dropped our messages for lack of RLN rate-limit membership, since the node logs
+`Publishing message without RLN proof`. That is **not** what happens. Tracing the
+message hashes end to end:
+
+- Agent A logged 3 publishes to `/waku/2/rs/2/7` (`start publish Waku message
+  … msg_hash=0x…`), all 3 **without** an RLN proof.
+- Agent B's node logged **all 3 of those hashes** — `received relay message` and
+  `handling message` — so every message arrived.
+- Agent B's database recorded **none of them**: `discovered_agents` 0 rows,
+  `inbound_tasks` 0 rows.
+
+So nothing is lost in transit and RLN membership is not the cause. The loss is on
+the **receiving side, between B's Waku node holding the bytes and B's pilot module
+being handed them**. That is our code, not an upstream gap. The exact seam — the
+`delivery_module` subscription callback into the module's `messageReceived` — is
+not yet pinned down; a contributing factor is that a containerized agent's
+*module* log lines are not captured at all (`docker logs` shows only the node's),
+so the module side of that handoff is invisible in a two-agent run.
+
+**What Pilot does about it.** Out-of-band import
+(`agentImportCard` / `pilot peer add <card.json>`, §"Discovery" in
+[`docs/agent-to-agent.md`](docs/agent-to-agent.md)) removes discovery from the
+critical path on the **asker** side, and that side is fully verified: the asker
+imports the card, the signature verifies, the messaging key and the declared price
+resolve from it, and the request is encrypted and published. It does **not** repair
+the **doer** side — B must still receive the request — so import alone does not make
+the two-agent paid task work.
+
+**What this means for the claim.** Two agents transacting autonomously over
+broadcast discovery **does not work today and must not be claimed.** The
+asker-side mechanism is real and tested; the delivery into the peer's module is
+not. Item 4 of §2 ("autonomous pay requires prior discovery of the doer's card")
+should now be read as "discovered *or imported*" — imported cards satisfy it.
+
+**What would close it.** Instrumenting the `delivery_module` → module message
+handoff on the receiving agent (and capturing the module's log in the container so
+that handoff is observable), then fixing whichever side of it drops the message.
+
+---
+
 ## How to read this list
 
 - Items **1**, the upstream parts of **2.7**, and **6** are **platform gaps**,
   evidenced against pinned upstream revisions or against a captured crash — not
   Pilot defects.
-- Items **2 (1–6)**, **3**, **4**, and **5** are **Pilot's own scope and
+- Items **2 (1–6)**, **3**, **4**, **5**, and **7** are **Pilot's own scope and
   verification gaps**, stated so a follow-up question does not catch us out.
+  **7** is the one that blocks a headline claim, and it is measured rather than
+  guessed: the message provably arrives and we provably fail to consume it.
 - Where a fix path exists it is named. Where it depends on infrastructure that does
   not exist yet (a public testnet), that dependency is stated plainly.
 
