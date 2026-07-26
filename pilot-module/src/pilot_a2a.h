@@ -86,6 +86,22 @@ QString a2aSenderDisplay(bool authenticated, bool firstContact, const QString& s
 void a2aEvictOldInboundTasks(sqlite3* db, long nowEpoch);
 void a2aEvictDiscoveryCache(sqlite3* db);
 
+// Resolve the ECIES key an OUTBOUND A2A message must be encrypted to, from the peer's
+// discovered/imported Agent Card: its dedicated _logos.enc_key, else its _logos.signing_key
+// (pre-split peers). Returns EMPTY when no card on file vouches for the address — callers must
+// then refuse to send.
+//
+// It deliberately does NOT fall back to using the address itself as a key. It used to: a bare
+// hex address was returned verbatim on the theory that the caller had passed an ECIES key
+// directly. But a wallet VIEWING key is bare hex too (and is exactly what
+// test-two-agents-docker.sh passes), so the request got encrypted to a key the peer cannot
+// decrypt and published to /pilot/1/inbox-<viewing key>/proto — a channel nobody subscribes to.
+// The send reported success, nothing ever arrived, and no error was raised: a silent dead-drop
+// (2026-07-26). A peer becomes routable by having a card, not by looking like a key.
+//
+// External linkage so the unit tests can drive it directly. Defined in pilot_a2a.cpp.
+std::string a2aResolveRoutingKey(sqlite3* db, const std::string& agentAddress);
+
 // L2 — verify-before-cache guard for the discovered_agents card cache (see pilot_a2a.cpp).
 // Refuses to let a non-'valid' card evict an existing row that still verifies 'valid', closing a
 // forged-same-npk denial-of-payment. Returns true iff a row was written. Defined in pilot_a2a.cpp.

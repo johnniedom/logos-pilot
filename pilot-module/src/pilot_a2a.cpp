@@ -890,22 +890,31 @@ std::string PilotImpl::discoveredPayoutFor(const std::string& agentAddress) {
 // key directly, and a plain key round-trips unchanged. We deliberately do NOT reduce it
 // through extractEncryptionKey (which extracts the wallet VIEWING key from an npk blob — a
 // key the doer cannot decrypt with, the original request-leg blocker).
-std::string PilotImpl::a2aRoutingKeyFor(const std::string& agentAddress) {
+std::string a2aResolveRoutingKey(sqlite3* db, const std::string& agentAddress) {
     // L1: prefer the doer's dedicated ENCRYPTION key (_logos.enc_key) — the key it subscribes its
     // inbox under and holds the private half of. A pre-split peer card has no enc_key, so fall back
     // to its _logos.signing_key (the old unified key, which that peer still decrypts with).
-    QJsonObject logos = matchedCardLogos(db_, agentAddress);
+    QJsonObject logos = matchedCardLogos(db, agentAddress);
     std::string key = logos["enc_key"].toString().toStdString();
     if (key.empty()) key = logos["signing_key"].toString().toStdString();   // pre-split peer fallback
     if (!key.empty()) return key;
-    // No discovered/valid Agent Card resolved a messaging key. A caller may legitimately have
-    // passed a BARE ECIES key directly (a plain hex string), which round-trips verbatim. But if
-    // the address is an npk/wallet BLOB (a JSON object carrying the wallet viewing key), routing
-    // to it would ENCRYPT the request to a key the doer cannot decrypt with — a silent
-    // dead-drop into the void. Fail LOUDLY instead: return empty so callers refuse to send.
-    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(agentAddress));
-    if (doc.isObject()) return std::string();   // npk/wallet blob + no card -> unroutable
-    return agentAddress;                          // bare ECIES key -> route verbatim
+
+    // No card on file vouches for this address, so we have NO key the peer can decrypt with.
+    //
+    // This used to return a bare-hex address verbatim, on the theory that the caller had passed
+    // an ECIES key directly. A wallet VIEWING key is bare hex too — and is exactly what the
+    // two-agent test passes — so the request was encrypted to a key the peer does not hold and
+    // published to /pilot/1/inbox-<viewing key>/proto, a channel nobody subscribes to. The send
+    // reported success, nothing arrived, and nothing errored: a silent dead-drop (2026-07-26),
+    // which is why a paid task could never settle.
+    //
+    // Being shaped like a key is not evidence of being the right key. Refuse; the caller reports
+    // it, and the owner makes the peer routable with `pilot peer add <card.json>` or discovery.
+    return std::string();
+}
+
+std::string PilotImpl::a2aRoutingKeyFor(const std::string& agentAddress) {
+    return a2aResolveRoutingKey(db_, agentAddress);
 }
 
 // L1 dual-key decrypt: try the dedicated ENCRYPTION key (agentEncPriv_) first — the key our card

@@ -1,5 +1,6 @@
 #include <logos_test.h>
 #include "../src/pilot_impl.h"
+#include "../src/pilot_a2a.h"
 #include "../src/pilot_crypto.h"
 #include <sqlite3.h>
 #include <string>
@@ -597,4 +598,42 @@ LOGOS_TEST(settle_completed_creates_and_links_spend_atomically) {
     LOGOS_ASSERT_FALSE(sid.empty());                       // the link is durable...
     LOGOS_ASSERT_EQ(spendCount(dir), 1);                   // ...and exactly one spend was created...
     LOGOS_ASSERT_FALSE(spendState(dir, sid).empty());      // ...and the linked spend row really exists
+}
+
+// ── routing: a bare address is not evidence of a messaging key ──────────────────
+//
+// With no card on file, a2aRoutingKeyFor used to return the address VERBATIM on the
+// theory that the caller had passed an ECIES key directly. But a wallet viewing key
+// is bare hex too, and test-two-agents-docker.sh passes exactly that. Routing to it
+// encrypts the request to a key the peer cannot decrypt and publishes it to
+// /pilot/1/inbox-<viewing key>/proto — a channel the peer never subscribes to. The
+// send "succeeds", nothing arrives, and no error is ever raised: a silent dead-drop
+// (observed 2026-07-26, and the reason a paid task could never settle).
+//
+// Only a card — discovered, or imported out-of-band — makes a peer routable.
+LOGOS_TEST(routing_refuses_an_address_no_card_vouches_for) {
+    std::string dir = outDir("routing_no_card");
+    PilotImpl impl; impl.initialize(dir);
+    sqlite3* db = openDb(dir);
+
+    // A well-formed compressed secp256k1 public key, with no card on file. Shaped like a
+    // key is not evidence of being the peer's key — a wallet viewing key looks identical.
+    LOGOS_ASSERT_TRUE(a2aResolveRoutingKey(db,
+        "02a36ce18bf4221d22f28ee9ee2d5c4e7e5161fabf0995b29eb5cee1ed3e98951d").empty());
+    // A wallet npk blob was already refused; keep it refused.
+    LOGOS_ASSERT_TRUE(a2aResolveRoutingKey(db,
+        "{\"nullifier_public_key\":\"aa\",\"viewing_public_key\":\"bb\"}").empty());
+    sqlite3_close(db);
+}
+
+// A card on file DOES make the peer routable — the fix must refuse the unvouched-for,
+// not everything. seedCardKp publishes kp.publicKeyHex as the card's _logos.signing_key.
+LOGOS_TEST(routing_resolves_the_key_from_a_card) {
+    std::string dir = outDir("routing_with_card");
+    PilotImpl impl; impl.initialize(dir);
+    ECIESKeypair kp = seedCardKp(dir, "PEER_VK", "PEER_VK", generateECIESKeypair());
+    sqlite3* db = openDb(dir);
+
+    LOGOS_ASSERT_EQ(a2aResolveRoutingKey(db, "PEER_VK"), kp.publicKeyHex);
+    sqlite3_close(db);
 }
