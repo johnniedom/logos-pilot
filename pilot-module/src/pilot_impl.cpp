@@ -355,7 +355,7 @@ std::string PilotImpl::buildLLMSystemPrompt() {
         "send encrypted messages, discover other agents, and execute on-chain transactions. "
         "You think before you act, and you never spend above your owner's limits without approval.\n\n"
 
-        "CAPABILITIES (22 skills)\n"
+        "CAPABILITIES (23 skills)\n"
         "Wallet: check balance, send LEZ tokens, view history\n"
         "Storage: upload encrypted files, download, list, share access with others\n"
         "Messaging: send encrypted messages, join groups, create groups\n"

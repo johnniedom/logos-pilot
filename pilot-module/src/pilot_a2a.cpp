@@ -464,6 +464,41 @@ bool a2aCacheDiscoveredCard(sqlite3* db, const QJsonObject& card,
     return true;
 }
 
+// Learn a peer from a card handed over out-of-band. Discovery over Waku is the convenient
+// path, not a load-bearing one: a publish reaches the relay but nothing comes back on this
+// network, and the node logs "Publishing message without RLN proof" (2026-07-26). What the
+// payment path actually needs from a card — the peer's messaging key, its payout account and
+// its declared price — travels just as well in a file.
+//
+// This is NOT a trust shortcut. The card goes through a2aCacheDiscoveredCard exactly as a
+// broadcast card does: the signature must verify against the card's own published identity
+// key, first contact TOFU-pins (npk -> signing_key), and a card that does not verify can
+// never evict one that does. Only the delivery differs.
+std::string PilotImpl::agentImportCard(const std::string& cardJson) {
+    if (!db_) return "{\"error\": \"not initialized\"}";
+
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(cardJson));
+    if (!doc.isObject())
+        return "{\"error\": \"not a JSON object — expected an Agent Card\"}";
+    QJsonObject card = doc.object();
+
+    QJsonObject logos = card["_logos"].toObject();
+    std::string npk = logos["npk"].toString().toStdString();
+    if (npk.empty())
+        return "{\"error\": \"card has no _logos.npk — is this an Agent Card?\"}";
+
+    if (!a2aCacheDiscoveredCard(db_, card, "/pilot/1/discovery/proto", nowTimestamp()))
+        return "{\"error\": \"refused — a verified card is already pinned for this identity "
+               "and this one does not verify against it\"}";
+
+    QJsonObject out;
+    out["imported"] = true;
+    out["npk"] = QString::fromStdString(npk);
+    out["signature_status"] = verifyCardStatus(card, db_);
+    out["pricing"] = logos["pricing"].toObject();
+    return QJsonDocument(out).toJson(QJsonDocument::Compact).toStdString();
+}
+
 std::string PilotImpl::agentDiscover(const std::string& topic) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 

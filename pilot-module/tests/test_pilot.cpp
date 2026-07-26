@@ -99,7 +99,8 @@ LOGOS_TEST(meta_skills_lists_all_skills) {
     LOGOS_ASSERT_CONTAINS(result, "program.query");
     LOGOS_ASSERT_CONTAINS(result, "meta.skills");
     LOGOS_ASSERT_CONTAINS(result, "meta.status");
-    LOGOS_ASSERT_CONTAINS(result, "\"count\":22");
+    LOGOS_ASSERT_CONTAINS(result, "agent.import_card");
+    LOGOS_ASSERT_CONTAINS(result, "\"count\":23");
 }
 
 LOGOS_TEST(meta_status_shows_not_initialized) {

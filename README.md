@@ -145,7 +145,7 @@ The owner deploys the agent with a single CLI command and interacts with it from
 ```
 pilot-module/
 ├── src/
-│   ├── pilot_impl.h          # Public API — 22 skills, pure C++ types
+│   ├── pilot_impl.h          # Public API — 23 skills, pure C++ types
 │   ├── pilot_impl.cpp         # Core: init, database, echo
 │   ├── pilot_identity.cpp     # Identity + wallet (Phase 1)
 │   ├── pilot_owner.cpp        # Owner channel (Phase 2)

@@ -1,11 +1,15 @@
 import strutils, json, times
 import rpc, daemon, format
 
+# This list drifted behind the module: it was missing agent.ask, so verify printed
+# "21/21 registered" while the agent actually registered 22. A report that looks
+# complete while being wrong is worse than one that looks short.
 const SKILL_NAMES = @[
   "wallet.balance", "wallet.send", "wallet.history",
   "storage.upload", "storage.download", "storage.list", "storage.share",
   "messaging.send", "messaging.join", "messaging.create_group",
-  "agent.card", "agent.discover", "agent.task", "agent.subscribe", "agent.cancel",
+  "agent.card", "agent.ask", "agent.discover", "agent.import_card",
+  "agent.task", "agent.subscribe", "agent.cancel",
   "program.query", "program.call", "program.deploy",
   "meta.skills", "meta.status", "meta.configure"
 ]
@@ -80,7 +84,8 @@ proc runVerify*(cfg: Config, jsonOnly: bool) =
     ("Wallet", @["wallet.balance", "wallet.send", "wallet.history"]),
     ("Storage", @["storage.upload", "storage.download", "storage.list", "storage.share"]),
     ("Messaging", @["messaging.send", "messaging.join", "messaging.create_group"]),
-    ("Agent", @["agent.card", "agent.discover", "agent.task", "agent.subscribe", "agent.cancel"]),
+    ("Agent", @["agent.card", "agent.ask", "agent.discover", "agent.import_card",
+                "agent.task", "agent.subscribe", "agent.cancel"]),
     ("Blockchain", @["program.query", "program.call", "program.deploy"]),
     ("Meta", @["meta.skills", "meta.status", "meta.configure"])
   ]

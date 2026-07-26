@@ -114,6 +114,30 @@ static void seedCard(const std::string& dir, const std::string& npk, const std::
     seedCardKp(dir, npk, payout, generateECIESKeypair());
 }
 
+// Build (but do NOT store) a signed card, exactly as agentCard() publishes it. This is what
+// a peer hands over out-of-band for import.
+static std::string buildSignedCardJson(const std::string& npk, const std::string& payout,
+                                       const ECIESKeypair& kp) {
+    QJsonObject pricing; pricing["agent-ask"] = 5;
+    QJsonObject logos;
+    logos["npk"] = QString::fromStdString(npk);
+    logos["payout"] = QString::fromStdString(payout);
+    logos["signing_key"] = QString::fromStdString(kp.publicKeyHex);
+    logos["pricing"] = pricing;
+    QJsonObject card;
+    card["name"] = QString("Peer");
+    card["_logos"] = logos;
+
+    std::string canonical = QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
+    QJsonObject sig;
+    sig["alg"] = QString("ES256K");
+    sig["publicKey"] = QString::fromStdString(kp.publicKeyHex);
+    sig["value"] = QString::fromStdString(signMessage(bytes, kp.privateKeyHex));
+    card["signature"] = sig;
+    return QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString();
+}
+
 // Seed an UNSIGNED card: verifyCardStatus -> 'unsigned', so it must NOT drive a payout.
 static void seedUnsignedCard(const std::string& dir, const std::string& npk, const std::string& payout) {
     std::string card = "{\"name\":\"Peer\",\"_logos\":{\"npk\":\"" + npk +
@@ -635,5 +659,73 @@ LOGOS_TEST(routing_resolves_the_key_from_a_card) {
     sqlite3* db = openDb(dir);
 
     LOGOS_ASSERT_EQ(a2aResolveRoutingKey(db, "PEER_VK"), kp.publicKeyHex);
+    sqlite3_close(db);
+}
+
+// ── importing a card out-of-band ────────────────────────────────────────────────
+//
+// Broadcast discovery has never delivered a card on this network: a publish reaches the
+// relay, nothing comes back, and the node logs "Publishing message without RLN proof"
+// (2026-07-26). Handing the card over directly is the path that works — and it is not a
+// weaker one, because import runs the SAME verification as the network path
+// (a2aCacheDiscoveredCard: signature check, TOFU pin, no-evict guard).
+LOGOS_TEST(import_card_makes_a_peer_routable) {
+    std::string dir = outDir("import_routable");
+    PilotImpl impl; impl.initialize(dir);
+    ECIESKeypair kp = generateECIESKeypair();
+
+    LOGOS_ASSERT_TRUE(a2aResolveRoutingKey(openDb(dir), "PEER_NPK").empty());   // unknown before
+
+    std::string res = impl.agentImportCard(buildSignedCardJson("PEER_NPK", "PEER_NPK", kp));
+    QJsonObject o = QJsonDocument::fromJson(QByteArray::fromStdString(res)).object();
+    LOGOS_ASSERT_TRUE(o["imported"].toBool());
+    LOGOS_ASSERT_EQ(o["signature_status"].toString().toStdString(), std::string("valid"));
+
+    sqlite3* db = openDb(dir);
+    LOGOS_ASSERT_EQ(a2aResolveRoutingKey(db, "PEER_NPK"), kp.publicKeyHex);     // routable after
+    sqlite3_close(db);
+}
+
+// The declared price rides in on the card and is reported back, so the owner sees what a
+// task with this peer will cost before committing to one.
+LOGOS_TEST(import_card_carries_the_declared_price) {
+    std::string dir = outDir("import_price");
+    PilotImpl impl; impl.initialize(dir);
+
+    std::string res = impl.agentImportCard(
+        buildSignedCardJson("PEER_NPK", "PEER_NPK", generateECIESKeypair()));
+    QJsonObject o = QJsonDocument::fromJson(QByteArray::fromStdString(res)).object();
+
+    LOGOS_ASSERT_EQ(o["pricing"].toObject()["agent-ask"].toInt(), 5);
+}
+
+// Garbage in must not become a peer. An unparseable blob, a JSON object that is not a
+// card, and a card with no identity are all refused with an error and store nothing.
+LOGOS_TEST(import_card_refuses_what_is_not_a_card) {
+    std::string dir = outDir("import_refuse");
+    PilotImpl impl; impl.initialize(dir);
+
+    for (const std::string& bad : {std::string("not json"),
+                                   std::string("[1,2,3]"),
+                                   std::string("{\"name\":\"no logos block\"}")}) {
+        QJsonObject o = QJsonDocument::fromJson(
+            QByteArray::fromStdString(impl.agentImportCard(bad))).object();
+        LOGOS_ASSERT_TRUE(o.contains("error"));
+    }
+}
+
+// A forged card reusing a pinned npk under a different signing key must not overwrite the
+// genuine one — import inherits that guard rather than reimplementing it.
+LOGOS_TEST(import_card_cannot_evict_a_pinned_identity) {
+    std::string dir = outDir("import_evict");
+    PilotImpl impl; impl.initialize(dir);
+    ECIESKeypair genuine = generateECIESKeypair();
+    impl.agentImportCard(buildSignedCardJson("PEER_NPK", "PEER_NPK", genuine));
+
+    // Same npk, attacker's key, internally well-signed.
+    impl.agentImportCard(buildSignedCardJson("PEER_NPK", "ATTACKER_PAYOUT", generateECIESKeypair()));
+
+    sqlite3* db = openDb(dir);
+    LOGOS_ASSERT_EQ(a2aResolveRoutingKey(db, "PEER_NPK"), genuine.publicKeyHex);
     sqlite3_close(db);
 }

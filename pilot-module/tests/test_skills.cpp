@@ -63,11 +63,14 @@ LOGOS_TEST(registry_list_skills_for_card_format) {
     LOGOS_ASSERT_CONTAINS(card, "application/json");
 }
 
-LOGOS_TEST(builtin_skills_registers_22) {
+LOGOS_TEST(builtin_skills_registers_23) {
     PilotImpl impl;
     std::string skills = impl.metaSkills();
-    LOGOS_ASSERT_CONTAINS(skills, "\"count\":22");   // +1: SAFE A2A service agent.ask (FIX 2)
+    // 21 originally, +1 SAFE A2A service agent.ask (FIX 2), +1 agent.import_card — the
+    // out-of-band peer introduction that makes a paid task possible without discovery.
+    LOGOS_ASSERT_CONTAINS(skills, "\"count\":23");
     LOGOS_ASSERT_CONTAINS(skills, "agent.ask");
+    LOGOS_ASSERT_CONTAINS(skills, "agent.import_card");
 }
 
 LOGOS_TEST(dispatch_skill_works_on_echo_equivalent) {

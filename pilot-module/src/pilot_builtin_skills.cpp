@@ -111,6 +111,20 @@ void registerBuiltinSkills(SkillRegistry& registry, PilotImpl* impl) {
             return impl->agentAsk(obj["prompt"].toString().toStdString());
         });
 
+    // Out-of-band peer introduction. Same verification as discovery; the card just
+    // arrives by file or paste instead of over Waku.
+    reg(registry, "agent.import_card", "agent",
+        "Learns a peer from its signed Agent Card, handed over out-of-band", 0,
+        [impl](const std::string& args) {
+            QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(args));
+            QJsonObject obj = doc.object();
+            // Accept either {"card": {...}} or the card object itself, so a pasted card
+            // works without the owner having to wrap it.
+            QJsonObject card = obj.contains("card") ? obj["card"].toObject() : obj;
+            return impl->agentImportCard(
+                QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString());
+        });
+
     reg(registry, "agent.discover", "agent",
         "Discovers peer agents on the network", 0,
         [impl](const std::string& args) {

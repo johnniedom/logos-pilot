@@ -88,6 +88,11 @@ public:
     // Phase 5: A2A + Agent skills
     std::string agentCard();
     std::string agentDiscover(const std::string& topic);
+    // Learn a peer from a card handed over out-of-band (file, paste, QR) instead of waiting
+    // for one to arrive over discovery. Runs the SAME signature + TOFU verification as a
+    // broadcast card, so an imported peer is neither more nor less trusted than a discovered
+    // one — only the delivery differs.
+    std::string agentImportCard(const std::string& cardJson);
     std::string agentTask(const std::string& agentAddress, const std::string& skill, const std::string& paramsJson);
     std::string agentSubscribe(const std::string& agentAddress, const std::string& taskId);
     bool agentCancel(const std::string& agentAddress, const std::string& taskId);
