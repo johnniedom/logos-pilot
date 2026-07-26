@@ -123,6 +123,31 @@ doAssert "b" in listContacts(cfg)
 doAssert "alice" in listContacts(cfg)
 doAssert listContacts(cfg) == listContacts(cfg).sorted
 
+# ── readPeerCard: an Agent Card arrives as a file or as a paste ──
+# A card may be handed over as a file or pasted whole. Validate the shape HERE,
+# where the owner can still fix it, not three RPC hops later.
+let cardTmp = getTempDir() / "pilot-test-card.json"
+const GOOD_CARD = """{"name":"Pilot Agent","_logos":{"npk":"abc123","signing_key":"02aa"}}"""
+writeFile(cardTmp, GOOD_CARD & "\n")
+
+doAssert readPeerCard(cardTmp) == (GOOD_CARD, "")          # file, trailing newline stripped
+doAssert readPeerCard(GOOD_CARD) == (GOOD_CARD, "")        # pasted literally
+doAssert readPeerCard("  " & GOOD_CARD & "  ") == (GOOD_CARD, "")   # paste with stray spaces
+
+# Every rejection names the problem AND returns no card — a half-validated card
+# must never reach the module.
+for bad in ["/no/such/file.json",           # missing file
+            "{\"name\":\"x\"}",             # JSON, but no _logos.npk
+            "{\"_logos\":{}}",              # _logos present, npk empty
+            "not json",                     # neither a path nor JSON
+            "{\"a\":1",                     # truncated paste
+            "[1,2,3]"]:                     # valid JSON, wrong kind
+  let (noCard, cardErr) = readPeerCard(bad)
+  doAssert cardErr != "", "expected an error for: " & bad
+  doAssert noCard == "", "expected no card for: " & bad
+
+removeFile(cardTmp)
+
 # ── explainRpcFailure: turn RPC_FAILED into something actionable ──
 # When the sequencer goes unreachable mid-transfer the upstream wallet unwraps a
 # connect error and the whole module process dies. Every later wallet call then

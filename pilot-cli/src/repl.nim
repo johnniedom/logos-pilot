@@ -47,6 +47,47 @@ proc formatJson(raw: string): string =
         lines.add("    " & DIM & s["description"].getStr() & RESET)
       return lines.join("\n")
 
+    # An imported Agent Card. "stored" must not read as "usable": the payment path
+    # resolves a peer's messaging key and payout account only from a card whose
+    # signature verifies against its pinned identity, so an unsigned card lists
+    # fine and can never be paid. Say that here, not at task time.
+    if j.hasKey("imported"):
+      let sig = j.getOrDefault("signature_status").getStr("?")
+      var lines: seq[string]
+      lines.add(GREEN & "  card stored" & RESET & "  " & DIM &
+                truncStr(j.getOrDefault("npk").getStr("?"), 20) & RESET)
+      lines.add("  " & DIM & "Signature  " & RESET &
+                (if sig == "valid": GREEN & sig & RESET else: YELLOW & sig & RESET))
+      let pricing = j.getOrDefault("pricing")
+      if not pricing.isNil and pricing.kind == JObject:
+        for skill, price in pricing:
+          let lez = if price.kind == JInt: price.getInt() else: price.getFloat().int
+          lines.add("    " & DIM & skill & "  " & RESET & $lez & " LEZ")
+      if sig != "valid":
+        lines.add("  " & YELLOW & "listed, but NOT payable — ask the peer for its signed card" & RESET)
+      return lines.join("\n")
+
+    # Peer list — shared by /peers and /discover, which used to dump raw JSON.
+    if j.hasKey("agents") and j["agents"].kind == JArray:
+      if j["agents"].len == 0:
+        return DIM & "  no peers known yet — /peer add <card.json> to learn one" & RESET
+      var lines: seq[string]
+      lines.add(BOLD & "  Known peers (" & $j["agents"].len & ")" & RESET)
+      for a in j["agents"]:
+        let npk = a{"_logos", "npk"}.getStr(a.getOrDefault("npk").getStr("?"))
+        let sig = a.getOrDefault("signature_status").getStr("?")
+        lines.add("")
+        lines.add("  " & BOLD & a.getOrDefault("name").getStr("?") & RESET &
+                  "  " & DIM & truncStr(npk, 20) & RESET)
+        lines.add("  " & DIM & "Signature  " & RESET &
+                  (if sig == "valid": GREEN & sig & RESET else: YELLOW & sig & RESET))
+        let pricing = a{"_logos", "pricing"}
+        if not pricing.isNil and pricing.kind == JObject:
+          for skill, price in pricing:
+            let lez = if price.kind == JInt: price.getInt() else: price.getFloat().int
+            lines.add("    " & DIM & skill & "  " & RESET & $lez & " LEZ")
+      return lines.join("\n")
+
     # Balance
     if j.hasKey("balance") and j.hasKey("account"):
       # Two shapes reach this branch: walletBalance returns a flat {"balance":"100"},
@@ -175,6 +216,8 @@ const HELP_TEXT = """
   /send <to> <amt> <reason>    Send LEZ tokens (<to> = @contact, @keys-file, or raw keys JSON)
   /contact <name> <keys>       Save an address as @name (paste the keys once, or give a file)
   /contacts                    List saved addresses
+  /peer add <card>             Learn a peer from its Agent Card (a file, or the card pasted)
+  /peers                       List known peers
   /approve <id>                Approve pending spend
   /reject <id>                 Reject pending spend
   /upload <path> <label>       Upload a file
@@ -262,6 +305,20 @@ proc dispatchSlash(cfg: Config, input: string): string =
     for n in names:
       listing &= "\n    @" & n
     return listing
+  of "/peer":
+    # A contact is somewhere to SEND to; a peer is someone to ASK. The card carries
+    # the peer's messaging key, payout account and price, so importing one is what
+    # makes a paid task possible — and it does not need discovery to have worked.
+    if parts.len < 3 or parts[1].toLowerAscii() != "add":
+      return RED & "  usage: /peer add <card.json | pasted card>" & RESET &
+             "\n  " & DIM & "e.g.   " & RESET & "/peer add ~/card-b.json"
+    let (card, perr) = readPeerCard(parts[2 .. ^1].join(" "))
+    if perr != "":
+      return RED & "  " & perr & RESET
+    return formatJson(daemonCallWithSpinner(cfg, "agentImportCard", @[card],
+                                            timeoutSec = 30, label = "Importing card"))
+  of "/peers":
+    return formatJson(discoverWithRetry(cfg, "", 5))
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient|@keys-file> <amount> <reason>" & RESET

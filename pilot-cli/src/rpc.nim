@@ -200,6 +200,33 @@ proc saveContact*(cfg: Config, name, keysOrPath: string): tuple[path, err: strin
   except:
     return ("", "could not write the contact: " & getCurrentExceptionMsg())
 
+# An Agent Card is how one agent learns another: it carries the peer's messaging
+# key, its payout account and its declared price. It arrives out-of-band — a file,
+# or pasted whole — so validate the shape at the keyboard, where the owner can
+# still fix it, rather than after three RPC hops. Whitespace is only stripped from
+# the ENDS: the card's signature covers its own bytes, so the inside is left alone.
+# Returns (card, "") or ("", plain-English reason).
+proc readPeerCard*(pathOrJson: string): tuple[card, err: string] =
+  var raw = pathOrJson.strip()
+  if raw.len == 0:
+    return ("", "give a card file or paste the card itself")
+  if not raw.startsWith("{"):
+    let p = expandTilde(raw)
+    if not fileExists(p):
+      return ("", "no such card file: " & p & "\n" &
+                  "  Give a path to the card, or paste the card itself (starts with '{').")
+    try: raw = readFile(p).strip()
+    except: return ("", "could not read that card file: " & getCurrentExceptionMsg())
+  var parsed: JsonNode
+  try: parsed = parseJson(raw)
+  except: return ("", "that is not valid JSON — paste the whole card, braces included")
+  if parsed.kind != JObject:
+    return ("", "expected a card object, got " & $parsed.kind)
+  if parsed{"_logos", "npk"}.getStr("") == "":
+    return ("", "no _logos.npk in that card — is it an Agent Card? " &
+                "(the peer produces its card with the agentCard call)")
+  return (raw, "")
+
 # Names of every saved contact, sorted, without the .json.
 proc listContacts*(cfg: Config): seq[string] =
   result = @[]

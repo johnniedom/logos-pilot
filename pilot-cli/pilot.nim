@@ -15,6 +15,7 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
   verify                       Full verification report
   discover [topic]             Discover peer agents
   contact <name> <keys|file>   Save an address as @name (list them with: contact)
+  peer add <card.json>         Learn a peer from its Agent Card (list them with: peer)
   configure <key> <value>      Set configuration
   help                         Show this help
 
@@ -86,6 +87,61 @@ proc runStatus(cfg: Config, jsonOutput: bool) =
       blankLine()
 
   if startedDaemon: stopDaemon(cfg)
+
+# Importing a card is what makes a peer usable at all: the module resolves a peer's
+# messaging key, payout account and declared price ONLY from a stored card. It runs
+# the same signature and TOFU checks on an imported card as on a broadcast one, so
+# this is a shortcut in DELIVERY, not in trust.
+proc runPeerAdd(cfg: Config, card: string) =
+  let startedDaemon = not isDaemonRunning(cfg)
+  if startedDaemon:
+    spinner("Starting daemon")
+    if not startDaemon(cfg):
+      clearLine()
+      fail("Failed to start daemon")
+      quit(1)
+    clearLine()
+
+  let res = daemonCall(cfg, "agentImportCard", @[card], timeoutSec = 30)
+  if startedDaemon: stopDaemon(cfg)
+
+  var j: JsonNode
+  try:
+    j = parseJson(res)
+  except:
+    fail("the agent gave no usable answer — is it running? (pilot status)")
+    echo DIM & "  " & res & RESET
+    quit(1)
+  if j.hasKey("error"):
+    fail(j["error"].getStr())
+    quit(1)
+  if not j.getOrDefault("imported").getBool(false):
+    fail("the card was not stored")
+    echo DIM & "  " & res & RESET
+    quit(1)
+
+  let sig = j.getOrDefault("signature_status").getStr("?")
+  ok("card stored")
+  kv("NPK", truncStr(j.getOrDefault("npk").getStr("?"), 40))
+  kv("Signature", sig)
+
+  let pricing = j.getOrDefault("pricing")
+  if not pricing.isNil and pricing.kind == JObject and pricing.len > 0:
+    for skill, price in pricing:
+      let lez = if price.kind == JInt: price.getInt() else: price.getFloat().int
+      kv(skill, $lez & " LEZ")
+
+  blankLine()
+  # "stored" must not read as "usable": the payment path resolves a messaging key
+  # and a payout account only from a card whose signature verifies against its
+  # pinned identity. An unsigned card lists fine and can never be paid — say so
+  # here rather than let it surface as a mystery failure at task time.
+  if sig != "valid":
+    warn("this card's signature is " & sig & " — the peer is listed but NOT payable")
+    echo DIM & "  Ask the peer for its signed card (its agentCard output) and import that." & RESET
+  else:
+    echo DIM & "  This peer can now be given paid tasks." & RESET
+  blankLine()
 
 proc main() =
   let cfg = loadConfig()
@@ -163,6 +219,23 @@ proc main() =
       kv("File", path)
     else:
       fail("Usage: pilot contact <name> <keys JSON or file>   (no args lists them)")
+      quit(1)
+
+  of "peer", "peers":
+    # A peer becomes usable the moment its card is stored, with no dependence on
+    # broadcast discovery — which reaches the relay but never comes back on this
+    # network (2026-07-26). Listing reuses `discover`: imported cards are cached
+    # under the same shared discovery topic, so they show up in the same table.
+    if rest.len == 0 or (rest.len == 1 and rest[0].toLowerAscii() == "list"):
+      runDiscover(cfg, "", 30, false)
+    elif rest.len >= 2 and rest[0].toLowerAscii() == "add":
+      let (card, err) = readPeerCard(rest[1 .. ^1].join(" "))
+      if err != "":
+        fail(err)
+        quit(1)
+      runPeerAdd(cfg, card)
+    else:
+      fail("Usage: pilot peer add <card.json | pasted card>   (no args lists known peers)")
       quit(1)
 
   of "configure", "config":
