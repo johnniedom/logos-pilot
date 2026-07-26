@@ -258,6 +258,36 @@ proc explainRpcFailure*(resp, logTail: string): string =
            "  Fix: check the sequencer is up, then /quit and start pilot chat again."
   return crashed & " crashed — the agent needs a restart (/quit, then start pilot chat again)"
 
+# The wallet cannot answer anything while it replays the chain — 37s per boot on
+# a 3.1 GB chain (2026-07-26). A bare spinner during that is indistinguishable
+# from a wedged agent, which is most of why one diagnosis took six hours. Returns
+# "" unless the tail of the log says a replay is CURRENTLY in progress: a later
+# "Synced to block" cancels an earlier "Blocks to sync", so a finished sync stops
+# hinting. substr, not a slice, because a tail read while the file is being
+# appended to can cut a line mid-write.
+proc syncHint*(logTail: string): string =
+  const MARK = "Blocks to sync:"
+  var hint = ""
+  for line in logTail.splitLines():
+    let idx = line.find(MARK)
+    if idx >= 0:
+      let behind = line.substr(idx + MARK.len).strip()
+      hint = if behind == "": "the wallet is catching up on the chain"
+             else: "the wallet is catching up — " & behind & " blocks behind"
+    elif line.contains("Synced to block"):
+      hint = ""
+  return hint
+
+# Last `lines` lines of the daemon log, or "" if there is no readable log. The
+# log is the only place that says WHY a call is slow or dead; both the sync hint
+# and explainRpcFailure read it.
+proc daemonLogTail*(cfg: Config, lines: int = 40): string =
+  try:
+    let all = readFile(cfg.dataDir / "daemon.log").splitLines()
+    return all[max(0, all.len - lines) .. ^1].join("\n")
+  except:
+    return ""
+
 proc pilotCall*(cfg: Config, methodExpr: string): string =
   let fullCmd = "pilot." & methodExpr
   result = execProcess(cfg.logoscore,

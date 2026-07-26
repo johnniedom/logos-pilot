@@ -174,5 +174,39 @@ doAssert "not answering" in noCrash
 doAssert explainRpcFailure("""{"status":"completed"}""", "") == ""
 doAssert explainRpcFailure("", "") == ""
 
+# ── syncHint: say when the wallet is replaying the chain ──
+# A cold agent replays the chain before it can answer anything — 37s per boot on
+# a 3.1 GB chain (2026-07-26). Silence during that is indistinguishable from a
+# hang, which is most of why one diagnosis took six hours.
+doAssert syncHint(
+  "[logos_execution_zone] Syncing to block 3269. Blocks to sync: 51").contains("51")
+doAssert syncHint("[logos_execution_zone] Synced to block 3269 in 1.8s") == ""
+doAssert syncHint("") == ""
+doAssert syncHint("nothing interesting in this log") == ""
+
+# The LAST word in the log wins: a sync that finished must stop hinting, and a
+# fresh one after it must start again.
+doAssert syncHint("Blocks to sync: 51\nSynced to block 3269 in 1.8s") == ""
+doAssert syncHint("Synced to block 10 in 1s\nBlocks to sync: 7").contains("7")
+
+# A tail read while the file is being appended to can cut a line mid-write. That
+# must still hint (the wallet IS syncing) and must never crash on the slice.
+doAssert syncHint("Blocks to sync:") != ""
+
+# ── daemonLogTail: the seam that feeds both hints from the real log ──
+# Worth testing on disk: if the path or the slice were wrong this would quietly
+# return "" forever and every hint would silently never appear.
+doAssert daemonLogTail(cfg) == ""                    # no log yet -> no guesses
+var manyLines: seq[string]
+for i in 1 .. 60: manyLines.add("line " & $i)
+manyLines.add("[logos_execution_zone] Syncing to block 3269. Blocks to sync: 51")
+writeFile(tmp / "daemon.log", manyLines.join("\n"))
+
+doAssert daemonLogTail(cfg, 5).splitLines().len == 5
+doAssert "Blocks to sync: 51" in daemonLogTail(cfg, 5)
+doAssert "line 1\n" notin daemonLogTail(cfg, 5)      # older lines really are dropped
+doAssert syncHint(daemonLogTail(cfg, 20)).contains("51")
+doAssert daemonLogTail(cfg, 500).splitLines().len == 61   # asking for more than exists is fine
+
 removeDir(tmp)
 echo "test_rpc: all assertions passed"

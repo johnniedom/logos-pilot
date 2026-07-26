@@ -11,8 +11,14 @@ proc daemonCallWithSpinner(cfg: Config, meth: string, args: seq[string] = @[], t
   let p = startProcess("bash", args = @["-c", shellArgs],
                        options = {poUsePath, poStdErrToStdOut})
   var frame = 0
+  var hint = ""
   while p.running:
-    spinTick(label, frame)
+    # A cold wallet replays the chain before it can answer anything, and a bare
+    # spinner during that is indistinguishable from a wedged agent. Re-read the
+    # log every ~2s rather than every frame — the answer changes slowly.
+    if frame mod 16 == 0:
+      hint = syncHint(daemonLogTail(cfg, 20))
+    spinTick(if hint == "": label else: label & " — " & hint, frame)
     inc frame
     sleep(120)
   clearLine()
@@ -644,12 +650,7 @@ proc runRepl*(cfg: Config, dataDir: string) =
     # module behind the call is gone (see explainRpcFailure) — say so, once, for
     # every command rather than per call site.
     if response.contains("RPC_FAILED"):
-      var logTail = ""
-      try:
-        let lines = readFile(gCfg.dataDir / "daemon.log").splitLines()
-        logTail = lines[max(0, lines.len - 40) .. ^1].join("\n")
-      except: discard
-      let hint = explainRpcFailure(response, logTail)
+      let hint = explainRpcFailure(response, daemonLogTail(gCfg, 40))
       if hint != "":
         response = RED & "  " & hint & RESET
 
