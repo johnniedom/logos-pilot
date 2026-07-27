@@ -108,6 +108,21 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             last_seen TEXT NOT NULL
         );
 
+        -- Every message delivery_module hands us, recorded BEFORE any routing decision.
+        -- There is no other way to know whether the handoff happens at all: the module logs
+        -- nothing (zero [pilot] lines in a 550KB daemon log, measured 2026-07-27), and
+        -- delivery_module logs a send but never a subscribe. Measured that night: a task
+        -- reached the doer's NODE (same msgHash on both sides) and its agent never acted on
+        -- it. This table distinguishes the two possible reasons — our callback never fires at
+        -- all, versus it fires but not for our topics — which point at completely different
+        -- fixes (ours vs upstream).
+        CREATE TABLE IF NOT EXISTS delivery_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            received_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS inbound_tasks (
             id TEXT PRIMARY KEY,
             sender_npk TEXT NOT NULL,
@@ -280,6 +295,27 @@ void PilotImpl::initDeliveryModule() {
                     if (data.size() < 2) return;
                     std::string topic = data[0].toString().toStdString();
                     std::string payload = data[1].toString().toStdString();
+
+                    // Record the handoff FIRST, before any branch can drop the message. A row
+                    // here proves delivery_module reached our code; no rows at all proves it
+                    // never did, whatever its subscribe call reported. Deliberately ahead of
+                    // every topic test so a message for an unknown topic still leaves a trace.
+                    if (db_) {
+                        sqlite3_stmt* ev = nullptr;
+                        if (sqlite3_prepare_v2(db_,
+                                "INSERT INTO delivery_events (topic, bytes, received_at) "
+                                "VALUES (?, ?, ?);", -1, &ev, nullptr) == SQLITE_OK) {
+                            // Self-contained: nowTimestamp() is local to pilot_a2a.cpp.
+                            std::string ts = std::to_string(
+                                std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                            sqlite3_bind_text(ev, 1, topic.c_str(), -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_int64(ev, 2, static_cast<sqlite3_int64>(payload.size()));
+                            sqlite3_bind_text(ev, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
+                            sqlite3_step(ev);
+                            sqlite3_finalize(ev);
+                        }
+                    }
 
                     // Peer task on EITHER of our inboxes -> A2A server (L1). The primary inbox is
                     // keyed on the enc key (a2aSelfEncKey()); the legacy signing-key inbox is also

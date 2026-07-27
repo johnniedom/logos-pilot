@@ -52,6 +52,31 @@ std::string PilotImpl::metaStatus() {
         root["funding"] = funding;
     }
 
+    // Has delivery_module EVER handed this agent a message? Zero here, on an agent that is
+    // subscribed and whose node demonstrably received traffic, means the handoff never
+    // happens — a different bug, in a different codebase, from "our topics are wrong".
+    if (db_) {
+        QJsonObject deliv;
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM delivery_events;",
+                               -1, &st, nullptr) == SQLITE_OK &&
+            sqlite3_step(st) == SQLITE_ROW) {
+            deliv["messages_received"] = static_cast<double>(sqlite3_column_int64(st, 0));
+        }
+        if (st) sqlite3_finalize(st);
+        QJsonArray recent;
+        st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT topic FROM delivery_events ORDER BY id DESC LIMIT 5;",
+                -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW)
+                recent.append(QString(reinterpret_cast<const char*>(sqlite3_column_text(st, 0))));
+            sqlite3_finalize(st);
+        }
+        deliv["recent_topics"] = recent;
+        root["delivery"] = deliv;
+    }
+
     // Whether strangers can hire this agent right now, and where it is actually listening.
     // subscribedTopics() is what delivery_module CONFIRMED, not what we intended — the two
     // disagreeing is the unhireable-agent bug.
