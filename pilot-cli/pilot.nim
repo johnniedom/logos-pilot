@@ -16,6 +16,8 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
   discover [topic]             Discover peer agents
   contact <name> <keys|file>   Save an address as @name (list them with: contact)
   peer add <card.json>         Learn a peer from its Agent Card (list them with: peer)
+  open                         Open your agent for hire — strangers can send it paid work
+  close                        Close it again — takes it back off the market
   configure <key> <value>      Set configuration
   help                         Show this help
 
@@ -236,6 +238,26 @@ proc main() =
       runPeerAdd(cfg, card)
     else:
       fail("Usage: pilot peer add <card.json | pasted card>   (no args lists known peers)")
+      quit(1)
+
+  of "open", "close":
+    # Your agent does not put itself up for sale. Until `pilot open`, nobody can hire it:
+    # its inbox is not on the wire and its Agent Card is built but never broadcast. The
+    # decision is remembered, so a reboot comes back the way you left it.
+    let opening = subcmd == "open"
+    let m = if opening: "agentOpenForHire" else: "agentCloseForHire"
+    let r = daemonCall(cfg, m)
+    if r.strip().toLowerAscii() in ["true", "1"]:
+      if opening:
+        ok("Open for hire.")
+        kv("Means", "strangers can now send your agent paid work, and its card is broadcast")
+        kv("Stop", "pilot close")
+      else:
+        ok("Closed for hire.")
+        kv("Means", "strangers can no longer send work; your agent still finds peers to hire")
+        kv("Reopen", "pilot open")
+    else:
+      fail((if opening: "Could not open for hire: " else: "Could not close for hire: ") & r.strip())
       quit(1)
 
   of "configure", "config":

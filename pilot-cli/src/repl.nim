@@ -224,6 +224,8 @@ const HELP_TEXT = """
   /contacts                    List saved addresses
   /peer add <card>             Learn a peer from its Agent Card (a file, or the card pasted)
   /peers                       List known peers
+  /open                        Open your agent for hire — strangers can send it paid work
+  /close                       Close it again — takes it back off the market
   /approve <id>                Approve pending spend
   /reject <id>                 Reject pending spend
   /upload <path> <label>       Upload a file
@@ -325,6 +327,28 @@ proc dispatchSlash(cfg: Config, input: string): string =
                                             timeoutSec = 30, label = "Importing card"))
   of "/peers":
     return formatJson(discoverWithRetry(cfg, "", 5))
+  of "/open":
+    # Your agent does not put itself up for sale. Until you say this, nobody can hire it:
+    # its inbox is not on the wire and its Agent Card is built but never broadcast. Said
+    # once, it is remembered — a reboot comes back open.
+    let r = daemonCallWithSpinner(cfg, "agentOpenForHire", @[],
+                                  timeoutSec = 30, label = "Opening for hire")
+    if r.strip().toLowerAscii() in ["true", "1"]:
+      return GREEN & "  Open for hire." & RESET & "\n  " & DIM &
+             "Your agent is now listening for work from strangers, and its card will be " &
+             "broadcast. This is remembered across restarts — /close to stop." & RESET
+    return RED & "  Could not open for hire." & RESET & "\n  " & DIM & r.strip() & RESET
+  of "/close":
+    # Takes the agent back off the market: the inbox subscription is actually dropped, not
+    # merely un-advertised. It keeps listening on the shared channel, so it can still find
+    # agents for YOU to hire.
+    let r = daemonCallWithSpinner(cfg, "agentCloseForHire", @[],
+                                  timeoutSec = 30, label = "Closing for hire")
+    if r.strip().toLowerAscii() in ["true", "1"]:
+      return GREEN & "  Closed for hire." & RESET & "\n  " & DIM &
+             "Strangers can no longer send your agent work. It still hears other agents " &
+             "announce themselves, so you can keep hiring them. /open to reopen." & RESET
+    return RED & "  Could not close for hire." & RESET & "\n  " & DIM & r.strip() & RESET
   of "/send":
     if parts.len < 4:
       return RED & "  usage: /send <recipient|@keys-file> <amount> <reason>" & RESET
