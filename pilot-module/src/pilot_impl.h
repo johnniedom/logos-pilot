@@ -133,6 +133,17 @@ public:
     // listening on (measured 2026-07-26).
     void subscribeIdentityTopics();
 
+    // Where the agent is ACTUALLY listening — every topic delivery_module confirmed, not every
+    // topic we wanted. identityTopics() is intent; this is the result, and the two differing is
+    // exactly the condition that made an agent unhireable.
+    //
+    // This exists because there is no other way to observe it: delivery_module logs a `send`
+    // with its content topic but logs NOTHING for a `subscribe` (measured 2026-07-27 by
+    // subscribing a canary topic directly — it appears nowhere in a 600KB log). So a
+    // log-scraping assertion can never confirm a subscription, however correct the code is.
+    // Ask the agent instead.
+    std::vector<std::string> subscribedTopics();
+
     std::string agentTask(const std::string& agentAddress, const std::string& skill, const std::string& paramsJson);
     std::string agentSubscribe(const std::string& agentAddress, const std::string& taskId);
     bool agentCancel(const std::string& agentAddress, const std::string& taskId);

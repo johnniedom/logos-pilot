@@ -357,20 +357,43 @@ std::vector<std::string> PilotImpl::identityTopics() {
     return topics;
 }
 
+// Did delivery_module accept this call? Same shape as deliverToOwner's check: a JSON reply
+// carrying success:false or a non-empty error is a refusal; anything else non-null counts.
+static bool deliveryAccepted(const QVariant& v) {
+    if (v.isNull()) return false;
+    const QString s = v.toString();
+    const QJsonDocument d = QJsonDocument::fromJson(s.toUtf8());
+    if (d.isObject()) {
+        const QJsonObject o = d.object();
+        if (o.contains("success")) return o.value("success").toBool();
+        if (o.contains("error") && !o.value("error").toString().isEmpty()) return false;
+    }
+    return true;
+}
+
 void PilotImpl::subscribeIdentityTopics() {
     auto* delivery = logosAPI_ ? logosAPI_->getClient("delivery_module") : nullptr;
     if (!delivery || !delivery->isConnected()) return;
 
     const std::vector<std::string> want = identityTopics();
 
-    // Subscribe what we want and have not already asked for.
+    // Subscribe what we want and have not already asked for. A topic is recorded ONLY when
+    // delivery_module confirms it: subscribedTopics() is the agent's answer to "where are you
+    // actually listening", and it would be worthless if it recorded intentions. This matters
+    // because delivery_module does NOT log subscribe calls (it logs sends) — measured
+    // 2026-07-27 by subscribing a canary topic directly and finding it nowhere in the log —
+    // so its confirmation here is the only evidence that exists.
     for (const std::string& topic : want) {
         if (std::find(subscribedTopics_.begin(), subscribedTopics_.end(), topic)
                 != subscribedTopics_.end())
             continue;
-        delivery->invokeRemoteMethod("delivery_module", "subscribe",
+        QVariant r = delivery->invokeRemoteMethod("delivery_module", "subscribe",
             QString::fromStdString(topic), Timeout(15000));
-        subscribedTopics_.push_back(topic);
+        if (deliveryAccepted(r))
+            subscribedTopics_.push_back(topic);
+        else
+            qWarning() << "[pilot] subscribeIdentityTopics: delivery REFUSED"
+                       << QString::fromStdString(topic);
     }
 
     // Drop what we hold but no longer want. This is what makes closing for hire REAL rather
@@ -382,6 +405,10 @@ void PilotImpl::subscribeIdentityTopics() {
             QString::fromStdString(*it), Timeout(15000));
         it = subscribedTopics_.erase(it);
     }
+}
+
+std::vector<std::string> PilotImpl::subscribedTopics() {
+    return subscribedTopics_;
 }
 
 void PilotImpl::initLLM() {

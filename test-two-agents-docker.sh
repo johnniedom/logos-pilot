@@ -401,28 +401,31 @@ echo ""
 # ═══════════════════════════════════════
 echo "── Phase 8: Agents listen where their cards say ──"
 
-# Every unit test in the module asserts the topic LIST. Only this asserts that a live agent
-# actually asked the network. The gap between those two is where the unhireable-agent bug
-# lived: the card went out, the inbox was never subscribed, and nothing anywhere noticed.
+# Every unit test in the module asserts the topic LIST. This asserts what the agent is
+# ACTUALLY listening on — the topics delivery_module confirmed. The gap between those two is
+# where the unhireable-agent bug lived: the card went out, the inbox was never subscribed, and
+# nothing anywhere noticed.
+#
+# NOT a log grep. delivery_module logs a `send` with its content topic but logs NOTHING for a
+# `subscribe` — measured 2026-07-27 by subscribing a canary topic directly and finding it
+# nowhere in a 600KB log. A log-scraping version of this phase fails no matter how correct the
+# code is, which is a false RED and every bit as useless as the false green it replaced.
 for who in A B; do
   if [ "$who" = "A" ]; then
-    CARD=$(call_a agentCard); LOG_TXT=$(cat "$AGENT_A/daemon.log" 2>/dev/null)
+    CARD=$(call_a agentCard); SUBS=$(call_a subscribedTopics)
   else
-    CARD=$(call_b agentCard); LOG_TXT=$(docker logs $CONTAINER 2>&1)
+    CARD=$(call_b agentCard); SUBS=$(call_b subscribedTopics)
   fi
   ENC=$(echo "$CARD" | python3 -c \
     'import sys,json;print(json.load(sys.stdin)["_logos"].get("enc_key",""))' 2>/dev/null)
   if [ -z "$ENC" ]; then
     echo "  FAIL  [$who] card has no _logos.enc_key to check"; ((FAIL++)); continue
   fi
-  # A "subscribe" line naming the advertised inbox. Filter-service noise
-  # ("no subscribed peers found") is NOT evidence of our own subscription, so require a
-  # line that is about subscribing AND names our topic.
-  HITS=$(echo "$LOG_TXT" | grep -F "/pilot/1/inbox-$ENC/proto" | grep -icE "subscrib")
-  if [ "${HITS:-0}" -ge 1 ]; then
+  if echo "$SUBS" | grep -qF "/pilot/1/inbox-$ENC/proto"; then
     echo "  PASS  [$who] listens on the inbox its card advertises"; ((PASS++))
   else
-    echo "  FAIL  [$who] advertises /pilot/1/inbox-${ENC:0:16}…/proto but never subscribed it"
+    echo "  FAIL  [$who] advertises /pilot/1/inbox-${ENC:0:16}…/proto but is not listening there"
+    echo "        → actually listening on: $(echo "$SUBS" | head -c 200)"
     ((FAIL++))
   fi
 done
