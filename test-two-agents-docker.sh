@@ -213,6 +213,28 @@ echo "  Agent B: $(echo $ACCOUNT_B | head -c 24)..."
 echo ""
 
 # ═══════════════════════════════════════
+echo "── Phase 1b: Open Both Agents For Hire ──"
+
+# An agent does NOT put itself up for sale on boot — taking work from strangers is the
+# owner's explicit decision. So a fresh agent is CLOSED: no inbox subscription, and
+# agentCard() builds a card but does not broadcast it. Everything downstream (discovery in
+# Phase 2, the paid task in Phase 7) depends on this step, which is exactly why it is
+# asserted rather than assumed.
+for who in A B; do
+  if [ "$who" = "A" ]; then WAS=$(call_a agentIsOpenForHire); else WAS=$(call_b agentIsOpenForHire); fi
+  check_has "[$who] starts CLOSED for hire" "$WAS" '^(false|0|)$'
+done
+
+R=$(call_a agentOpenForHire); check_has "[A] opens for hire" "$R" '^(true|1)$'
+R=$(call_b agentOpenForHire); check_has "[B] opens for hire" "$R" '^(true|1)$'
+
+for who in A B; do
+  if [ "$who" = "A" ]; then NOW=$(call_a agentIsOpenForHire); else NOW=$(call_b agentIsOpenForHire); fi
+  check_has "[$who] now reports OPEN for hire" "$NOW" '^(true|1)$'
+done
+echo ""
+
+# ═══════════════════════════════════════
 echo "── Warming up delivery (Agent B) ──"
 call_b establishOwnerChannel > /dev/null 2>&1
 echo "  OK    Delivery initialized"
@@ -374,6 +396,36 @@ else
   echo "  FAIL  [A] balance did not move (${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?})"; ((FAIL++))
 fi
 
+echo ""
+
+# ═══════════════════════════════════════
+echo "── Phase 8: Agents listen where their cards say ──"
+
+# Every unit test in the module asserts the topic LIST. Only this asserts that a live agent
+# actually asked the network. The gap between those two is where the unhireable-agent bug
+# lived: the card went out, the inbox was never subscribed, and nothing anywhere noticed.
+for who in A B; do
+  if [ "$who" = "A" ]; then
+    CARD=$(call_a agentCard); LOG_TXT=$(cat "$AGENT_A/daemon.log" 2>/dev/null)
+  else
+    CARD=$(call_b agentCard); LOG_TXT=$(docker logs $CONTAINER 2>&1)
+  fi
+  ENC=$(echo "$CARD" | python3 -c \
+    'import sys,json;print(json.load(sys.stdin)["_logos"].get("enc_key",""))' 2>/dev/null)
+  if [ -z "$ENC" ]; then
+    echo "  FAIL  [$who] card has no _logos.enc_key to check"; ((FAIL++)); continue
+  fi
+  # A "subscribe" line naming the advertised inbox. Filter-service noise
+  # ("no subscribed peers found") is NOT evidence of our own subscription, so require a
+  # line that is about subscribing AND names our topic.
+  HITS=$(echo "$LOG_TXT" | grep -F "/pilot/1/inbox-$ENC/proto" | grep -icE "subscrib")
+  if [ "${HITS:-0}" -ge 1 ]; then
+    echo "  PASS  [$who] listens on the inbox its card advertises"; ((PASS++))
+  else
+    echo "  FAIL  [$who] advertises /pilot/1/inbox-${ENC:0:16}…/proto but never subscribed it"
+    ((FAIL++))
+  fi
+done
 echo ""
 
 # ═══════════════════════════════════════
