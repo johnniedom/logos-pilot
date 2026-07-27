@@ -26,6 +26,11 @@
 // ---- funding helpers (LP-0008 sovereign pinata funding) ----
 namespace {
 constexpr const char* kWalletModule = "logos_execution_zone";
+// Catching the wallet up to chain head is SLOW and gets slower as the chain grows: a measured
+// sync of ~3500 blocks took 37.2s, against a 30s cap that was silently cutting it short. Every
+// caller shares this one generous ceiling so no sync site can quietly drift back under the real
+// cost. It is only a ceiling — a fast sync returns immediately.
+constexpr int kWalletSyncTimeoutMs = 600000;   // 10 minutes
 // Well-known dev pinata faucet account (base58). Decodes to cafe…cafe (32 bytes).
 constexpr const char* kPinataBase58 = "EfQhKQAkX2FJiwNii2WFQsGndjvF1Mzd7RuVe7QdPLw7";
 
@@ -585,7 +590,7 @@ bool PilotImpl::fundAgentIfNeeded() {
         QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
         if (!h.isNull())
             wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
-                                       QString::number(h.toLongLong()), Timeout(30000));
+                                       QString::number(h.toLongLong()), Timeout(kWalletSyncTimeoutMs));
     };
     auto ok = [](const QVariant& v) {
         if (v.isNull()) return false;
@@ -655,6 +660,29 @@ bool PilotImpl::fundAgentIfNeeded() {
     }
     syncToHead();
 
+    // 4b. VERIFY the money actually landed in the agent's private account before claiming it.
+    // The shielded transfer returning success only means the wallet accepted the request; the
+    // notes still have to be mined and seen. Step 3 above already waits for the pinata claim to
+    // credit before spending it — this step was the one place that took an RPC's word for it and
+    // wrote funded=1 regardless. That is how an agent ends up reporting funded=1 with nothing
+    // spendable, which is unfalsifiable from the outside and wasted a diagnosis cycle.
+    bool landed = false;
+    for (int i = 0; i < 60 && !landed; ++i) {
+        syncToHead();
+        QVariant balV = wallet->invokeRemoteMethod(kWalletModule, "get_balance",
+                                                   QString::fromStdString(agentAccountId_),
+                                                   QVariant(false));
+        if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) landed = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    if (!landed) {
+        // Do NOT mark funded. Leaving the flag clear means the next boot retries funding
+        // instead of inheriting a false claim that nothing can disprove.
+        qWarning() << "[pilot] fund: shielded transfer accepted but the agent's private account "
+                      "never showed the funds — NOT marking funded";
+        return false;
+    }
+
     // 5. Mark funded.
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, "INSERT OR REPLACE INTO config (key, value) VALUES ('funded', '1');",
@@ -682,10 +710,16 @@ std::string PilotImpl::walletBalance() {
     if (!wallet) return "{\"error\": \"wallet module unavailable\"}";
 
     // Sync to chain head so the balance reflects the latest blocks.
+    //
+    // The timeout must outlast a real catch-up, not a hoped-for one: a measured sync of a
+    // ~3500-block chain took 37.2s ("Synced to block 3500 in 37.210232932s") against the old
+    // 30s cap, so the sync was being CUT OFF mid-flight on every chain of any age. A truncated
+    // sync leaves the wallet believing it is further behind than it is, which is how a balance
+    // read and a spend end up disagreeing about the same account.
     QVariant head = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
     if (!head.isNull())
         wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
-                                   QString::number(head.toLongLong()), Timeout(30000));
+                                   QString::number(head.toLongLong()), Timeout(kWalletSyncTimeoutMs));
 
     QVariant result = wallet->invokeRemoteMethod(
         kWalletModule, "get_balance",

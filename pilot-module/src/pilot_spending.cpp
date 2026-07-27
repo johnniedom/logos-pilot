@@ -13,6 +13,14 @@
 #include <QJsonObject>
 #include <QJsonArray>
 
+namespace {
+constexpr const char* kWalletModule = "logos_execution_zone";
+// Keep in step with kWalletSyncTimeoutMs in pilot_identity.cpp. Catching the wallet up to
+// chain head took a measured 37.2s for ~3500 blocks and grows with the chain, so a short
+// ceiling silently truncates the sync. Deliberately generous: it is a ceiling, not a wait.
+constexpr int kWalletSyncTimeoutMs = 600000;   // 10 minutes
+}  // namespace
+
 static std::string amountToHexLE(int64_t amount) {
     uint8_t bytes[16] = {};
     for (int i = 0; i < 8 && amount > 0; i++) {
@@ -197,6 +205,19 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     // until it returns — there is no pre-broadcast hash to persist, and a crash strictly before
     // this write leaves the spend stranded in EXECUTING with NO hash (reconcileExecutingSpends
     // surfaces those). Persist tx_hash atomically with the terminal state.
+    // Catch the wallet up to chain head BEFORE spending. walletBalance() has always synced
+    // before answering; this path never did, so the balance an owner is shown and the notes a
+    // transfer can actually spend were answers from two different views of the chain — which is
+    // exactly the shape of "reports 100, then fails with InsufficientFundsError". A spend must
+    // not be built on a staler picture than the number that justified it.
+    {
+        QVariant head = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
+        if (!head.isNull())
+            wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
+                                       QString::number(head.toLongLong()),
+                                       Timeout(kWalletSyncTimeoutMs));
+    }
+
     QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
     bool ok = transferSucceeded(result);
     std::string txHash = transferTxHash(result);
