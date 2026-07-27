@@ -108,16 +108,28 @@ sleep 2
 # ═══════════════════════════════════════
 echo "── Starting Agent A (host) ──"
 setsid $LOGOSCORE $CFG_A -D -m $MODULES > $AGENT_A/daemon.log 2>&1 &
-sleep 5
 
-if ! cat $AGENT_A/.logoscore/daemon/state.json 2>/dev/null | grep -q '"pid"'; then
-  echo "  FAIL  Agent A daemon did not start"
+# Wait for the daemon to actually be up, don't guess at how long it takes. A flat `sleep 5`
+# failed this run on a loaded box: the daemon was still loading its first module at the 5s
+# mark, the single check missed it, the test aborted — and the daemon then came up 3 seconds
+# later, orphaned, with nothing to reap it. Poll the condition instead.
+for i in $(seq 1 40); do
+  grep -q '"pid"' "$AGENT_A/.logoscore/daemon/state.json" 2>/dev/null && break
+  sleep 2
+done
+if ! grep -q '"pid"' "$AGENT_A/.logoscore/daemon/state.json" 2>/dev/null; then
+  echo "  FAIL  Agent A daemon did not start within 80s"
+  tail -15 "$AGENT_A/daemon.log" 2>/dev/null
+  pkill -9 -f logos_host_qt 2>/dev/null
   exit 1
 fi
 echo "  OK    Agent A daemon running"
 
+# Module loads also outgrew their 15s cap: logos_execution_zone opens the wallet and can
+# replay a long chain on the way up, so a short timeout silently leaves it unloaded and every
+# later wallet call fails for a reason that has nothing to do with the code under test.
 for m in capability_module logos_execution_zone delivery_module storage_module pilot; do
-  timeout 15 $LOGOSCORE $CFG_A load-module $m > /dev/null 2>&1
+  timeout 120 $LOGOSCORE $CFG_A load-module $m > /dev/null 2>&1
 done
 sleep 3
 echo "  OK    Agent A modules loaded"
@@ -220,17 +232,20 @@ echo "── Phase 1b: Open Both Agents For Hire ──"
 # agentCard() builds a card but does not broadcast it. Everything downstream (discovery in
 # Phase 2, the paid task in Phase 7) depends on this step, which is exactly why it is
 # asserted rather than assumed.
+# call_a/call_b render the result through python, so a JSON boolean comes back as Python's
+# True/False — capitalised. Matching lowercase only reported six failures over agents that had
+# in fact opened correctly (Phase 8 could not otherwise pass). Match either spelling.
 for who in A B; do
   if [ "$who" = "A" ]; then WAS=$(call_a agentIsOpenForHire); else WAS=$(call_b agentIsOpenForHire); fi
-  check_has "[$who] starts CLOSED for hire" "$WAS" '^(false|0|)$'
+  check_has "[$who] starts CLOSED for hire" "$WAS" '^([Ff]alse|0|)$'
 done
 
-R=$(call_a agentOpenForHire); check_has "[A] opens for hire" "$R" '^(true|1)$'
-R=$(call_b agentOpenForHire); check_has "[B] opens for hire" "$R" '^(true|1)$'
+R=$(call_a agentOpenForHire); check_has "[A] opens for hire" "$R" '^([Tt]rue|1)$'
+R=$(call_b agentOpenForHire); check_has "[B] opens for hire" "$R" '^([Tt]rue|1)$'
 
 for who in A B; do
   if [ "$who" = "A" ]; then NOW=$(call_a agentIsOpenForHire); else NOW=$(call_b agentIsOpenForHire); fi
-  check_has "[$who] now reports OPEN for hire" "$NOW" '^(true|1)$'
+  check_has "[$who] now reports OPEN for hire" "$NOW" '^([Tt]rue|1)$'
 done
 echo ""
 
