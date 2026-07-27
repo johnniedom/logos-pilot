@@ -8,6 +8,7 @@
 #include "pilot_crypto.h"
 #include <sqlite3.h>
 #include <stdexcept>
+#include <algorithm>
 #include <cstdlib>
 #include <sys/stat.h>
 #include <thread>
@@ -266,19 +267,11 @@ void PilotImpl::initDeliveryModule() {
         delivery->invokeRemoteMethod("delivery_module", "start",
             QVariantList{}, Timeout(15000));
 
-        // A2A server: also listen on our own inbox(es) so peer agents can send us tasks. L1 key
-        // separation: the PRIMARY inbox is keyed on the dedicated ENCRYPTION key (a2aSelfEncKey(),
-        // advertised as _logos.enc_key) — the key new peers encrypt to. We ALSO subscribe the
-        // legacy SIGNING-key inbox (agentEciesPub_) when it differs, so a pre-split peer that still
-        // routes to _logos.signing_key keeps reaching us (a2aTryDecrypt then decrypts via the ecies
-        // fallback). This dual subscribe is load-bearing for the new<->new two-agent pay loop.
-        std::string encKey = a2aSelfEncKey();
-        if (!encKey.empty())
-            delivery->invokeRemoteMethod("delivery_module", "subscribe",
-                QString::fromStdString("/pilot/1/inbox-" + encKey + "/proto"), Timeout(15000));
-        if (!agentEciesPub_.empty() && agentEciesPub_ != encKey)
-            delivery->invokeRemoteMethod("delivery_module", "subscribe",
-                QString::fromStdString("/pilot/1/inbox-" + agentEciesPub_ + "/proto"), Timeout(15000));
+        // The agent's own inbox subscriptions do NOT belong here. Their topic names contain the
+        // agent's own keys, and this function runs BEFORE the identity is loaded — it found empty
+        // keys, skipped both subscribes, and its run-once guard meant it never tried again, so the
+        // agent published a card naming an address it was not listening on (measured 2026-07-26).
+        // They live in subscribeIdentityTopics(), called once an identity actually exists.
 
         LogosObject* deliveryObj = delivery->requestObject("delivery_module");
         if (deliveryObj) {
@@ -306,6 +299,16 @@ void PilotImpl::initDeliveryModule() {
                         return;
                     }
 
+                    // A peer's Agent Card broadcast on the shared discovery channel. Without
+                    // this branch the message was received and dropped, so a card could only
+                    // ever be learned by store query (there is no archive service in this
+                    // topology) or by out-of-band import — which is why discovery returned
+                    // {"count":0} forever.
+                    if (topic == "/pilot/1/discovery/proto") {
+                        handleDiscoveryCard(payload);
+                        return;
+                    }
+
                     if (topic != ownerChannelId_ || agentEciesPriv_.empty()) return;
 
                     try {
@@ -326,11 +329,59 @@ void PilotImpl::initDeliveryModule() {
     }
 }
 
-void PilotImpl::initDependencyModules() {
-    if (depsInitialized_) return;
-    depsInitialized_ = true;
-    initStorageModule();
-    initDeliveryModule();
+// The topics whose NAMES depend on our own identity keys. Kept pure and separate from the
+// subscribing so the one invariant that matters — we listen where our card says we listen —
+// can be asserted without a delivery module (nothing in this suite mocks one).
+std::vector<std::string> PilotImpl::identityTopics() {
+    std::vector<std::string> topics;
+
+    // Always on. This is the shared channel peers broadcast their Agent Cards to, and hearing
+    // one is passive — it tells a stranger nothing about us. Listening here is what lets a card
+    // broadcast BETWEEN discovery polls reach us at all, and it is how a CLOSED agent still
+    // learns who it might want to hire.
+    topics.push_back("/pilot/1/discovery/proto");
+
+    // Only while the owner has us open for hire: our own inbox(es), the addresses a stranger
+    // sends work to. Closed means nobody can reach us here.
+    if (!openForHire_) return topics;
+
+    // L1 key separation: the PRIMARY inbox is keyed on the dedicated ENCRYPTION key
+    // (a2aSelfEncKey(), advertised as _logos.enc_key) — the key new peers encrypt to. The legacy
+    // SIGNING-key inbox (agentEciesPub_) is also listened on when it differs, so a pre-split peer
+    // still routing to _logos.signing_key keeps reaching us (a2aTryDecrypt handles either).
+    const std::string encKey = a2aSelfEncKey();
+    if (!encKey.empty())
+        topics.push_back("/pilot/1/inbox-" + encKey + "/proto");
+    if (!agentEciesPub_.empty() && agentEciesPub_ != encKey)
+        topics.push_back("/pilot/1/inbox-" + agentEciesPub_ + "/proto");
+    return topics;
+}
+
+void PilotImpl::subscribeIdentityTopics() {
+    auto* delivery = logosAPI_ ? logosAPI_->getClient("delivery_module") : nullptr;
+    if (!delivery || !delivery->isConnected()) return;
+
+    const std::vector<std::string> want = identityTopics();
+
+    // Subscribe what we want and have not already asked for.
+    for (const std::string& topic : want) {
+        if (std::find(subscribedTopics_.begin(), subscribedTopics_.end(), topic)
+                != subscribedTopics_.end())
+            continue;
+        delivery->invokeRemoteMethod("delivery_module", "subscribe",
+            QString::fromStdString(topic), Timeout(15000));
+        subscribedTopics_.push_back(topic);
+    }
+
+    // Drop what we hold but no longer want. This is what makes closing for hire REAL rather
+    // than cosmetic: without it a closed agent would keep receiving strangers' tasks on an
+    // inbox it had already stopped advertising.
+    for (auto it = subscribedTopics_.begin(); it != subscribedTopics_.end(); ) {
+        if (std::find(want.begin(), want.end(), *it) != want.end()) { ++it; continue; }
+        delivery->invokeRemoteMethod("delivery_module", "unsubscribe",
+            QString::fromStdString(*it), Timeout(15000));
+        it = subscribedTopics_.erase(it);
+    }
 }
 
 void PilotImpl::initLLM() {

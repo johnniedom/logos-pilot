@@ -365,6 +365,10 @@ std::string PilotImpl::buildCard() {
     // subscribe). A pre-split peer reading this card has no enc_key and routes to signing_key
     // instead (a2aRoutingKeyFor falls back). Signed over below, so it is authenticated.
     logos["enc_key"] = QString::fromStdString(encKey);
+    // Whether anyone can actually hire this agent right now. Set HERE, before signing, not
+    // stamped onto the finished card: the signature covers the canonical card bytes, so a
+    // field added after signing silently invalidates every card we hand out.
+    logos["open_for_hire"] = openForHire_;
     card["_logos"] = logos;
 
     // Sign the canonical card bytes (the card WITHOUT the signature field) so a
@@ -397,8 +401,21 @@ std::string PilotImpl::agentCard() {
     // and replies WITHOUT this network write (I2). The !agentNpk_.empty() guard preserves the
     // prior behavior of never broadcasting a not-initialized stub (the old early-return sat
     // before this publish).
+    // buildCard() stamps _logos.open_for_hire and signs it, so the card says plainly whether
+    // anyone could actually reach this agent — and says it authentically.
     std::string cardStr = buildCard();
-    if (!agentNpk_.empty() && logosAPI_) {
+
+    // NEVER advertise an address we are not listening on. Publishing the card and subscribing
+    // its inbox were separate steps that could disagree, and they did: the card went out and
+    // the inbox was never subscribed, so nobody could hire the agent (2026-07-26). Broadcasting
+    // is therefore gated on the same flag that puts the inbox on the wire. The owner can still
+    // READ their own card while closed — inspecting your identity is not the same act as
+    // offering to work for strangers.
+    //
+    // Idempotent, and cheap on repeat calls: re-assert the subscription here so a card can
+    // never go out ahead of the listen.
+    if (openForHire_ && !agentNpk_.empty() && logosAPI_) {
+        subscribeIdentityTopics();
         auto* delivery = logosAPI_->getClient("delivery_module");
         if (delivery && delivery->isConnected()) {
             delivery->invokeRemoteMethod(
@@ -462,6 +479,66 @@ bool a2aCacheDiscoveredCard(sqlite3* db, const QJsonObject& card,
     sqlite3_step(ins);
     sqlite3_finalize(ins);
     return true;
+}
+
+// A card that arrived on the shared discovery channel, rather than by file or store query.
+// Same store, same signature check, same TOFU pin, same no-evict guard as every other way a
+// card can reach us: a public channel earns no extra trust and no less. Junk is ignored
+// quietly and is never fatal — anyone at all can publish here.
+void PilotImpl::handleDiscoveryCard(const std::string& cardJson) {
+    if (!db_) return;
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(cardJson));
+    if (!doc.isObject()) return;
+    QJsonObject card = doc.object();
+    if (card["_logos"].toObject()["npk"].toString().isEmpty()) return;
+    a2aCacheDiscoveredCard(db_, card, "/pilot/1/discovery/proto", nowTimestamp());
+}
+
+// Persist the owner's standing open/closed decision so it survives a restart. Without this
+// the agent would come back closed after every reboot, crash or redeploy — silently
+// unhireable, with nothing to say so.
+bool PilotImpl::persistOpenForHire(bool open) {
+    if (!db_) return false;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_,
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('a2a.open_for_hire', ?);",
+            -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, open ? "1" : "0", -1, SQLITE_TRANSIENT);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+// The owner puts the agent up for hire. From here a stranger can reach it: its own inbox(es)
+// go on the wire and agentCard() may broadcast.
+bool PilotImpl::agentOpenForHire() {
+    // No database means no identity, so there is no agent to put up for hire — and nowhere to
+    // remember the decision. Refuse rather than report an opening that would not survive the
+    // process, which would break exactly the promise this flag exists to keep.
+    if (!db_) return false;
+    openForHire_ = true;
+    if (!persistOpenForHire(true)) return false;
+    initDeliveryModule();          // no-op once delivery is already up
+    subscribeIdentityTopics();
+    return true;
+}
+
+// The owner takes the agent back off the market. The inbox subscriptions are actually
+// dropped, not merely un-advertised, so a stranger who already holds the card cannot keep
+// sending work. The discovery channel stays — closed does not mean deaf.
+bool PilotImpl::agentCloseForHire() {
+    if (!db_) return false;
+    // Stop listening FIRST, then record it. If the write fails we have still actually shut the
+    // door for this process, which is the safe direction to fail in — the opposite order could
+    // leave an agent that reports itself closed while a stranger's task is still arriving.
+    openForHire_ = false;
+    subscribeIdentityTopics();     // reconciles: unsubscribes the inboxes that just left the set
+    return persistOpenForHire(false);
+}
+
+bool PilotImpl::agentIsOpenForHire() {
+    return openForHire_;
 }
 
 // Learn a peer from a card handed over out-of-band. Discovery over Waku is the convenient

@@ -93,6 +93,46 @@ public:
     // broadcast card, so an imported peer is neither more nor less trusted than a discovered
     // one — only the delivery differs.
     std::string agentImportCard(const std::string& cardJson);
+
+    // A card that arrived on the shared discovery topic. Runs the SAME verification and TOFU
+    // pinning as an imported card — only the delivery differs. Junk is ignored quietly: this
+    // is a public channel and anyone can publish to it.
+    void handleDiscoveryCard(const std::string& cardJson);
+
+    // ---- Open for hire (the OWNER's decision, never the agent's) --------------------------
+    // An agent does NOT put itself up for sale on boot. agentOpenForHire() is the moment the
+    // owner says "take work from strangers": it subscribes the agent's own inbox(es) and lets
+    // agentCard() broadcast. agentCloseForHire() takes it back off the market.
+    //
+    // REMEMBERED across restarts (config "a2a.open_for_hire") so the owner says it ONCE. A
+    // per-boot decision would mean every restart, crash or redeploy silently dropped the agent
+    // off the market with nothing to say so — the same class of failure as the bug that made
+    // this split necessary, only with a different trigger.
+    //
+    // Closed means STRANGERS CANNOT HIRE US, not that we go deaf: the shared discovery channel
+    // stays subscribed either way, so a closed agent keeps learning who else is out there and
+    // can still hire THEM. The buyer side works while the seller side is shut.
+    bool agentOpenForHire();
+    bool agentCloseForHire();
+    bool agentIsOpenForHire();
+
+    // Every topic this identity listens on RIGHT NOW: the shared discovery channel always, and
+    // the agent's own inbox(es) — the enc-key inbox the card advertises as _logos.enc_key, plus
+    // the legacy signing-key inbox when it differs — only while open for hire. PURE (no I/O) so
+    // the advertise/listen invariant is testable without a delivery module. Empty keys
+    // contribute no inbox entry: an agent with no identity must never claim to listen on
+    // "/pilot/1/inbox-/proto".
+    std::vector<std::string> identityTopics();
+
+    // Ask delivery_module to subscribe every identityTopics() entry not already asked for, and
+    // drop any subscription no longer in that set (which is how closing for hire actually stops
+    // strangers reaching us). Idempotent, so it is safe to call on every path that could be the
+    // first to run after an identity appears. This CANNOT live in initDeliveryModule(): that
+    // runs BEFORE the identity is loaded and only once, so it found empty keys, skipped both
+    // subscribes and never retried — which is why an agent advertised an address it was not
+    // listening on (measured 2026-07-26).
+    void subscribeIdentityTopics();
+
     std::string agentTask(const std::string& agentAddress, const std::string& skill, const std::string& paramsJson);
     std::string agentSubscribe(const std::string& agentAddress, const std::string& taskId);
     bool agentCancel(const std::string& agentAddress, const std::string& taskId);
@@ -214,7 +254,6 @@ private:
     // verifyInboundRequest, and M1's wire path is validated by the manual owner-channel test.
     bool verifyOwnerMessage(const std::string& raw, std::string& innerOut);
     void initDatabase(const std::string& dataDir);
-    void initDependencyModules();
     void initStorageModule();
     void initDeliveryModule();
     bool initWallet();
@@ -224,6 +263,8 @@ private:
     // wrapped at rest when PILOT_KEY_PASSPHRASE is set; otherwise stored plaintext with a
     // warning. configKey is only ever a fixed literal (never peer input).
     bool persistSecretConfig(const std::string& configKey, const std::string& clearHex);
+    // Write the owner's open/closed-for-hire decision to config so it survives a restart.
+    bool persistOpenForHire(bool open);
     // L1: decrypt an inbound ECIES payload trying the dedicated encryption key (agentEncPriv_)
     // first, then the legacy signing key (agentEciesPriv_) for pre-split peers that still
     // encrypt to _logos.signing_key. Returns true (out = plaintext) on the first key that
@@ -315,7 +356,12 @@ private:
     bool walletOpened_ = false;
     bool storageInitialized_ = false;
     bool deliveryInitialized_ = false;
-    bool depsInitialized_ = false;
+    // The owner's standing decision to take work from strangers, restored from config
+    // "a2a.open_for_hire" by loadIdentity(). Closed until said otherwise.
+    bool openForHire_ = false;
+    // Topics we have actually ASKED delivery_module for, so a repeat subscribe is a no-op and
+    // a topic that leaves identityTopics() (closing for hire) can be unsubscribed exactly once.
+    std::vector<std::string> subscribedTopics_;
     // L6 — count of LLM complete() calls currently blocking this single delivery thread. Plain
     // int (not atomic): guards SYNCHRONOUS nested-QEventLoop re-entrancy, not OS threads.
     int llmInFlight_ = 0;

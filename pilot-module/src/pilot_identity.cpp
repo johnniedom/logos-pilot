@@ -135,6 +135,18 @@ bool PilotImpl::initialize(const std::string& dataDir) {
             resetStaleIdentity();
             createIdentity();      // fresh, consistent pilot.db + wallet pair
         }
+        // Boot order: the identity now EXISTS, so this is the first moment the agent's own
+        // topics can be named. Bring delivery up and subscribe here rather than relying on
+        // initDeliveryModule() having been reached from somewhere else earlier — it fires
+        // before identity load, and its run-once guard makes an early miss permanent
+        // (2026-07-26: agents advertised inboxes they never listened on).
+        //
+        // What this subscribes depends on the restored a2a.open_for_hire flag: the shared
+        // discovery channel always, the agent's own inbox(es) only if the owner had already
+        // opened it for hire. So "I opened my agent" survives the reboot, and an agent that
+        // was never opened comes back silent.
+        initDeliveryModule();
+        subscribeIdentityTopics();
         recoverPendingTransactions();
         fundAgentIfNeeded();       // idempotent, best-effort
         return true;
@@ -142,6 +154,11 @@ bool PilotImpl::initialize(const std::string& dataDir) {
 
     if (createIdentity()) {        // calls initWallet() internally
         initialized_ = true;
+        // A brand-new identity is closed for hire by default — nobody has said otherwise yet.
+        // This still subscribes the discovery channel, so a fresh agent can find peers to hire
+        // before it ever offers itself for hire.
+        initDeliveryModule();
+        subscribeIdentityTopics();
         fundAgentIfNeeded();       // idempotent, best-effort
         return true;
     }
@@ -204,6 +221,9 @@ bool PilotImpl::loadIdentity() {
                 else if (key == "ecies.priv") eciesPrivStored = val;   // raw; resolved below
                 else if (key == "enc.pub") agentEncPub_ = val;
                 else if (key == "enc.priv") encPrivStored = val;       // L1: raw; resolved below
+                // The owner's standing decision to take work from strangers. Absent == closed:
+                // an agent that has never been told to open for hire stays off the market.
+                else if (key == "a2a.open_for_hire") openForHire_ = (val == "1");
                 else if (key == "llm.provider") llmProvider_ = val;
                 else if (key == "llm.model") llmModel_ = val;
                 else if (key == "llm.api_key") {
