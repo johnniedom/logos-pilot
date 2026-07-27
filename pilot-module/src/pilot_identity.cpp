@@ -580,9 +580,28 @@ bool PilotImpl::fundAgentIfNeeded() {
         }
     }
 
-    if (!initWallet()) { qWarning() << "[pilot] fund: wallet not open"; return false; }
+    // Record WHY funding failed, not just that it did. The module's qWarning output does not
+    // reach the daemon log in these runs (measured 2026-07-27: zero [pilot] lines in a 550KB
+    // log), so every one of the failure points below was invisible — a funding that died at
+    // step 1 looked exactly like one that died at step 4, and the agent carried on reporting
+    // nothing was wrong. Persisting the reason makes a funding failure answerable after the
+    // fact, from the agent itself, with no log at all.
+    auto fundFail = [&](const char* reason) -> bool {
+        qWarning() << "[pilot] fund:" << reason;
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('funding.last_error', ?);",
+                -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, reason, -1, SQLITE_TRANSIENT);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+        return false;
+    };
+
+    if (!initWallet()) return fundFail("wallet not open");
     auto* wallet = logosAPI_->getClient(kWalletModule);
-    if (!wallet) return false;
+    if (!wallet) return fundFail("wallet module client unavailable");
 
     const int64_t fundAmount = 100;   // tokens to move into the agent's private account
 
@@ -601,10 +620,10 @@ bool PilotImpl::fundAgentIfNeeded() {
     // 1. Fresh public account + initialise it on-chain.
     QVariant pubV = wallet->invokeRemoteMethod(kWalletModule, "create_account_public");
     std::string pubId = pubV.isNull() ? std::string() : pubV.toString().toStdString();
-    if (pubId.empty()) { qWarning() << "[pilot] fund: create_account_public failed"; return false; }
+    if (pubId.empty()) return fundFail("create_account_public failed");
     if (!ok(wallet->invokeRemoteMethod(kWalletModule, "register_public_account",
                                        QString::fromStdString(pubId), Timeout(30000)))) {
-        qWarning() << "[pilot] fund: register_public_account failed"; return false;
+        return fundFail("register_public_account failed");
     }
     // Wait for the register tx to be mined — claim_pinata requires an initialised
     // recipient on-chain, else the claim is accepted but never credits.
@@ -623,21 +642,21 @@ bool PilotImpl::fundAgentIfNeeded() {
     QVariant pinV = wallet->invokeRemoteMethod(kWalletModule, "account_id_from_base58",
                                                QString(kPinataBase58), Timeout(15000));
     std::string pinataHex = pinV.isNull() ? std::string() : pinV.toString().toStdString();
-    if (pinataHex.empty()) { qWarning() << "[pilot] fund: pinata id resolve failed"; return false; }
+    if (pinataHex.empty()) return fundFail("pinata id resolve failed");
 
     QVariant accV = wallet->invokeRemoteMethod(kWalletModule, "get_account_public",
                                                QString::fromStdString(pinataHex), Timeout(15000));
     QJsonDocument accDoc = accV.isNull() ? QJsonDocument() : QJsonDocument::fromJson(accV.toString().toUtf8());
     std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
     std::string solHex = computePinataSolution(dataHex);
-    if (solHex.empty()) { qWarning() << "[pilot] fund: bad pinata data / no solution"; return false; }
+    if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
 
     // 3. Claim the pinata into the public account.
     if (!ok(wallet->invokeRemoteMethod(kWalletModule, "claim_pinata",
                                        QString::fromStdString(pinataHex),
                                        QString::fromStdString(pubId),
                                        QString::fromStdString(solHex), Timeout(60000)))) {
-        qWarning() << "[pilot] fund: claim_pinata failed"; return false;
+        return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
     }
 
     // Wait for the claim tx to be mined and credited before spending it.
@@ -649,14 +668,14 @@ bool PilotImpl::fundAgentIfNeeded() {
         if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) credited = true;
         else std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
-    if (!credited) { qWarning() << "[pilot] fund: pinata claim not credited in time"; return false; }
+    if (!credited) return fundFail("pinata claim never credited the public account");
 
     // 4. Shielded transfer public -> agent's private account (generates a ZK proof).
     if (!ok(wallet->invokeRemoteMethod(kWalletModule, "transfer_shielded_owned",
                                        QString::fromStdString(pubId),
                                        QString::fromStdString(agentAccountId_),
                                        QString::fromStdString(u128LeHex(fundAmount)), Timeout(120000)))) {
-        qWarning() << "[pilot] fund: transfer_shielded_owned failed"; return false;
+        return fundFail("transfer_shielded_owned failed");
     }
     syncToHead();
 
@@ -678,9 +697,8 @@ bool PilotImpl::fundAgentIfNeeded() {
     if (!landed) {
         // Do NOT mark funded. Leaving the flag clear means the next boot retries funding
         // instead of inheriting a false claim that nothing can disprove.
-        qWarning() << "[pilot] fund: shielded transfer accepted but the agent's private account "
-                      "never showed the funds — NOT marking funded";
-        return false;
+        return fundFail("shielded transfer accepted but the funds never appeared in the "
+                        "agent's private account");
     }
 
     // 5. Mark funded.
@@ -690,6 +708,10 @@ bool PilotImpl::fundAgentIfNeeded() {
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
     }
+    // Funding succeeded — clear any recorded reason from an earlier failed attempt so a
+    // stale message can never be mistaken for the current state.
+    sqlite3_exec(db_, "DELETE FROM config WHERE key='funding.last_error';",
+                 nullptr, nullptr, nullptr);
     qWarning() << "[pilot] fund: agent private account funded with" << fundAmount;
     backupWallet();   // persist + keep a recovery copy of the now-funded wallet
     return true;

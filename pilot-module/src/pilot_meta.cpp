@@ -29,6 +29,39 @@ std::string PilotImpl::metaStatus() {
     root["balance"] = QJsonDocument::fromJson(QByteArray::fromStdString(balance)).object();
     root["pending"] = QJsonDocument::fromJson(QByteArray::fromStdString(pending)).object();
 
+    // Funding state, and WHY if it failed. An agent that could not fund itself used to look
+    // identical to one that simply had no money yet, and the reason existed only as a
+    // qWarning that never reaches the daemon log (measured 2026-07-27: zero [pilot] lines in
+    // a 550KB log). Reading it back here means a funding failure can be answered by asking
+    // the agent, with no log at all.
+    if (db_) {
+        QJsonObject funding;
+        funding["funded"] = false;
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT key, value FROM config WHERE key IN ('funded','funding.last_error');",
+                -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                std::string k = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+                std::string v = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+                if (k == "funded") funding["funded"] = (v == "1");
+                else funding["last_error"] = QString::fromStdString(v);
+            }
+            sqlite3_finalize(st);
+        }
+        root["funding"] = funding;
+    }
+
+    // Whether strangers can hire this agent right now, and where it is actually listening.
+    // subscribedTopics() is what delivery_module CONFIRMED, not what we intended — the two
+    // disagreeing is the unhireable-agent bug.
+    QJsonObject hire;
+    hire["open_for_hire"] = openForHire_;
+    QJsonArray subs;
+    for (const std::string& t : subscribedTopics()) subs.append(QString::fromStdString(t));
+    hire["listening_on"] = subs;
+    root["hire"] = hire;
+
     // Real spending limits (the CLI must render these, not a hardcoded 100/500 — they
     // change with `pilot configure spend.*` and enforcement uses these exact fields).
     QJsonObject limits;
