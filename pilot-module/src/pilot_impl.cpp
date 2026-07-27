@@ -292,14 +292,33 @@ void PilotImpl::initDeliveryModule() {
         if (deliveryObj) {
             delivery->onEvent(deliveryObj, "messageReceived",
                 [this](const QString&, const QVariantList& data) {
-                    if (data.size() < 2) return;
-                    std::string topic = data[0].toString().toStdString();
-                    std::string payload = data[1].toString().toStdString();
+                    // delivery_module emits messageReceived with FOUR arguments, measured
+                    // 2026-07-27 by dumping the live argument list:
+                    //   [0] message hash   "0xf44f9cc3…"
+                    //   [1] content topic  "/pilot/1/discovery/proto"
+                    //   [2] payload        BASE64 of what the sender passed to send()
+                    //   [3] timestamp      "1785195659529573120"
+                    //
+                    // This code read [0] as the topic and [1] as the payload. Every topic
+                    // comparison below was therefore against a message HASH and could never
+                    // match, so every inbound message — peer cards, A2A tasks, replies — was
+                    // received and silently dropped. The callback fired 47 times in one
+                    // two-agent run while the agent acted on none of them, which is why
+                    // discovery found nobody and a paid task never settled. Nothing was ever
+                    // lost in transit; it was thrown away one line after arrival.
+                    if (data.size() < 3) return;
+                    std::string topic = data[1].toString().toStdString();
+                    // The payload is base64 on the way in (a card arrives as
+                    // "eyJfbG9nb3Mi…" == "{\"_logos\"…"). Decode it here, once, so every
+                    // handler below keeps receiving exactly what the sender passed to send().
+                    std::string payload = QString::fromUtf8(
+                        QByteArray::fromBase64(data[2].toString().toUtf8())).toStdString();
 
                     // Record the handoff FIRST, before any branch can drop the message. A row
                     // here proves delivery_module reached our code; no rows at all proves it
                     // never did, whatever its subscribe call reported. Deliberately ahead of
                     // every topic test so a message for an unknown topic still leaves a trace.
+                    //
                     if (db_) {
                         sqlite3_stmt* ev = nullptr;
                         if (sqlite3_prepare_v2(db_,

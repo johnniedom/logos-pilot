@@ -520,11 +520,19 @@ Tests cross-agent communication with Agent A on host and Agent B in Docker.
 
 Tests cover:
 - Both agents create unique identities on the sequencer
-- Agent A publishes Agent Card, Agent B discovers it via Waku store
+- Each agent is opened for hire, then asserted to be listening on the inbox its own
+  Agent Card advertises (the check that catches an unhireable agent)
+- Agent A publishes its Agent Card. **Agent B does not discover it** — broadcast
+  discovery does not work today (see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) §7).
+  A peer becomes usable by importing its card out-of-band: `pilot peer add <card.json>`
 - Bidirectional encrypted messaging (A→B and B→A)
 - Storage upload + encrypted file key sharing
 - Full A2A task lifecycle (send task, subscribe, cancel)
 - Cross-agent wallet transfer
+
+Not everything here passes. The suite reports its failures rather than skipping them —
+`test-two-agents-docker.sh` exits non-zero with a count, and the discovery and paid-task
+phases are currently among the failures. See §7 for exactly what does and does not work.
 
 Docker setup (no installation required):
 - Agent B runs in `ubuntu:22.04` container with `/nix/store` mounted read-only
