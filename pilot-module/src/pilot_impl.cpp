@@ -319,7 +319,15 @@ void PilotImpl::initDeliveryModule() {
                     // never did, whatever its subscribe call reported. Deliberately ahead of
                     // every topic test so a message for an unknown topic still leaves a trace.
                     //
-                    if (db_) {
+                    // Record only OUR traffic. This runs on the delivery thread for every
+                    // message the node relays, and once messages actually started arriving that
+                    // turned out to be a lot of other people's: /radio-basecamp/…,
+                    // /inference/… and more. A database write per public message starved the
+                    // same thread that services our own RPCs — the reply-topic subscribe in
+                    // agentTask began timing out ("failed to subscribe to reply topic"), which
+                    // is a failure CAUSED by the delivery fix working. Ours is all we can act
+                    // on, and all that is worth the write.
+                    if (db_ && topic.rfind("/pilot/1/", 0) == 0) {
                         sqlite3_stmt* ev = nullptr;
                         if (sqlite3_prepare_v2(db_,
                                 "INSERT INTO delivery_events (topic, bytes, received_at) "

@@ -680,9 +680,14 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     auto* delivery = logosAPI_->getClient("delivery_module");
     if (!delivery || !delivery->isConnected()) return "{\"error\": \"delivery module unavailable\"}";
 
+    // Generous timeout deliberately. Once inbound delivery started working, this agent shares
+    // one delivery thread with a live public network — the node relays a steady stream of
+    // other people's traffic — and a 15s ceiling here began failing on a busy node, aborting
+    // the task before it was ever sent. Arming the reply topic is the step that makes payment
+    // possible at all, so it is worth waiting for rather than giving up on.
     QVariant subResult = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic), RPC_TIMEOUT);
+        QString::fromStdString(replyTopic), Timeout(120000));
     if (subResult.isNull())
         return "{\"error\": \"failed to subscribe to reply topic\"}";
 
