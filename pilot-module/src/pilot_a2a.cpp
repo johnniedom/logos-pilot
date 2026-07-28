@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 #include <sstream>
 #include <chrono>
+#include <thread>
 #include <random>
 #include <vector>
 
@@ -729,13 +730,25 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // other people's traffic — and a 15s ceiling here began failing on a busy node, aborting
     // the task before it was ever sent. Arming the reply topic is the step that makes payment
     // possible at all, so it is worth waiting for rather than giving up on.
-    QVariant subResult = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic), Timeout(120000));
+    // Retry, don't wait longer. Measured 2026-07-28: this call took 133s and returned null,
+    // aborting the task before anything was sent — yet in an earlier run the same subscribe
+    // succeeded and a reply landed on the topic. So it is INTERMITTENT, not uniformly slow,
+    // and one long wait is the wrong shape for that: it converts a transient stall into a
+    // guaranteed failure and blocks the module for the whole window. Three shorter attempts
+    // give the fast path three chances in less total time than a single 120s ceiling.
+    QVariant subResult;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        subResult = delivery->invokeRemoteMethod(
+            "delivery_module", "subscribe",
+            QString::fromStdString(replyTopic), Timeout(30000));
+        step(subResult.isNull() ? "subscribe-attempt-null" : "subscribe-attempt-ok");
+        if (!subResult.isNull()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
+    }
     step("post-subscribe");
     if (subResult.isNull()) {
         step("subscribe-null");
-        return "{\"error\": \"failed to subscribe to reply topic\"}";
+        return "{\"error\": \"failed to subscribe to reply topic after 3 attempts\"}";
     }
 
     // Read the declared price for this skill from the target's discovered Agent Card and
