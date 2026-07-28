@@ -490,7 +490,27 @@ void PilotImpl::handleDiscoveryCard(const std::string& cardJson) {
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(cardJson));
     if (!doc.isObject()) return;
     QJsonObject card = doc.object();
-    if (card["_logos"].toObject()["npk"].toString().isEmpty()) return;
+    const QString npk = card["_logos"].toObject()["npk"].toString();
+    if (npk.isEmpty()) return;
+
+    // Ignore a card we already hold, byte for byte. Peers re-broadcast continuously, and
+    // caching runs an ECDSA verification plus a write EVERY time — all on the single thread
+    // that also services the owner's and the CLI's calls. Once inbound delivery started
+    // working that repeated work starved agentTask badly enough that it stopped answering at
+    // all. An identical card cannot change any stored fact, so there is nothing to redo.
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT card_json FROM discovered_agents WHERE npk = ?;",
+                           -1, &st, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, npk.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+        bool identical = false;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* stored = sqlite3_column_text(st, 0);
+            identical = stored && cardJson == reinterpret_cast<const char*>(stored);
+        }
+        sqlite3_finalize(st);
+        if (identical) return;
+    }
+
     a2aCacheDiscoveredCard(db_, card, "/pilot/1/discovery/proto", nowTimestamp());
 }
 
