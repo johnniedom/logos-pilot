@@ -66,12 +66,18 @@ check_has() {
 call_a() {
   # 120s to match call_b: a cold agent replays the whole chain inside initialize,
   # and 30s turned a long chain into bogus "(empty response)" failures.
-  local raw=$(timeout 120 $LOGOSCORE $CFG_A call pilot "$@" 2>&1)
+  # 300s, not 120s. The caller must outlast the agent, never race it: agentTask arms a reply
+  # topic on a delivery module that is busy relaying a live public network, and that single
+  # call can itself take up to 120s. With both set to 120 the caller gave up while the agent
+  # was still working — the task really was submitted and B really did reply (6 messages
+  # landed on the reply topic), but the caller saw an empty response and the run scored it a
+  # failure. A timeout that expires mid-success reports fiction.
+  local raw=$(timeout 300 $LOGOSCORE $CFG_A call pilot "$@" 2>&1)
   echo "$raw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "$raw"
 }
 
 call_b() {
-  local raw=$(docker exec $CONTAINER timeout 120 $LOGOSCORE --config-dir /data/.logoscore call pilot "$@" 2>&1)
+  local raw=$(docker exec $CONTAINER timeout 300 $LOGOSCORE --config-dir /data/.logoscore call pilot "$@" 2>&1)
   echo "$raw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "$raw"
 }
 
