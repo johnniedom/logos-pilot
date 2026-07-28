@@ -692,13 +692,37 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
 }
 
 std::string PilotImpl::agentTask(const std::string& agentAddress, const std::string& skill, const std::string& paramsJson) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    // Progress markers. agentTask returns an EMPTY response in the two-agent run while a reply
+    // demonstrably lands on the reply topic it armed — meaning it gets past the subscribe and
+    // past the send, yet leaves no outbound_tasks row, which the code order says is impossible.
+    // Rather than theorise again, record where it actually reaches. Rows land in
+    // delivery_events with bytes=-2 so they are trivially separable from real traffic.
+    auto step = [&](const char* where) {
+        if (!db_) return;
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT INTO delivery_events (topic, bytes, received_at) VALUES (?, -2, ?);",
+                -1, &st, nullptr) == SQLITE_OK) {
+            std::string s = std::string("TASKSTEP ") + where;
+            sqlite3_bind_text(st, 1, s.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(st, 2, nowTimestamp().c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+    };
+    step("enter");
+
+    if (!logosAPI_) { step("no-logosAPI"); return "{\"error\": \"not initialized\"}"; }
 
     std::string taskId = genUuid();
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
 
     auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery || !delivery->isConnected()) return "{\"error\": \"delivery module unavailable\"}";
+    if (!delivery || !delivery->isConnected()) {
+        step("no-delivery");
+        return "{\"error\": \"delivery module unavailable\"}";
+    }
+    step("pre-subscribe");
 
     // Generous timeout deliberately. Once inbound delivery started working, this agent shares
     // one delivery thread with a live public network — the node relays a steady stream of
@@ -708,8 +732,11 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     QVariant subResult = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
         QString::fromStdString(replyTopic), Timeout(120000));
-    if (subResult.isNull())
+    step("post-subscribe");
+    if (subResult.isNull()) {
+        step("subscribe-null");
         return "{\"error\": \"failed to subscribe to reply topic\"}";
+    }
 
     // Read the declared price for this skill from the target's discovered Agent Card and
     // record a PENDING outbound task BEFORE we send, so the reply consumer (messageReceived
@@ -717,7 +744,9 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // moment the peer accepts. ON CONFLICT(id) DO NOTHING: a resubmit of the same task id
     // must NOT reset the row back to 'submitted' and re-arm a second payment for work the
     // first reply already settled (the settling-claim keys off 'submitted').
+    step("pre-price");
     int64_t price = discoveredPriceFor(agentAddress, skill);
+    step("post-price");
     if (db_) {
         std::string ts = nowTimestamp();
         sqlite3_stmt* ins = nullptr;
@@ -733,8 +762,9 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
         sqlite3_bind_text(ins, 5, replyTopic.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(ins, 6, ts.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(ins, 7, ts.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(ins);
+        int rc = sqlite3_step(ins);
         sqlite3_finalize(ins);
+        step(rc == SQLITE_DONE ? "row-inserted" : "row-INSERT-FAILED");
     }
 
     QJsonDocument paramsDoc = QJsonDocument::fromJson(QByteArray::fromStdString(paramsJson));
@@ -780,7 +810,9 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // Route+encrypt to the doer's ECIES key (its published _logos.signing_key / inbox id),
     // NOT the wallet viewing key: the doer can only decrypt what is encrypted to the key it
     // HOLDS the private half of. a2aRoutingKeyFor resolves it from the discovered card.
+    step("pre-routing-key");
     std::string routingKey = a2aRoutingKeyFor(agentAddress);
+    step(routingKey.empty() ? "routing-key-EMPTY" : "routing-key-ok");
     if (routingKey.empty())
         return "{\"error\": \"no valid Agent Card resolves a messaging key for this peer "
                "(the address is a wallet/npk blob the doer cannot decrypt with); "
@@ -797,10 +829,12 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     }
 
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
+    step("pre-send");
     delivery->invokeRemoteMethod(
         "delivery_module", "send",
         QString::fromStdString(inboxTopic),
         QString::fromStdString(encPayload), RPC_TIMEOUT);
+    step("post-send");
 
     QJsonObject status;
     status["state"] = QString("submitted");
