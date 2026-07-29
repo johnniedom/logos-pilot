@@ -175,12 +175,25 @@ echo "── Starting Agent B (Docker) ──"
 # the status check then reports "did not start" while docker logs shows the OLD
 # container happily syncing — remove any corpse first.
 docker rm -f $CONTAINER >/dev/null 2>&1
+# ubuntu:22.04 ships with ZERO CA certificates (243 on the host, 0 in the container), so every
+# HTTPS call B makes fails before it starts. Measured 2026-07-30: B accepted the paid task, then
+# its agent-ask died with
+#   "SSL handshake failed: The issuer certificate of a locally looked up certificate
+#    could not be found"
+# and it honestly replied 'failed' — so A correctly refused to pay and the paid loop could never
+# close, with nothing wrong in the payment code at all. Mount the host trust store and point
+# OpenSSL at it explicitly (the module is nix-built, so it honours SSL_CERT_FILE/SSL_CERT_DIR
+# rather than guessing a distro path).
 docker run --rm -d \
   --name $CONTAINER \
   -v /nix/store:/nix/store:ro \
   -v $MODULES_B:/modules:ro \
   -v $AGENT_B:/data \
   -v /home/johnnie/.risc0:/root/.risc0:ro \
+  -v /etc/ssl/certs:/etc/ssl/certs:ro \
+  -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  -e SSL_CERT_DIR=/etc/ssl/certs \
+  -e NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   -e LOGOS_HOST_PATH=$LOGOS_HOST_PATH \
   -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
   -e PILOT_WAKU_ADDR=/ip4/host.docker.internal/tcp/30303 \

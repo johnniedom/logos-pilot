@@ -753,21 +753,24 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // outbound_tasks row, and an empty response to the owner, which is exactly the failure
     // Phase 7 has been reporting. Recording the row and sending gives the reply a chance to
     // land and leaves a durable row if it does not.
+    // 3s, not 15s, and the whole call must stay short. The DAEMON gives up on a module RPC at
+    // around 40s (measured: a call against a busy module came back RPC_FAILED at 43s), and when
+    // it does the caller gets an EMPTY response — so it never learns the task id, cannot look the
+    // task up, and reports "NO-SUCH-TASK" over a row that exists and a task that really was
+    // sent. Measured 2026-07-30: 15s here + 5s of diagnostic + an 18s send came to 38s, close
+    // enough to that ceiling to lose the id. Since a null ACK no longer changes what we do, there
+    // is nothing worth buying with a long wait.
+    //
+    // The diagnostic that lived here has been removed because it did its job: it recorded
+    // probe-also-null, i.e. a second independent 5s call to delivery ALSO returned nothing in
+    // that window. So the ACK is not being singled out — pilot's channel to delivery is deaf for
+    // the duration, which is the starvation described above. Keeping it would only spend 5s of
+    // the budget re-answering a settled question.
     QVariant subResult = delivery->invokeRemoteMethod(
         "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic), Timeout(15000));
+        QString::fromStdString(replyTopic), Timeout(3000));
     const bool replyTopicArmed = !subResult.isNull();
     step(replyTopicArmed ? "subscribe-ok" : "subscribe-unconfirmed");
-
-    // Diagnostic, and the open question this run should settle: when the subscribe ACK goes
-    // missing, is delivery deaf to pilot at that instant, or is it only this call's reply that
-    // is lost? One cheap short-deadline call answers it. Costs nothing on the healthy path.
-    if (!replyTopicArmed) {
-        QVariant probe = delivery->invokeRemoteMethod(
-            "delivery_module", "subscribe",
-            QString::fromStdString(replyTopic + "-probe"), Timeout(5000));
-        step(probe.isNull() ? "probe-also-null" : "probe-answered");
-    }
 
     // Read the declared price for this skill from the target's discovered Agent Card and
     // record a PENDING outbound task BEFORE we send, so the reply consumer (messageReceived
