@@ -103,12 +103,39 @@ rm -rf $AGENT_A ~/.cache/storage/dht/providers/LOCK
 docker run --rm -v /tmp:/tmp ubuntu:22.04 rm -rf /tmp/agent-b 2>/dev/null
 mkdir -p $AGENT_A $AGENT_B
 
-# Prepare modules-b (no storage_module)
-rm -rf $MODULES_B
-mkdir -p $MODULES_B
+# Prepare modules-b (no storage_module).
+#
+# Docker creates a missing bind-mount source as ROOT, so $MODULES_B and its parent come back
+# root-owned after any run — and then `rm -rf`/`mkdir -p`/`cp` all fail for this user. Every
+# one of those failures was silenced (2>/dev/null), so the run continued with an EMPTY
+# /modules mounted into the container and printed "Agent B modules loaded" over an agent that
+# had loaded nothing at all. Observed 2026-07-29: 26/31 became a meaningless run against a
+# phantom peer. Clear the leftovers as root first — the same trick this script already uses
+# for /tmp/agent-b one line above.
+docker run --rm -v /tmp:/tmp ubuntu:22.04 rm -rf $MODULES_B 2>/dev/null
+rm -rf $MODULES_B 2>/dev/null
+mkdir -p $MODULES_B || { echo "  ✗ cannot create $MODULES_B"; exit 1; }
+# capability_module is listed but is not installed on this box, and B has never needed it —
+# so a missing OPTIONAL module is noted and skipped, not fatal.
 for m in capability_module logos_execution_zone delivery_module chat_module pilot; do
-  cp -r $MODULES/$m $MODULES_B/$m 2>/dev/null
+  if [ ! -d "$MODULES/$m" ]; then
+    echo "  ·     $m not installed — skipping"
+    continue
+  fi
+  cp -r $MODULES/$m $MODULES_B/$m || { echo "  ✗ could not copy $m into $MODULES_B"; exit 1; }
 done
+
+# Assert what B genuinely cannot work without actually landed. An empty /modules is not a slow
+# agent, it is no agent, and every B result downstream would be fiction — so this aborts rather
+# than reports. (pilot = the agent, delivery = A2A transport, LEZ = wallet for the paid task.)
+for need in pilot delivery_module logos_execution_zone; do
+  if [ ! -d "$MODULES_B/$need" ]; then
+    echo "  ✗ Agent B is missing $need — refusing to run a phantom peer"
+    ls -la $MODULES_B
+    exit 1
+  fi
+done
+echo "  ✓ Agent B modules staged ($(ls -1 $MODULES_B | wc -l): $(ls -1 $MODULES_B | tr '\n' ' '))"
 sleep 2
 
 # ═══════════════════════════════════════
