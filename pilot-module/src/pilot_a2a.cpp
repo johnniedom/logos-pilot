@@ -725,30 +725,48 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     }
     step("pre-subscribe");
 
-    // Generous timeout deliberately. Once inbound delivery started working, this agent shares
-    // one delivery thread with a live public network — the node relays a steady stream of
-    // other people's traffic — and a 15s ceiling here began failing on a busy node, aborting
-    // the task before it was ever sent. Arming the reply topic is the step that makes payment
-    // possible at all, so it is worth waiting for rather than giving up on.
-    // Retry, don't wait longer. Measured 2026-07-28: this call took 133s and returned null,
-    // aborting the task before anything was sent — yet in an earlier run the same subscribe
-    // succeeded and a reply landed on the topic. So it is INTERMITTENT, not uniformly slow,
-    // and one long wait is the wrong shape for that: it converts a transient stall into a
-    // guaranteed failure and blocks the module for the whole window. Three shorter attempts
-    // give the fast path three chances in less total time than a single 120s ceiling.
-    QVariant subResult;
-    for (int attempt = 1; attempt <= 3; ++attempt) {
-        subResult = delivery->invokeRemoteMethod(
+    // Arm the reply topic, but do NOT make the task depend on being told it worked.
+    //
+    // Measured 2026-07-29, two-agent run: this call returned null three times, each burning its
+    // full 30s ceiling to the second (103s total), while the SAME delivery_module was provably
+    // healthy throughout — 459 log lines of relay traffic in that window, and it accepted and
+    // propagated a send in 11ms mid-stall. Called directly through logoscore, with no pilot
+    // module in the path, subscribe answered in under 2s sixty times out of sixty, at more
+    // uptime and more accumulated topics than any agent in the suite reaches. And pilot's own
+    // delivery sends worked 10s before the stall and again the moment it ended, so neither the
+    // client nor its capability token was broken.
+    //
+    // So the earlier reading — "intermittent, retry it" (092b497) — was wrong: three identical
+    // full-ceiling timeouts are not a transient. What is missing is the ACK, not the
+    // subscription: there is no evidence delivery failed to subscribe, only that pilot was never
+    // told. Two things follow.
+    //
+    // One attempt, not three. Those three attempts cost 103s of the module's single thread and
+    // starved its other work (the inbound reply it was mid-way through emitted nothing for
+    // 113s, then resumed the instant agentTask returned). A second and third wait buy nothing
+    // when the first was not a fluke.
+    //
+    // And never abort on it. Hearing the reply does not depend on this return value:
+    // messageReceived routes on the "/pilot/1/reply-" PREFIX and settleOutboundReply correlates
+    // by task id, and outboundTasksRecover() re-subscribes every 'submitted' row on the next
+    // start. Abandoning the task here is the worst available outcome — nothing sent, no
+    // outbound_tasks row, and an empty response to the owner, which is exactly the failure
+    // Phase 7 has been reporting. Recording the row and sending gives the reply a chance to
+    // land and leaves a durable row if it does not.
+    QVariant subResult = delivery->invokeRemoteMethod(
+        "delivery_module", "subscribe",
+        QString::fromStdString(replyTopic), Timeout(15000));
+    const bool replyTopicArmed = !subResult.isNull();
+    step(replyTopicArmed ? "subscribe-ok" : "subscribe-unconfirmed");
+
+    // Diagnostic, and the open question this run should settle: when the subscribe ACK goes
+    // missing, is delivery deaf to pilot at that instant, or is it only this call's reply that
+    // is lost? One cheap short-deadline call answers it. Costs nothing on the healthy path.
+    if (!replyTopicArmed) {
+        QVariant probe = delivery->invokeRemoteMethod(
             "delivery_module", "subscribe",
-            QString::fromStdString(replyTopic), Timeout(30000));
-        step(subResult.isNull() ? "subscribe-attempt-null" : "subscribe-attempt-ok");
-        if (!subResult.isNull()) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
-    }
-    step("post-subscribe");
-    if (subResult.isNull()) {
-        step("subscribe-null");
-        return "{\"error\": \"failed to subscribe to reply topic after 3 attempts\"}";
+            QString::fromStdString(replyTopic + "-probe"), Timeout(5000));
+        step(probe.isNull() ? "probe-also-null" : "probe-answered");
     }
 
     // Read the declared price for this skill from the target's discovered Agent Card and
@@ -855,6 +873,9 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     logosReply["reply_topic"] = QString::fromStdString(replyTopic);
     logosReply["price"] = static_cast<double>(price);   // declared LEZ price to settle on acceptance
     logosReply["payment"] = QString(price > 0 ? "pending-on-acceptance" : "none-declared");
+    // Say whether delivery actually confirmed the reply topic. The task proceeds either way, so
+    // the owner is told which of the two happened rather than being left to assume the good one.
+    logosReply["reply_topic_armed"] = replyTopicArmed;
     QJsonObject result;
     result["id"] = QString::fromStdString(taskId);
     result["status"] = status;
