@@ -181,18 +181,23 @@ docker rm -f $CONTAINER >/dev/null 2>&1
 #   "SSL handshake failed: The issuer certificate of a locally looked up certificate
 #    could not be found"
 # and it honestly replied 'failed' — so A correctly refused to pay and the paid loop could never
-# close, with nothing wrong in the payment code at all. Mount the host trust store and point
-# OpenSSL at it explicitly (the module is nix-built, so it honours SSL_CERT_FILE/SSL_CERT_DIR
-# rather than guessing a distro path).
+# close, with nothing wrong in the payment code at all.
+#
+# Mount ONLY the bundle file, and set SSL_CERT_FILE (not SSL_CERT_DIR). Mounting the whole
+# /etc/ssl/certs directory looks tidier but is actively wrong here: 242 of its 243 entries are
+# symlinks that chain into /usr/share/ca-certificates, which is NOT mounted, so inside the
+# container they all dangle (measured 2026-07-30: 242 broken links). Pointing SSL_CERT_DIR at
+# that is worse than having no certs, and the run where it was mounted that way is also the run
+# where B stopped receiving anything at all. The bundle is the single real file, and the module
+# is nix-built so SSL_CERT_FILE / NIX_SSL_CERT_FILE are what it honours.
 docker run --rm -d \
   --name $CONTAINER \
   -v /nix/store:/nix/store:ro \
   -v $MODULES_B:/modules:ro \
   -v $AGENT_B:/data \
   -v /home/johnnie/.risc0:/root/.risc0:ro \
-  -v /etc/ssl/certs:/etc/ssl/certs:ro \
+  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
   -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-  -e SSL_CERT_DIR=/etc/ssl/certs \
   -e NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   -e LOGOS_HOST_PATH=$LOGOS_HOST_PATH \
   -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
