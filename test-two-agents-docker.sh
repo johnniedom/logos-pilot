@@ -486,13 +486,14 @@ check_has "[A] task reached a terminal payment state" "$STATE" '^(paid|pay-faile
 check_has "[A] task was PAID" "$STATE" '^paid$'
 
 # This is the money-truth assertion and it is expected to stay RED until an
-# upstream wallet bug is fixed: walletBalance's resync REBUILDS private-account
-# state from the chain and cannot see the wallet's own spent notes, so the
-# balance springs back to its pre-spend value after any sync (measured
-# 2026-07-30: cold boot + full replay to block 30142 still read 100 after two
-# submitted transfers; the wallet then re-spent the same note and the sequencer
-# rejected it with "Nullifier already seen"). Do NOT soften this assertion to
-# make the suite green — it is the only line that measures money.
+# upstream LEZ bug is fixed: no shielded transfer has ever executed on this
+# stack. Every tx the pilot submitted was rejected at block production with
+# "Nullifier already seen" — including the FIRST-EVER spend of a freshly
+# claimed note — and none appears in any block (verified 2026-08-01 by decoding
+# the chain's 2-tx blocks; funding claims land, transfers never do). So the
+# balance reading 100 -> 100 is chain-TRUE: the money genuinely does not move.
+# Do NOT soften this assertion to make the suite green — it is the only line
+# that measures money, and it is the one telling the truth.
 BAL_A_AFTER=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
 echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}"
 if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ "$BAL_A_AFTER" -lt "$BAL_A_BEFORE" ]; then
