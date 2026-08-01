@@ -379,8 +379,39 @@ echo "── Phase 6: Wallet Transfer ──"
 # check() passed this for the life of the script while the log underneath read
 # "Transfer failed: InsufficientFundsError" — a response that reports failure in
 # prose still satisfies "came back and didn't say error". Assert the SETTLEMENT.
+#
+# And assert it from the SPEND ROW, not the RPC response: the daemon abandons a
+# module RPC at ~40s (measured RPC_FAILED at 43s, 2026-07-29) while an on-chain
+# transfer takes longer, so the response here is legitimately empty on the very
+# runs where the transfer goes through. The module keeps working and records the
+# outcome in spend_requests; poll that.
+#
+# HONESTY CEILING (measured 2026-07-30): COMPLETED means the wallet SUBMITTED the
+# tx and the sequencer took it into its mempool — wallet-ffi sets success:true on
+# send_transaction() alone. Run 01:54 recorded COMPLETED + tx_hash 490fb031… and
+# the sequencer then REJECTED that tx at block production ("Nullifier already
+# seen", seq.log 01:15:48Z). So this assertion proves the transfer path ran to a
+# terminal state — the balance assertion in Phase 7 is the only money-truth here.
 R=$(call_a walletSend "$NPK_B" 1 "test transfer A to B")
-check_has "[A→B] walletSend settled" "$R" '"status":"(completed|held)"'
+SPEND_STATE=""
+for _ in $(seq 1 24); do
+  SPEND_STATE=$(rm -rf /tmp/spendchk && mkdir -p /tmp/spendchk && \
+    cp $AGENT_A/pilot.db /tmp/spendchk/ 2>/dev/null && \
+    cp $AGENT_A/pilot.db-wal /tmp/spendchk/ 2>/dev/null; \
+    python3 -c "
+import sqlite3
+try:
+    con = sqlite3.connect('/tmp/spendchk/pilot.db')
+    rows = list(con.execute(\"select state from spend_requests where reason='test transfer A to B' order by rowid desc limit 1\"))
+    print(rows[0][0] if rows else '')
+except Exception:
+    print('')" 2>/dev/null)
+  case "$SPEND_STATE" in
+    COMPLETED|TX_FAILED|TX_UNKNOWN|HELD|NOTIFIED|REJECTED|EXPIRED) break ;;
+  esac
+  sleep 5
+done
+check_has "[A→B] walletSend spend reached a terminal state" "state:$SPEND_STATE" 'state:(COMPLETED|HELD|NOTIFIED)'
 
 echo ""
 
@@ -454,6 +485,14 @@ check_has "[A] task ledger is readable" "$STATE" '^(paid|pay-failed|pay-unresolv
 check_has "[A] task reached a terminal payment state" "$STATE" '^(paid|pay-failed)$'
 check_has "[A] task was PAID" "$STATE" '^paid$'
 
+# This is the money-truth assertion and it is expected to stay RED until an
+# upstream wallet bug is fixed: walletBalance's resync REBUILDS private-account
+# state from the chain and cannot see the wallet's own spent notes, so the
+# balance springs back to its pre-spend value after any sync (measured
+# 2026-07-30: cold boot + full replay to block 30142 still read 100 after two
+# submitted transfers; the wallet then re-spent the same note and the sequencer
+# rejected it with "Nullifier already seen"). Do NOT soften this assertion to
+# make the suite green — it is the only line that measures money.
 BAL_A_AFTER=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
 echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}"
 if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ "$BAL_A_AFTER" -lt "$BAL_A_BEFORE" ]; then

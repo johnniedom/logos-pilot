@@ -201,10 +201,18 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     auto* wallet = logosAPI_ ? logosAPI_->getClient("logos_execution_zone") : nullptr;
     if (!wallet) { setSpendState("TX_FAILED"); return false; }
 
-    // transfer_private is a single synchronous submit+confirm RPC, so the hash is unknowable
-    // until it returns — there is no pre-broadcast hash to persist, and a crash strictly before
-    // this write leaves the spend stranded in EXECUTING with NO hash (reconcileExecutingSpends
-    // surfaces those). Persist tx_hash atomically with the terminal state.
+    // transfer_private returns once the SEQUENCER ACCEPTS THE TX INTO ITS MEMPOOL — not once it
+    // executes. wallet-ffi sets success:true on send_transaction() alone (wallet/src/lib.rs,
+    // send_privacy_preserving_tx_with_pre_check), so "COMPLETED" below means submitted, not
+    // settled: a tx later rejected at block production still reads COMPLETED here. Measured
+    // 2026-07-30: tx 490fb031… recorded COMPLETED, then the sequencer rejected it with
+    // InvalidInput("Nullifier already seen"). Confirming execution needs a working tx query
+    // (the sequencer's getTransaction currently answers null for every hash) or a trustworthy
+    // balance read (currently broken upstream: the wallet resurrects spent notes on resync).
+    // Until one of those exists upstream, COMPLETED is the strongest claim this module can make.
+    // The hash is unknowable until the call returns — there is no pre-broadcast hash to persist,
+    // and a crash strictly before this write leaves the spend stranded in EXECUTING with NO hash
+    // (reconcileExecutingSpends surfaces those). Persist tx_hash atomically with the terminal state.
     // Catch the wallet up to chain head BEFORE spending. walletBalance() has always synced
     // before answering; this path never did, so the balance an owner is shown and the notes a
     // transfer can actually spend were answers from two different views of the chain — which is
