@@ -486,14 +486,18 @@ check_has "[A] task reached a terminal payment state" "$STATE" '^(paid|pay-faile
 check_has "[A] task was PAID" "$STATE" '^paid$'
 
 # This is the money-truth assertion and it is expected to stay RED until an
-# upstream LEZ bug is fixed: no shielded transfer has ever executed on this
-# stack. Every tx the pilot submitted was rejected at block production with
-# "Nullifier already seen" — including the FIRST-EVER spend of a freshly
-# claimed note — and none appears in any block (verified 2026-08-01 by decoding
-# the chain's 2-tx blocks; funding claims land, transfers never do). So the
-# balance reading 100 -> 100 is chain-TRUE: the money genuinely does not move.
-# Do NOT soften this assertion to make the suite green — it is the only line
-# that measures money, and it is the one telling the truth.
+# upstream LEZ bug is fixed. Measured 2026-08-01 (4-way experiment, fresh
+# fully-synced wallet): transfer_private (pay-by-keys, what A2A uses) is
+# rejected at block production with "Nullifier already seen" whenever the
+# RECIPIENT account has any on-chain history — and a funded agent always has
+# history (its funding claim). Same wallet, same moment: an owned-account send
+# executed (100->98) and a pay-by-keys send to a VIRGIN account executed
+# (98->96), so the plumbing works; the PrivateForeign flow builds the
+# recipient's transition against an assumed-fresh state. Meanwhile wallet-ffi
+# reports success at mempool-accept, so the spend row reads COMPLETED over a
+# rejected tx. The balance reading 100 -> 100 is chain-TRUE. Do NOT soften
+# this assertion to make the suite green — it is the only line that measures
+# money, and it is the one telling the truth.
 BAL_A_AFTER=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
 echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}"
 if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ "$BAL_A_AFTER" -lt "$BAL_A_BEFORE" ]; then

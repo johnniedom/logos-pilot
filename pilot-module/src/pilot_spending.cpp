@@ -205,14 +205,15 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     // executes. wallet-ffi sets success:true on send_transaction() alone (wallet/src/lib.rs,
     // send_privacy_preserving_tx_with_pre_check), so "COMPLETED" below means submitted, not
     // settled: a tx later rejected at block production still reads COMPLETED here. Measured
-    // 2026-07-30/08-01: every transfer this module ever recorded COMPLETED (490fb031…,
-    // 869c846c…, 4bfd8edc…) was rejected by the sequencer with InvalidInput("Nullifier already
-    // seen") and none appears in any block (verified by decoding the chain's 2-tx blocks) —
-    // including the FIRST-EVER spend of a freshly claimed note, so shielded transfers have never
-    // once executed on this stack. That is upstream (LEZ wallet or sequencer). Confirming
-    // execution from here would need a working tx query (the sequencer's getTransaction answers
-    // null for every hash, real or bogus), so COMPLETED is the strongest claim this module can
-    // currently make.
+    // 2026-08-01 (4-way experiment): transfer_private — the pay-by-keys path every A2A payment
+    // takes — is rejected with InvalidInput("Nullifier already seen") whenever the RECIPIENT
+    // account has any on-chain history, and a funded agent ALWAYS has history (its funding
+    // claim). The same wallet in the same minute executed an owned-account send (100->98) and a
+    // pay-by-keys send to a VIRGIN account (98->96), so the fault is the PrivateForeign flow
+    // building the recipient's transition against an assumed-fresh state. Upstream (LEZ).
+    // Confirming execution from here would need a working tx query (the sequencer's
+    // getTransaction answers null for every hash, real or bogus), so COMPLETED is the strongest
+    // claim this module can currently make.
     // The hash is unknowable until the call returns — there is no pre-broadcast hash to persist,
     // and a crash strictly before this write leaves the spend stranded in EXECUTING with NO hash
     // (reconcileExecutingSpends surfaces those). Persist tx_hash atomically with the terminal state.
