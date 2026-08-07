@@ -14,7 +14,7 @@
 #include <QJsonArray>
 
 namespace {
-constexpr const char* kWalletModule = "logos_execution_zone";
+constexpr const char* kWalletModule = "lez_core";
 // Keep in step with kWalletSyncTimeoutMs in pilot_identity.cpp. Catching the wallet up to
 // chain head took a measured 37.2s for ~3500 blocks and grows with the chain, so a short
 // ceiling silently truncates the sync. Deliberately generous: it is a ceiling, not a wait.
@@ -51,7 +51,7 @@ static QVariant doPrivateTransfer(LogosAPIClient* wallet, const std::string& fro
     // report TX_FAILED at the 2-min mark while proving was still in flight. 60 min covers the
     // documented ~44 min with margin; it is only a ceiling, so dev-mode transfers are unaffected.
     return wallet->invokeRemoteMethod(
-        "logos_execution_zone", method,
+        "lez_core", method,
         QString::fromStdString(fromId),
         QString::fromStdString(recipient),
         QString::fromStdString(amountToHexLE(amount)), Timeout(3600000));
@@ -198,7 +198,7 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
 
     setSpendState("EXECUTING");
 
-    auto* wallet = logosAPI_ ? logosAPI_->getClient("logos_execution_zone") : nullptr;
+    auto* wallet = logosAPI_ ? logosAPI_->getClient("lez_core") : nullptr;
     if (!wallet) { setSpendState("TX_FAILED"); return false; }
 
     // transfer_private returns once the SEQUENCER ACCEPTS THE TX INTO ITS MEMPOOL — not once it

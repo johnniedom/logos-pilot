@@ -50,7 +50,9 @@ echo "[1/6] Building runtime + module + dependencies (nix; heavy deps come from 
 nix build 'github:logos-co/logos-logoscore-cli' -o "$WORK/r-logoscore"
 nix build 'github:logos-co/logos-package-manager' -o "$WORK/r-lgpm"
 ( cd "$ROOT/pilot-module" && nix build .#lgx -o "$WORK/r-pilot" )
-nix build 'github:logos-blockchain/logos-execution-zone-module/5d42559db863#lgx' -o "$WORK/r-ez"
+# 033f807a pins execution-zone 571f35b3 â€” the rev with the #268 fix (pay-by-keys to an
+# account with on-chain history no longer rejects "Nullifier already seen").
+nix build 'github:logos-blockchain/logos-execution-zone-module/033f807a3b1690fb2f8e661cb8067646b8a98242#lgx' -o "$WORK/r-ez"
 nix build 'github:logos-co/logos-delivery-module/b18ec067517e#lgx'               -o "$WORK/r-delivery"
 nix build 'github:logos-co/logos-storage-module/b1d82a32c1ba#lgx'                -o "$WORK/r-storage"
 nix build 'github:logos-co/logos-chat-module/a0d251f9d764#lgx'                   -o "$WORK/r-chat"
@@ -96,7 +98,7 @@ echo "[5/6] DEMO 1 (self-funding) + DEMO 2 (spending threshold)  [best-effort â€
 sleep 3
 ACC=$("$LC" call pilot getAccountId 2>/dev/null | jget);  echo "      agent account: ${ACC:-<none>}"
 BAL=$("$LC" call pilot walletBalance 2>/dev/null | jget); echo "      balance: ${BAL:-<none>}"
-RECIP=$("$LC" call logos_execution_zone create_account_private 2>/dev/null | jget)
+RECIP=$("$LC" call lez_core create_account_private 2>/dev/null | jget)
 if [ -n "$RECIP" ]; then
   "$LC" call pilot setSpendingLimits 50 200 86400 >/dev/null 2>&1
   echo "      below limit (send 30) -> $("$LC" call pilot walletSend "$RECIP" 30 storage-fee 2>/dev/null | jget)"

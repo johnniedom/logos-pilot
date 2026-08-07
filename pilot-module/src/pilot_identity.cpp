@@ -25,7 +25,7 @@
 
 // ---- funding helpers (LP-0008 sovereign pinata funding) ----
 namespace {
-constexpr const char* kWalletModule = "logos_execution_zone";
+constexpr const char* kWalletModule = "lez_core";
 // Catching the wallet up to chain head is SLOW and gets slower as the chain grows: a measured
 // sync of ~3500 blocks took 37.2s, against a 30s cap that was silently cutting it short. Every
 // caller shares this one generous ceiling so no sync site can quietly drift back under the real

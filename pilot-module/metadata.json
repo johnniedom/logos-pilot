@@ -8,7 +8,7 @@
   "category": "general",
   "main": "pilot_plugin",
   "dependencies": [
-    "logos_execution_zone",
+    "lez_core",
     "delivery_module",
     "storage_module"
   ],

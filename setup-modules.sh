@@ -28,7 +28,7 @@ install_lgx() {
 echo "--- Installing from nix store cache ---"
 install_lgx "pilot"
 install_lgx "capability_module"
-install_lgx "logos_execution_zone"   # renamed from lez_wallet_module; the daemon loads this name
+install_lgx "lez_core"   # renamed from lez_wallet_module; the daemon loads this name
 install_lgx "delivery_module"
 install_lgx "storage_module"
 install_lgx "chat_module"            # no longer a pilot dependency, but rpc.nim still loads it
@@ -48,5 +48,5 @@ LOGOS_HOST=$(find /nix/store -maxdepth 1 -name "*-logos-liblogos" -type d 2>/dev
 echo "=== Smoke test ==="
 export LOGOS_HOST_PATH=$LOGOS_HOST
 $LOGOSCORE -m $MODULES_DIR \
-  -l capability_module,logos_execution_zone,delivery_module,storage_module,pilot \
+  -l capability_module,lez_core,delivery_module,storage_module,pilot \
   -c "pilot.echo(hello_real_modules)" --quit-on-finish

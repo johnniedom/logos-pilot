@@ -117,7 +117,7 @@ rm -rf $MODULES_B 2>/dev/null
 mkdir -p $MODULES_B || { echo "  ✗ cannot create $MODULES_B"; exit 1; }
 # capability_module is listed but is not installed on this box, and B has never needed it —
 # so a missing OPTIONAL module is noted and skipped, not fatal.
-for m in capability_module logos_execution_zone delivery_module chat_module pilot; do
+for m in capability_module lez_core delivery_module chat_module pilot; do
   if [ ! -d "$MODULES/$m" ]; then
     echo "  ·     $m not installed — skipping"
     continue
@@ -128,7 +128,7 @@ done
 # Assert what B genuinely cannot work without actually landed. An empty /modules is not a slow
 # agent, it is no agent, and every B result downstream would be fiction — so this aborts rather
 # than reports. (pilot = the agent, delivery = A2A transport, LEZ = wallet for the paid task.)
-for need in pilot delivery_module logos_execution_zone; do
+for need in pilot delivery_module lez_core; do
   if [ ! -d "$MODULES_B/$need" ]; then
     echo "  ✗ Agent B is missing $need — refusing to run a phantom peer"
     ls -la $MODULES_B
@@ -158,10 +158,10 @@ if ! grep -q '"pid"' "$AGENT_A/.logoscore/daemon/state.json" 2>/dev/null; then
 fi
 echo "  OK    Agent A daemon running"
 
-# Module loads also outgrew their 15s cap: logos_execution_zone opens the wallet and can
+# Module loads also outgrew their 15s cap: lez_core opens the wallet and can
 # replay a long chain on the way up, so a short timeout silently leaves it unloaded and every
 # later wallet call fails for a reason that has nothing to do with the code under test.
-for m in capability_module logos_execution_zone delivery_module storage_module pilot; do
+for m in capability_module lez_core delivery_module storage_module pilot; do
   timeout 120 $LOGOSCORE $CFG_A load-module $m > /dev/null 2>&1
 done
 sleep 3
@@ -218,7 +218,7 @@ if ! docker ps --filter name=$CONTAINER --format "{{.Status}}" | grep -q "Up"; t
 fi
 echo "  OK    Agent B container running"
 
-for m in capability_module logos_execution_zone delivery_module pilot; do
+for m in capability_module lez_core delivery_module pilot; do
   docker exec $CONTAINER timeout 15 $LOGOSCORE --config-dir /data/.logoscore load-module $m > /dev/null 2>&1
 done
 sleep 3

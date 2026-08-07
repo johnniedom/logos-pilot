@@ -1477,17 +1477,17 @@ void PilotImpl::outboundTasksRecover() {
 std::string PilotImpl::programQuery(const std::string& programId, const std::string& paramsJson) {
     if (!logosAPI_) return "{\"error\": \"not initialized\"}";
 
-    auto* wallet = logosAPI_->getClient("logos_execution_zone");
+    auto* wallet = logosAPI_->getClient("lez_core");
     if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
-        "logos_execution_zone", "queryProgram",
+        "lez_core", "queryProgram",
         QString::fromStdString(programId),
         QString::fromStdString(paramsJson), RPC_TIMEOUT);
 
     if (result.isNull()) {
         QJsonObject err;
-        err["error"] = QString("program.query unsupported: the logos_execution_zone module exposes no program-query method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
+        err["error"] = QString("program.query unsupported: the lez_core module exposes no program-query method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
         err["program"] = QString::fromStdString(programId);
         return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
     }
@@ -1542,11 +1542,11 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    auto* wallet = logosAPI_->getClient("logos_execution_zone");
+    auto* wallet = logosAPI_->getClient("lez_core");
     if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     QVariant result = wallet->invokeRemoteMethod(
-        "logos_execution_zone", "callProgram",
+        "lez_core", "callProgram",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(programId),
         QString::fromStdString(instruction),
@@ -1554,7 +1554,7 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
 
     if (result.isNull()) {
         QJsonObject err;
-        err["error"] = QString("program.call unsupported: the logos_execution_zone module exposes no program-call method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
+        err["error"] = QString("program.call unsupported: the lez_core module exposes no program-call method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
         err["program"] = QString::fromStdString(programId);
         return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
     }
@@ -1587,20 +1587,20 @@ std::string PilotImpl::programDeploy(const std::string& binaryPath) {
         QCryptographicHash::hash(binary, QCryptographicHash::Sha256).toHex();
     std::string binaryHash = hashHex.toStdString();
 
-    auto* wallet = logosAPI_->getClient("logos_execution_zone");
+    auto* wallet = logosAPI_->getClient("lez_core");
     if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
 
     // Attempt the REAL upstream deploy. mirrors programCall/programQuery: invoke
     // the method and surface an honest error if the runtime returns null.
     QVariant result = wallet->invokeRemoteMethod(
-        "logos_execution_zone", "deployProgram",
+        "lez_core", "deployProgram",
         QString::fromStdString(agentAccountId_),
         QString::fromStdString(binary.toHex().toStdString()),
         QString::fromStdString(binaryHash), RPC_TIMEOUT);
 
     if (result.isNull()) {
         QJsonObject err;
-        err["error"] = QString("program.deploy unsupported: LEZ program deployment is done via a direct sequencer transaction (NSSATransaction), which the logos_execution_zone module does not expose — no wallet-module deploy method exists at the pinned revision (verified against upstream source).");
+        err["error"] = QString("program.deploy unsupported: LEZ program deployment is done via a direct sequencer transaction (NSSATransaction), which the lez_core module does not expose — no wallet-module deploy method exists at the pinned revision (verified against upstream source).");
         err["binary"] = QString::fromStdString(binaryPath);
         err["binary_hash"] = QString::fromStdString(binaryHash);
         return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();

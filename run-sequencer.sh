@@ -53,7 +53,17 @@ else
     echo "  !!                              \"${PILOT_DATA_DIR:-$HOME/.pilot}\"/wallet_storage.json*   then re-deploy"
     echo
   fi
-  rm -rf ./rocksdb ./sequencer/service/rocksdb ./bedrock_signing_key ./sequencer/service/bedrock_signing_key 2>/dev/null || true
+  rm -rf ./rocksdb ./sequencer/service/rocksdb ./lez/sequencer/service/rocksdb \
+         ./bedrock_signing_key ./sequencer/service/bedrock_signing_key \
+         ./lez/sequencer/service/bedrock_signing_key 2>/dev/null || true
 fi
-echo "Booting LEZ sequencer_service in DEV mode on :3040 (circuits: $LOGOS_BLOCKCHAIN_CIRCUITS)"
-exec "$SEQ" sequencer/service/configs/debug/sequencer_config.json
+# The 2026-06 restructure moved the service crate under lez/ — support both layouts so this
+# script works at any checked-out rev.
+CFG_REL="sequencer/service/configs/debug/sequencer_config.json"
+[ -f "$CFG_REL" ] || CFG_REL="lez/sequencer/service/configs/debug/sequencer_config.json"
+[ -f "$CFG_REL" ] || { echo "ERROR: sequencer_config.json not found in either layout"; exit 1; }
+# Dev tweak carried since the old checkout: 1s blocks instead of 15s, so funding and tests
+# don't crawl. Applied in place, idempotent.
+sed -i 's/"block_create_timeout": "15s"/"block_create_timeout": "1s"/' "$CFG_REL"
+echo "Booting LEZ sequencer_service in DEV mode on :3040 (circuits: $LOGOS_BLOCKCHAIN_CIRCUITS, config: $CFG_REL)"
+exec "$SEQ" "$CFG_REL"
