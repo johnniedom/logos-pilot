@@ -42,7 +42,7 @@ public:
         // still 'working', so the cancel succeeds and drives it to the 'canceled' terminal.
         impl_->processInboundRequest(
             "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpc-rc\",\"params\":{\"id\":\""
-            + taskId_ + "\"}}");
+            + taskId_ + "\"}}", "", false);
         return "ANSWER: reentrant";
     }
     std::string model() const override { return "reentrant-1"; }
@@ -69,7 +69,7 @@ public:
                 "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask-nested\",\"params\":{"
                 "\"id\":\"t-ask-nested\",\"metadata\":{\"skill\":\"agent-ask\"},"
                 "\"message\":{\"prompt\":\"nested\"}},"
-                "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+                "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
         }
         return "ANSWER: outer";
     }
@@ -330,14 +330,14 @@ LOGOS_TEST(outbound_tasks_table_created) {
 LOGOS_TEST(inbound_rejects_invalid_json) {
     std::string dir = inboxDir("badjson");
     PilotImpl impl; impl.initialize(dir);
-    LOGOS_ASSERT_CONTAINS(impl.processInboundRequest("not json"), "-32700");
+    LOGOS_ASSERT_CONTAINS(impl.processInboundRequest("not json", "", false), "-32700");
 }
 
 LOGOS_TEST(inbound_rejects_unknown_method) {
     std::string dir = inboxDir("badmethod");
     PilotImpl impl; impl.initialize(dir);
     std::string r = impl.processInboundRequest(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/destroy\",\"id\":\"x1\"}");
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/destroy\",\"id\":\"x1\"}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "-32601");
     LOGOS_ASSERT_CONTAINS(r, "x1");
 }
@@ -348,7 +348,7 @@ LOGOS_TEST(inbound_ping_completes) {
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ping\",\"params\":{"
         "\"id\":\"t-ping\",\"metadata\":{\"skill\":\"ping\"},\"message\":{}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "completed");
     LOGOS_ASSERT_CONTAINS(r, "pong");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-ping", "state"), std::string("completed"));
@@ -366,7 +366,7 @@ LOGOS_TEST(inbound_costly_requires_owner_approval) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-pay\",\"params\":{"
         "\"id\":\"t-pay\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"deadbeef\",\"amount\":40,\"reason\":\"job\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "input-required");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-pay", "state"), std::string("input-required"));
     std::string sid = taskCol(dir, "t-pay", "spend_request_id");
@@ -387,7 +387,7 @@ LOGOS_TEST(inbound_wallet_send_owner_gated_even_below_threshold) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-auto\",\"params\":{"
         "\"id\":\"t-auto\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"deadbeef\",\"amount\":40,\"reason\":\"job\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     // Owner gate WAS taken despite the amount being below both budgets.
     LOGOS_ASSERT_CONTAINS(r, "input-required");
@@ -412,7 +412,7 @@ LOGOS_TEST(inbound_service_skill_dispatches_no_pay_to_requester) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-svc\",\"params\":{"
         "\"id\":\"t-svc\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"what is 2+2\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"peerecies\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"peerecies\",\"reply_topic\":\"/r\"}}", "", false);
 
     // The real skill ran autonomously and the task completed honestly — no owner gate.
     LOGOS_ASSERT_CONTAINS(r, "completed");
@@ -439,7 +439,7 @@ LOGOS_TEST(inbound_storage_upload_owner_gated_no_file_read) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-up\",\"params\":{"
         "\"id\":\"t-up\",\"metadata\":{\"skill\":\"storage-upload\"},"
         "\"message\":{\"path\":\"/etc/passwd\",\"label\":\"x\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}", "", false);
 
     // Owner gate taken: the peer is told input-required, never completed.
     LOGOS_ASSERT_CONTAINS(r, "input-required");
@@ -462,7 +462,7 @@ LOGOS_TEST(inbound_messaging_send_owner_gated_no_send) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-msg\",\"params\":{"
         "\"id\":\"t-msg\",\"metadata\":{\"skill\":\"messaging-send\"},"
         "\"message\":{\"recipient\":\"victim\",\"message\":\"spam\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_CONTAINS(r, "input-required");
     LOGOS_ASSERT_TRUE(r.find("completed") == std::string::npos);
@@ -481,7 +481,7 @@ LOGOS_TEST(inbound_agent_ask_autonomous_completes) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask\",\"params\":{"
         "\"id\":\"t-ask\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"hello there\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_CONTAINS(r, "completed");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-ask", "state"), std::string("completed"));
@@ -502,7 +502,7 @@ LOGOS_TEST(inbound_agent_ask_honest_error_without_llm) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask2\",\"params\":{"
         "\"id\":\"t-ask2\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"hello\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_EQ(taskCol(dir, "t-ask2", "state"), std::string("failed"));
     LOGOS_ASSERT_CONTAINS(taskCol(dir, "t-ask2", "result_json"), "error");
@@ -550,7 +550,7 @@ LOGOS_TEST(inbound_service_prompt_too_large_is_rejected) {
         "\"id\":\"t-big\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"" + big + "\"}},"
         "\"_logos\":{\"sender_npk\":\"peer\",\"sender_ecies\":\"pe\",\"reply_topic\":\"/r\"}}";
-    std::string r = impl.processInboundRequest(req);
+    std::string r = impl.processInboundRequest(req, "", false);
     LOGOS_ASSERT_CONTAINS(r, "size limit");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-big", "state"), std::string("failed"));
     LOGOS_ASSERT_TRUE(taskCol(dir, "t-big", "result_json").find("answer") == std::string::npos);
@@ -615,7 +615,7 @@ LOGOS_TEST(inbound_wallet_send_pays_params_recipient_not_requester) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-w\",\"params\":{"
         "\"id\":\"t-w\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"payee123\",\"amount\":40}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     // The threshold gate fired (held for owner), proving wallet-send is agent-spending.
     LOGOS_ASSERT_CONTAINS(r, "input-required");
@@ -639,8 +639,8 @@ LOGOS_TEST(inbound_redelivered_send_is_idempotent) {
         "\"message\":{\"recipient\":\"dupRecipient\",\"amount\":40}},"
         "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}";
 
-    std::string r1 = impl.processInboundRequest(req);
-    std::string r2 = impl.processInboundRequest(req);   // redelivery (at-least-once)
+    std::string r1 = impl.processInboundRequest(req, "", false);
+    std::string r2 = impl.processInboundRequest(req, "", false);   // redelivery (at-least-once)
 
     // Exactly ONE spend was opened across both deliveries — no double-spend, no re-dispatch.
     LOGOS_ASSERT_EQ(spendCountForRecipient(dir, "dupRecipient"), 1);
@@ -665,7 +665,7 @@ LOGOS_TEST(inbound_extracts_flat_args_from_parts_envelope) {
         "\"id\":\"t-flat\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\","
         "\"text\":{\"recipient\":\"payeeFlat\",\"amount\":40}}]}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     // The flat args were unwrapped from parts[0].text: the spend targets the inner recipient,
     // and the handler did NOT fail on a missing recipient key.
@@ -687,7 +687,7 @@ LOGOS_TEST(inbound_service_skill_dispatches_through_parts_envelope) {
         "\"id\":\"t-svcp\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\","
         "\"text\":{\"prompt\":\"hi\"}}]}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "completed");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-svcp", "state"), std::string("completed"));
 }
@@ -700,9 +700,9 @@ LOGOS_TEST(inbound_cancel_marks_task_canceled) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-c\",\"params\":{"
         "\"id\":\"t-c\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"d\",\"amount\":5}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     std::string r = impl.processInboundRequest(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpc2\",\"params\":{\"id\":\"t-c\"}}");
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpc2\",\"params\":{\"id\":\"t-c\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "canceled");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-c", "state"), std::string("canceled"));
 }
@@ -713,9 +713,9 @@ LOGOS_TEST(inbound_cancel_of_completed_refused) {
     impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-d\",\"params\":{"
         "\"id\":\"t-d\",\"metadata\":{\"skill\":\"ping\"},\"message\":{}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     std::string r = impl.processInboundRequest(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpc3\",\"params\":{\"id\":\"t-d\"}}");
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpc3\",\"params\":{\"id\":\"t-d\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "-32002");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-d", "state"), std::string("completed"));
 }
@@ -728,7 +728,7 @@ LOGOS_TEST(inbound_task_fails_when_owner_rejects) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-rej\",\"params\":{"
         "\"id\":\"t-rej\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"d\",\"amount\":7}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     std::string sid = taskCol(dir, "t-rej", "spend_request_id");
     LOGOS_ASSERT_TRUE(impl.rejectSpend(sid));
     LOGOS_ASSERT_EQ(taskCol(dir, "t-rej", "state"), std::string("failed"));
@@ -742,7 +742,7 @@ LOGOS_TEST(inbound_task_fails_when_approval_expires) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-exp\",\"params\":{"
         "\"id\":\"t-exp\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"d\",\"amount\":7}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     std::string sid = taskCol(dir, "t-exp", "spend_request_id");
     sqlite3* db = nullptr;
     sqlite3_open((dir + "/pilot.db").c_str(), &db);
@@ -760,7 +760,7 @@ LOGOS_TEST(inbound_inflight_tasks_fail_on_restart) {
         impl.processInboundRequest(
             "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-r\",\"params\":{"
             "\"id\":\"t-r\",\"metadata\":{\"skill\":\"ping\"},\"message\":{}},"
-            "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+            "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
         sqlite3* db = nullptr;
         sqlite3_open((dir + "/pilot.db").c_str(), &db);
         sqlite3_exec(db, "UPDATE inbound_tasks SET state='working' WHERE id='t-r';", nullptr, nullptr, nullptr);
@@ -1174,19 +1174,19 @@ LOGOS_TEST(inbound_cancel_rejects_non_owner) {
         "\"id\":\"t-own\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"d\",\"amount\":5}},"
         "\"_logos\":{\"sender_npk\":\"alice\",\"reply_topic\":\"/r\"}}",
-        "alice");
+        "alice", false);
 
     // bob is not the original requester -> unauthorized; task untouched.
     std::string rb = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpcB\",\"params\":{\"id\":\"t-own\"}}",
-        "bob");
+        "bob", false);
     LOGOS_ASSERT_CONTAINS(rb, "-32003");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-own", "state"), std::string("input-required"));
 
     // alice (the requester) can cancel.
     std::string ra = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpcA\",\"params\":{\"id\":\"t-own\"}}",
-        "alice");
+        "alice", false);
     LOGOS_ASSERT_CONTAINS(ra, "canceled");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-own", "state"), std::string("canceled"));
 }
@@ -1200,17 +1200,17 @@ LOGOS_TEST(inbound_sendSubscribe_rejects_non_owner) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-sub\",\"params\":{"
         "\"id\":\"t-sub\",\"metadata\":{\"skill\":\"ping\"},\"message\":{}},"
         "\"_logos\":{\"sender_npk\":\"alice\",\"reply_topic\":\"/r\"}}",
-        "alice");
+        "alice", false);
 
     std::string rb = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/sendSubscribe\",\"id\":\"rpcB\",\"params\":{\"id\":\"t-sub\"}}",
-        "bob");
+        "bob", false);
     LOGOS_ASSERT_CONTAINS(rb, "-32003");
 
     // alice gets the task state back (ping auto-completed).
     std::string ra = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/sendSubscribe\",\"id\":\"rpcA\",\"params\":{\"id\":\"t-sub\"}}",
-        "alice");
+        "alice", false);
     LOGOS_ASSERT_CONTAINS(ra, "completed");
 }
 
@@ -1282,14 +1282,14 @@ LOGOS_TEST(inbound_cancel_releases_held_spend) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-cr\",\"params\":{"
         "\"id\":\"t-cr\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"d\",\"amount\":5}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
     LOGOS_ASSERT_EQ(taskCol(dir, "t-cr", "state"), std::string("input-required"));
     std::string sid = taskCol(dir, "t-cr", "spend_request_id");
     LOGOS_ASSERT_FALSE(sid.empty());
     LOGOS_ASSERT_EQ(spendStateById(dir, sid), std::string("HELD"));
 
     std::string r = impl.processInboundRequest(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpcC\",\"params\":{\"id\":\"t-cr\"}}");
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/cancel\",\"id\":\"rpcC\",\"params\":{\"id\":\"t-cr\"}}", "", false);
     LOGOS_ASSERT_CONTAINS(r, "canceled");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-cr", "state"), std::string("canceled"));
     LOGOS_ASSERT_EQ(spendStateById(dir, sid), std::string("REJECTED"));
@@ -1321,7 +1321,7 @@ LOGOS_TEST(inbound_terminal_state_monotonic_under_reentrant_cancel) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-rc\",\"params\":{"
         "\"id\":\"t-rc\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"hello\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_EQ(taskCol(dir, "t-rc", "state"), std::string("canceled"));
     LOGOS_ASSERT_CONTAINS(r, "canceled");
@@ -1359,7 +1359,7 @@ LOGOS_TEST(inbound_oversized_envelope_is_rejected_and_not_stored) {
         "\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":{\"prompt\":\"hi\"}}],"
         "\"junk\":\"" + huge + "\"}},"
         "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}";
-    std::string r = impl.processInboundRequest(req);
+    std::string r = impl.processInboundRequest(req, "", false);
     LOGOS_ASSERT_CONTAINS(r, "size limit");
     LOGOS_ASSERT_CONTAINS(r, "-32005");
     // No row was stored at all (gate runs before the INSERT): both state and params_json empty.
@@ -1513,7 +1513,7 @@ LOGOS_TEST(inbound_wallet_send_create_link_hold_are_atomic) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-atom\",\"params\":{"
         "\"id\":\"t-atom\",\"metadata\":{\"skill\":\"wallet-send\"},"
         "\"message\":{\"recipient\":\"payeeAtom\",\"amount\":40,\"reason\":\"job\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_CONTAINS(r, "input-required");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-atom", "state"), std::string("input-required"));   // input-required
@@ -1541,7 +1541,7 @@ LOGOS_TEST(inbound_capabilities_returns_card_without_broadcast) {
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-cap\",\"params\":{"
         "\"id\":\"t-cap\",\"metadata\":{\"skill\":\"capabilities\"},\"message\":{}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     LOGOS_ASSERT_CONTAINS(r, "completed");
     LOGOS_ASSERT_EQ(taskCol(dir, "t-cap", "state"), std::string("completed"));
@@ -1559,7 +1559,7 @@ LOGOS_TEST(inbound_capabilities_uninitialized_returns_error_not_card) {
     std::string r = impl.processInboundRequest(
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-capx\",\"params\":{"
         "\"id\":\"t-capx\",\"metadata\":{\"skill\":\"capabilities\"},\"message\":{}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     std::string card = taskCol(dir, "t-capx", "result_json");
     LOGOS_ASSERT_CONTAINS(card, "not initialized");                  // stub preserved
@@ -1581,7 +1581,7 @@ LOGOS_TEST(inbound_agent_ask_concurrency_bounded_no_nested_eventloop) {
         "{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":\"t-ask-outer\",\"params\":{"
         "\"id\":\"t-ask-outer\",\"metadata\":{\"skill\":\"agent-ask\"},"
         "\"message\":{\"prompt\":\"outer\"}},"
-        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}");
+        "\"_logos\":{\"sender_npk\":\"peer\",\"reply_topic\":\"/r\"}}", "", false);
 
     // The OUTER agent-ask owns the single in-flight slot and completes.
     LOGOS_ASSERT_CONTAINS(r, "completed");

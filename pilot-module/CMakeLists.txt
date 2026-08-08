@@ -35,11 +35,15 @@ logos_module(
         src/pilot_plugin_iface.h
         src/pilot_skill_registry.cpp
         src/pilot_builtin_skills.cpp
-        generated_code/pilot_qt_glue.h
-        generated_code/pilot_dispatch.cpp
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}/generated_code
 )
+# The generated glue is NOT listed as a source any more. The current builder generates it
+# itself (pilot_module_impl.cpp / pilot_cdylib_glue.* / pilot_types.h) and compiles it in;
+# the old hand-listed pilot_qt_glue.h + pilot_dispatch.cpp came from the removed preConfigure
+# and no longer exist, which failed configuration with "Cannot find source file:
+# generated_code/pilot_qt_glue.h". Modules on this builder (lez_core 24e09df2) list only
+# their own sources — matched here.
 
 target_link_libraries(pilot_module_plugin PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
 

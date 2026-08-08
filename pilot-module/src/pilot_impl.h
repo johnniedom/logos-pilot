@@ -164,9 +164,13 @@ public:
     // prompt renders the sender UNVERIFIED. tasks/cancel and tasks/sendSubscribe require it to
     // equal the task's stored sender_npk. senderFirstContact is true only on the first
     // authenticated contact for this npk (feeds the owner prompt's trust label, L4).
+    // NOTE: no default arguments. The universal-module generator parses this header and rejects
+    // a defaulted parameter ("parameter 'false' is `bool senderFirstContact =`, which has no
+    // LIDL type"), so every caller passes all three explicitly — "" and false are what the old
+    // defaults meant.
     std::string processInboundRequest(const std::string& requestJson,
-                                      const std::string& authenticatedNpk = "",
-                                      bool senderFirstContact = false);
+                                      const std::string& authenticatedNpk,
+                                      bool senderFirstContact);
 
     // Inbound A2A transport entry: decrypt a raw ECIES payload from our inbox topic with
     // agentEciesPriv_ — the SAME ECIES key our Agent Card advertises as BOTH the inbox id

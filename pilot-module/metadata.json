@@ -7,6 +7,10 @@
   "interface": "universal",
   "category": "general",
   "main": "pilot_plugin",
+  "codegen": {
+    "impl_header": "src/pilot_impl.h",
+    "impl_class": "PilotImpl"
+  },
   "dependencies": [
     "lez_core",
     "delivery_module",
