@@ -133,10 +133,12 @@ jobs:
       - name: Build module LGX packages (pilot + deps, pinned to flake.lock)
         run: |
           ( cd pilot-module && nix build .#lgx -o ../result-pilot-lgx )
-          nix build 'github:logos-blockchain/logos-execution-zone-module/5d42559db863#lgx' -o result-ez-lgx
-          nix build 'github:logos-co/logos-delivery-module/b18ec067517e#lgx'   -o result-delivery-lgx
-          nix build 'github:logos-co/logos-storage-module/b1d82a32c1ba#lgx'    -o result-storage-lgx
-          nix build 'github:logos-co/logos-chat-module/a0d251f9d764#lgx'       -o result-chat-lgx
+          # Same revisions as pilot-module/flake.lock — the module is named lez_core now, and
+          # metadata.json#dependencies is [lez_core, delivery_module, storage_module].
+          nix build 'github:logos-blockchain/logos-execution-zone-module/24e09df2af5774cab3f83d2f521533abb7ddffdd#lgx' -o result-ez-lgx
+          nix build 'github:logos-co/logos-delivery-module/3258cdb0132e37228aa2519e0c01c0e7429a20dd#lgx'   -o result-delivery-lgx
+          nix build 'github:logos-co/logos-storage-module/7307910f0e5728e08c77820e21698e903c73d987#lgx'    -o result-storage-lgx
+          nix build 'github:logos-co/logos-chat-module/dfe8ccf3eff3e95da0ba54043577270474a216ae#lgx'       -o result-chat-lgx
 
       - name: Install all modules via lgpm
         run: |
@@ -157,7 +159,7 @@ jobs:
 
           load=$("$LS" load-module pilot 2>&1); echo "load: $load"
           echo "$load" | grep -q '"status":"ok"'        || { echo "E2E FAIL: pilot did not load"; "$LS" stop || true; exit 1; }
-          echo "$load" | grep -q 'logos_execution_zone' || { echo "E2E FAIL: dependencies not resolved"; "$LS" stop || true; exit 1; }
+          echo "$load" | grep -q 'lez_core'             || { echo "E2E FAIL: dependencies not resolved"; "$LS" stop || true; exit 1; }
 
           eo=$("$LS" call pilot echo "ci-e2e" 2>&1); echo "echo: $eo"
           echo "$eo" | grep -q 'echo: ci-e2e'           || { echo "E2E FAIL: echo round-trip"; "$LS" stop || true; exit 1; }

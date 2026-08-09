@@ -1,10 +1,9 @@
 #include "pilot_impl.h"
 #include "pilot_llm.h"
 #include "pilot_skill.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
-#include "logos_mode.h"
-#include "logos_object.h"
+// Generated per-build from metadata.json#dependencies; defines LogosModules (typed clients
+// lez_core / delivery_module / storage_module) so LogosModuleContext::modules() compiles here.
+#include "logos_sdk.h"
 #include "pilot_crypto.h"
 #include <sqlite3.h>
 #include <stdexcept>
@@ -230,28 +229,21 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         nullptr, nullptr, nullptr);
 }
 
-static bool waitForConnection(LogosAPIClient* client, int maxMs = 5000) {
-    if (!client) return false;
-    for (int elapsed = 0; elapsed < maxMs && !client->isConnected(); elapsed += 250)
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    return client->isConnected();
-}
-
 void PilotImpl::initStorageModule() {
-    if (!logosAPI_ || storageInitialized_) return;
+    // isContextReady() is the "framework attached" gate (was: `if (!logosAPI_)`): a directly
+    // constructed impl (unit tests) has no modules() pointer, and dereferencing it would crash
+    // where the old code just skipped. There is no connection to poll for anymore — the typed
+    // client connects lazily on first call and a failure comes back through the result.
+    if (!isContextReady() || storageInitialized_) return;
     storageInitialized_ = true;
 
-    auto* storage = logosAPI_->getClient("storage_module");
-    if (waitForConnection(storage)) {
-        storage->invokeRemoteMethod("storage_module", "init",
-            QString("{\"nat\":\"none\"}"), Timeout(10000));
-        storage->invokeRemoteMethod("storage_module", "start",
-            QVariantList{}, Timeout(10000));
-    }
+    modules().storage_module.init("{\"nat\":\"none\"}", nullptr, 10000);
+    modules().storage_module.start(nullptr, 10000);
 }
 
 void PilotImpl::initDeliveryModule() {
-    if (!logosAPI_ || deliveryInitialized_) return;
+    // isContextReady() replaces the old `if (!logosAPI_)` gate — see initStorageModule.
+    if (!isContextReady() || deliveryInitialized_) return;
     deliveryInitialized_ = true;
 
     std::string wakuAddr;
@@ -260,8 +252,7 @@ void PilotImpl::initDeliveryModule() {
     else
         wakuAddr = "/ip4/127.0.0.1/tcp/30303";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (waitForConnection(delivery)) {
+    {
         QJsonArray shards;
         for (int i = 0; i < 8; i++) shards.append(i);
         QJsonArray staticNodes;
@@ -277,10 +268,8 @@ void PilotImpl::initDeliveryModule() {
         if (const char* natEnv = std::getenv("PILOT_NAT"))
             cfgObj["nat"] = QString(natEnv);
         std::string cfg = QJsonDocument(cfgObj).toJson(QJsonDocument::Compact).toStdString();
-        delivery->invokeRemoteMethod("delivery_module", "createNode",
-            QString::fromStdString(cfg), Timeout(15000));
-        delivery->invokeRemoteMethod("delivery_module", "start",
-            QVariantList{}, Timeout(15000));
+        modules().delivery_module.createNode(cfg, nullptr, 15000);
+        modules().delivery_module.start(nullptr, 15000);
 
         // The agent's own inbox subscriptions do NOT belong here. Their topic names contain the
         // agent's own keys, and this function runs BEFORE the identity is loaded — it found empty
@@ -288,31 +277,16 @@ void PilotImpl::initDeliveryModule() {
         // agent published a card naming an address it was not listening on (measured 2026-07-26).
         // They live in subscribeIdentityTopics(), called once an identity actually exists.
 
-        LogosObject* deliveryObj = delivery->requestObject("delivery_module");
-        if (deliveryObj) {
-            delivery->onEvent(deliveryObj, "messageReceived",
-                [this](const QString&, const QVariantList& data) {
-                    // delivery_module emits messageReceived with FOUR arguments, measured
-                    // 2026-07-27 by dumping the live argument list:
-                    //   [0] message hash   "0xf44f9cc3…"
-                    //   [1] content topic  "/pilot/1/discovery/proto"
-                    //   [2] payload        BASE64 of what the sender passed to send()
-                    //   [3] timestamp      "1785195659529573120"
-                    //
-                    // This code read [0] as the topic and [1] as the payload. Every topic
-                    // comparison below was therefore against a message HASH and could never
-                    // match, so every inbound message — peer cards, A2A tasks, replies — was
-                    // received and silently dropped. The callback fired 47 times in one
-                    // two-agent run while the agent acted on none of them, which is why
-                    // discovery found nobody and a paid task never settled. Nothing was ever
-                    // lost in transit; it was thrown away one line after arrival.
-                    if (data.size() < 3) return;
-                    std::string topic = data[1].toString().toStdString();
-                    // The payload is base64 on the way in (a card arrives as
-                    // "eyJfbG9nb3Mi…" == "{\"_logos\"…"). Decode it here, once, so every
-                    // handler below keeps receiving exactly what the sender passed to send().
-                    std::string payload = QString::fromUtf8(
-                        QByteArray::fromBase64(data[2].toString().toUtf8())).toStdString();
+        // Typed event adapter (2026-08 SDK). The callback receives NAMED arguments and the
+        // payload as the raw bytes the sender passed to send() — the argument-order and
+        // base64 mistakes that silently dropped every inbound message for weeks (measured
+        // 2026-07-27: hash read as topic, so no topic ever matched) are now structurally
+        // impossible, not just fixed.
+        modules().delivery_module.onMessageReceived(
+            [this](const std::string& /*messageHash*/, const std::string& contentTopic,
+                   const std::vector<uint8_t>& payloadBytes, int64_t /*timestamp*/) {
+                    std::string topic = contentTopic;
+                    std::string payload(payloadBytes.begin(), payloadBytes.end());
 
                     // Record the handoff FIRST, before any branch can drop the message. A row
                     // here proves delivery_module reached our code; no rows at all proves it
@@ -388,7 +362,6 @@ void PilotImpl::initDeliveryModule() {
                         }
                     } catch (...) {}
                 });
-        }
     }
 }
 
@@ -420,23 +393,10 @@ std::vector<std::string> PilotImpl::identityTopics() {
     return topics;
 }
 
-// Did delivery_module accept this call? Same shape as deliverToOwner's check: a JSON reply
-// carrying success:false or a non-empty error is a refusal; anything else non-null counts.
-static bool deliveryAccepted(const QVariant& v) {
-    if (v.isNull()) return false;
-    const QString s = v.toString();
-    const QJsonDocument d = QJsonDocument::fromJson(s.toUtf8());
-    if (d.isObject()) {
-        const QJsonObject o = d.object();
-        if (o.contains("success")) return o.value("success").toBool();
-        if (o.contains("error") && !o.value("error").toString().isEmpty()) return false;
-    }
-    return true;
-}
-
 void PilotImpl::subscribeIdentityTopics() {
-    auto* delivery = logosAPI_ ? logosAPI_->getClient("delivery_module") : nullptr;
-    if (!delivery || !delivery->isConnected()) return;
+    // Typed client: acceptance comes back as StdLogosResult.success — no JSON reply to parse
+    // (the old deliveryAccepted helper), and no connection to probe (lazy connect on call).
+    if (!isContextReady()) return;
 
     const std::vector<std::string> want = identityTopics();
 
@@ -450,13 +410,13 @@ void PilotImpl::subscribeIdentityTopics() {
         if (std::find(subscribedTopics_.begin(), subscribedTopics_.end(), topic)
                 != subscribedTopics_.end())
             continue;
-        QVariant r = delivery->invokeRemoteMethod("delivery_module", "subscribe",
-            QString::fromStdString(topic), Timeout(15000));
-        if (deliveryAccepted(r))
+        StdLogosResult r = modules().delivery_module.subscribe(topic, nullptr, 15000);
+        if (r.success)
             subscribedTopics_.push_back(topic);
         else
             qWarning() << "[pilot] subscribeIdentityTopics: delivery REFUSED"
-                       << QString::fromStdString(topic);
+                       << QString::fromStdString(topic)
+                       << QString::fromStdString(r.error);
     }
 
     // Drop what we hold but no longer want. This is what makes closing for hire REAL rather
@@ -464,8 +424,7 @@ void PilotImpl::subscribeIdentityTopics() {
     // inbox it had already stopped advertising.
     for (auto it = subscribedTopics_.begin(); it != subscribedTopics_.end(); ) {
         if (std::find(want.begin(), want.end(), *it) != want.end()) { ++it; continue; }
-        delivery->invokeRemoteMethod("delivery_module", "unsubscribe",
-            QString::fromStdString(*it), Timeout(15000));
+        modules().delivery_module.unsubscribe(*it, nullptr, 15000);
         it = subscribedTopics_.erase(it);
     }
 }

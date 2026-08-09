@@ -2,9 +2,8 @@
 #include "pilot_a2a.h"
 #include "pilot_crypto.h"
 #include "pilot_skill.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
-#include "logos_mode.h"
+// Generated per-build; typed client for delivery_module (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <chrono>
 #include <thread>
@@ -24,7 +23,7 @@
 // processInboundRequest is proven red->green against real SQLite (/tmp/a2a/test_inbox.cpp)
 // and re-run in tests/test_a2a_inbox.cpp.
 
-static const Timeout INBOX_TIMEOUT(15000);
+static constexpr int kInboxTimeoutMs = 15000;
 
 static std::string a2aNow() {
     auto n = std::chrono::system_clock::now();
@@ -624,7 +623,7 @@ void PilotImpl::resumeInboundTask(const std::string& spendRequestId, bool approv
 // means handed to the network, not read by the peer.
 bool PilotImpl::replyToPeer(const std::string& topic, const std::string& recipientKey,
                             const std::string& json) {
-    if (!logosAPI_ || topic.empty()) return false;
+    if (!isContextReady() || topic.empty()) return false;
 
     // SIGN THE REPLY (FIX 1 — the BLOCKER). Encrypting the reply to the requester's PUBLIC
     // key authenticates NOTHING: the reply topic and that public key are PUBLIC, so any
@@ -667,13 +666,10 @@ bool PilotImpl::replyToPeer(const std::string& topic, const std::string& recipie
         return false;
     }
     for (int attempt = 0; attempt < 3; ++attempt) {
-        auto* delivery = logosAPI_->getClient("delivery_module");
-        if (delivery && delivery->isConnected()) {
-            QVariant r = delivery->invokeRemoteMethod(
-                "delivery_module", "send",
-                QString::fromStdString(topic), QString::fromStdString(payload), INBOX_TIMEOUT);
-            if (!r.isNull() && !r.toString().isEmpty()) return true;
-        }
+        StdLogosResult r = modules().delivery_module.send(
+            topic, std::vector<uint8_t>(payload.begin(), payload.end()),
+            nullptr, kInboxTimeoutMs);
+        if (r.success) return true;
         if (attempt < 2) std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
     }
     qWarning() << "[pilot] replyToPeer: delivery failed after 3 attempts";

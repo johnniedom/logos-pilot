@@ -1,9 +1,8 @@
 #include "pilot_impl.h"
 #include "pilot_skill.h"
 #include "pilot_crypto.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
-#include "logos_mode.h"
+// Generated per-build; typed client for lez_core (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <sstream>
 #include <chrono>
@@ -92,7 +91,7 @@ bool PilotImpl::initialize(const std::string& dataDir) {
     inboundTasksRecover();     // fail inbound A2A tasks that died with the previous process
     outboundTasksRecover();    // re-arm/reconcile outbound A2A settlement after a restart (M7)
     // L7 — resolve/surface spends crash-stranded in EXECUTING. Placed here (NOT inside
-    // recoverPendingTransactions, which is gated on logosAPI_ AND only runs on the loadIdentity()
+    // recoverPendingTransactions, which is gated on the module context AND only runs on the loadIdentity()
     // branch) so it fires on every startup path, incl. degraded restart (no transport yet) and
     // createIdentity(). db_-only; runs strictly after outboundTasksRecover()'s step (2), preserving
     // the L7⊕L8 ordering invariant. sendToOwner() inside is a safe no-op without an owner channel.
@@ -128,12 +127,13 @@ bool PilotImpl::initialize(const std::string& dataDir) {
         // assumption — a transient wallet unavailability must never destroy the agent identity.
         bool couldCheckWallet = false;
         bool walletHasAccount = false;
-        auto* w = logosAPI_ ? logosAPI_->getClient(kWalletModule) : nullptr;
-        if (w && !agentAccountId_.empty()) {
-            couldCheckWallet = true;
-            QVariant k = w->invokeRemoteMethod(kWalletModule, "get_private_account_keys",
-                QString::fromStdString(agentAccountId_));
-            walletHasAccount = (!k.isNull() && !k.toString().isEmpty());
+        if (isContextReady() && !agentAccountId_.empty()) {
+            logos::CallError kerr;
+            std::string k = modules().lez_core.get_private_account_keys(agentAccountId_, &kerr);
+            // A transport/module error means we could NOT check — it must never read as
+            // "wallet lacks the account", or a transient outage would wipe a good identity.
+            couldCheckWallet = kerr.code.empty();
+            walletHasAccount = couldCheckWallet && !k.empty();
         }
         if (couldCheckWallet && !walletHasAccount) {
             qWarning() << "[pilot] initialize: wallet missing saved account -> recovering identity";
@@ -342,9 +342,8 @@ void PilotImpl::resetStaleIdentity() {
 // seed-phrase / private-key export — the storage file IS the only key backup — so we
 // keep a second copy that initWallet() can restore from if the main file is lost.
 void PilotImpl::backupWallet() {
-    if (!logosAPI_ || dataDir_.empty()) return;
-    if (auto* wallet = logosAPI_->getClient(kWalletModule))
-        wallet->invokeRemoteMethod(kWalletModule, "save");
+    if (!isContextReady() || dataDir_.empty()) return;
+    modules().lez_core.save();
     std::string storagePath = dataDir_ + "/wallet_storage.json";
     std::ifstream src(storagePath, std::ios::binary);
     if (src.good()) {
@@ -355,14 +354,21 @@ void PilotImpl::backupWallet() {
 
 bool PilotImpl::initWallet() {
     if (walletOpened_) return true;   // idempotent: handle persists in the module process
-    if (!logosAPI_) { qWarning() << "[pilot] initWallet: logosAPI_ is NULL"; return false; }
+    if (!isContextReady()) { qWarning() << "[pilot] initWallet: module context not attached"; return false; }
 
-    auto* wallet = logosAPI_->getClient(kWalletModule);
-    if (!wallet) { qWarning() << "[pilot] initWallet: getClient returned null"; return false; }
-
-    for (int i = 0; i < 20 && !wallet->isConnected(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    if (!wallet->isConnected()) { qWarning() << "[pilot] initWallet: wallet not connected after 5s"; return false; }
+    // Reachability probe (was: poll isConnected() up to 5s). The typed client connects
+    // lazily, so ping the wallet BEFORE the open/create ladder: on "module unreachable" we
+    // must bail out early — falling through would misread a transport failure as a corrupt
+    // wallet file and destructively move it aside in step 3 below.
+    {
+        logos::CallError perr;
+        modules().lez_core.name(&perr, 5000);
+        if (!perr.code.empty()) {
+            qWarning() << "[pilot] initWallet: wallet module unreachable:"
+                       << QString::fromStdString(perr.message);
+            return false;
+        }
+    }
 
     std::string configPath = dataDir_ + "/wallet_config.json";
     // Storage MUST be a file path (wallet_ffi_open/create_new write a file, not a dir).
@@ -395,11 +401,9 @@ bool PilotImpl::initWallet() {
     std::string backupPath = storagePath + ".bak";
 
     auto tryOpen = [&](const std::string& path) -> bool {
-        QVariant r = wallet->invokeRemoteMethod(
-            kWalletModule, "open",
-            QString::fromStdString(configPath),
-            QString::fromStdString(path), Timeout(15000));
-        return (!r.isNull() && r.toInt() == 0);
+        logos::CallError err;
+        int64_t rc = modules().lez_core.open(configPath, path, &err, 15000);
+        return err.code.empty() && rc == 0;
     };
     auto copyFile = [](const std::string& from, const std::string& to) {
         std::ifstream src(from, std::ios::binary);
@@ -434,13 +438,13 @@ bool PilotImpl::initWallet() {
     // 4. Genuine first run (or unrecoverable) -> create a fresh wallet.
     std::string walletName = "pilot_" + std::to_string(
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
-    QVariant createResult = wallet->invokeRemoteMethod(
-        kWalletModule, "create_new",
-        QString::fromStdString(configPath),
-        QString::fromStdString(storagePath),
-        QString::fromStdString(walletName), Timeout(15000));
-    qWarning() << "[pilot] initWallet: create_new result:" << createResult;
-    if (!createResult.isNull() && createResult.toInt() == 0) { walletOpened_ = true; return true; }
+    logos::CallError cerr;
+    std::string createResult = modules().lez_core.create_new(
+        configPath, storagePath, walletName, &cerr, 15000);
+    qWarning() << "[pilot] initWallet: create_new result:" << QString::fromStdString(createResult);
+    // Same acceptance as the old QVariant::toInt()==0 check: any non-numeric or "0" body
+    // counts as success (atoll of both is 0), an error reply does not.
+    if (cerr.code.empty() && std::atoll(createResult.c_str()) == 0) { walletOpened_ = true; return true; }
     return false;
 }
 
@@ -474,27 +478,22 @@ bool PilotImpl::persistSecretConfig(const std::string& configKey, const std::str
 }
 
 bool PilotImpl::createIdentity() {
-    if (!logosAPI_) return false;
+    if (!isContextReady()) return false;
 
     if (!initWallet()) return false;
 
-    auto* wallet = logosAPI_->getClient(kWalletModule);
-    if (!wallet) return false;
+    std::string accountId = modules().lez_core.create_account_private();
+    if (accountId.empty()) return false;
 
-    QVariant result = wallet->invokeRemoteMethod(
-        kWalletModule, "create_account_private");
-    if (result.isNull() || result.toString().isEmpty()) return false;
+    agentAccountId_ = accountId;
 
-    agentAccountId_ = result.toString().toStdString();
+    logos::CallError kerr;
+    std::string keysResult = modules().lez_core.get_private_account_keys(agentAccountId_, &kerr);
+    if (!kerr.code.empty()) return false;
 
-    QVariant keysResult = wallet->invokeRemoteMethod(
-        kWalletModule, "get_private_account_keys",
-        QString::fromStdString(agentAccountId_));
-    if (keysResult.isNull()) return false;
+    agentNpk_ = keysResult;
 
-    agentNpk_ = keysResult.toString().toStdString();
-
-    QJsonDocument npkDoc = QJsonDocument::fromJson(keysResult.toString().toUtf8());
+    QJsonDocument npkDoc = QJsonDocument::fromJson(QString::fromStdString(keysResult).toUtf8());
     if (npkDoc.isObject() && npkDoc.object().contains("viewing_public_key"))
         agentViewingKey_ = npkDoc.object()["viewing_public_key"].toString().toStdString();
     else
@@ -566,7 +565,7 @@ bool PilotImpl::createIdentity() {
 // private account. Idempotent via the 'funded' config flag; best-effort (never
 // fatal to startup). NOTE: if the chain is wiped, also clear pilot.db so this re-runs.
 bool PilotImpl::fundAgentIfNeeded() {
-    if (!logosAPI_ || agentAccountId_.empty() || !db_) return false;
+    if (!isContextReady() || agentAccountId_.empty() || !db_) return false;
 
     // Idempotency check.
     {
@@ -600,62 +599,55 @@ bool PilotImpl::fundAgentIfNeeded() {
     };
 
     if (!initWallet()) return fundFail("wallet not open");
-    auto* wallet = logosAPI_->getClient(kWalletModule);
-    if (!wallet) return fundFail("wallet module client unavailable");
+    if (!isContextReady()) return fundFail("wallet module client unavailable");
 
     const int64_t fundAmount = 100;   // tokens to move into the agent's private account
 
     auto syncToHead = [&]() {
-        QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
-        if (!h.isNull())
-            wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
-                                       QString::number(h.toLongLong()), Timeout(kWalletSyncTimeoutMs));
+        logos::CallError herr;
+        int64_t h = modules().lez_core.get_current_block_height(&herr);
+        if (herr.code.empty())
+            modules().lez_core.sync_to_block(h, nullptr, kWalletSyncTimeoutMs);
     };
-    auto ok = [](const QVariant& v) {
-        if (v.isNull()) return false;
-        QJsonDocument d = QJsonDocument::fromJson(v.toString().toUtf8());
+    // A transfer-style reply is JSON {"error","success","tx_hash"} in a string; a transport
+    // failure comes back as an empty string, which fails the parse — same false as the old
+    // null QVariant.
+    auto ok = [](const std::string& s) {
+        QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(s).toUtf8());
         return d.isObject() && d.object().value("success").toBool();
     };
 
     // 1. Fresh public account + initialise it on-chain.
-    QVariant pubV = wallet->invokeRemoteMethod(kWalletModule, "create_account_public");
-    std::string pubId = pubV.isNull() ? std::string() : pubV.toString().toStdString();
+    std::string pubId = modules().lez_core.create_account_public();
     if (pubId.empty()) return fundFail("create_account_public failed");
-    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "register_public_account",
-                                       QString::fromStdString(pubId), Timeout(30000)))) {
+    if (!ok(modules().lez_core.register_public_account(pubId, nullptr, 30000))) {
         return fundFail("register_public_account failed");
     }
     // Wait for the register tx to be mined — claim_pinata requires an initialised
     // recipient on-chain, else the claim is accepted but never credits.
     {
-        QVariant s = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
-        long long start = s.isNull() ? 0 : s.toLongLong();
+        int64_t start = modules().lez_core.get_current_block_height();
         for (int i = 0; i < 60; ++i) {
             syncToHead();
-            QVariant h = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
-            if (!h.isNull() && h.toLongLong() >= start + 2) break;
+            logos::CallError herr;
+            int64_t h = modules().lez_core.get_current_block_height(&herr);
+            if (herr.code.empty() && h >= start + 2) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
     }
 
     // 2. Resolve the pinata id, fetch its data, solve the PoW.
-    QVariant pinV = wallet->invokeRemoteMethod(kWalletModule, "account_id_from_base58",
-                                               QString(kPinataBase58), Timeout(15000));
-    std::string pinataHex = pinV.isNull() ? std::string() : pinV.toString().toStdString();
+    std::string pinataHex = modules().lez_core.account_id_from_base58(kPinataBase58, nullptr, 15000);
     if (pinataHex.empty()) return fundFail("pinata id resolve failed");
 
-    QVariant accV = wallet->invokeRemoteMethod(kWalletModule, "get_account_public",
-                                               QString::fromStdString(pinataHex), Timeout(15000));
-    QJsonDocument accDoc = accV.isNull() ? QJsonDocument() : QJsonDocument::fromJson(accV.toString().toUtf8());
+    std::string accJson = modules().lez_core.get_account_public(pinataHex, nullptr, 15000);
+    QJsonDocument accDoc = QJsonDocument::fromJson(QString::fromStdString(accJson).toUtf8());
     std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
     std::string solHex = computePinataSolution(dataHex);
     if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
 
     // 3. Claim the pinata into the public account.
-    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "claim_pinata",
-                                       QString::fromStdString(pinataHex),
-                                       QString::fromStdString(pubId),
-                                       QString::fromStdString(solHex), Timeout(60000)))) {
+    if (!ok(modules().lez_core.claim_pinata(pinataHex, pubId, solHex, nullptr, 60000))) {
         return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
     }
 
@@ -663,18 +655,15 @@ bool PilotImpl::fundAgentIfNeeded() {
     bool credited = false;
     for (int i = 0; i < 60 && !credited; ++i) {
         syncToHead();
-        QVariant balV = wallet->invokeRemoteMethod(kWalletModule, "get_balance",
-                                                   QString::fromStdString(pubId), QVariant(true));
-        if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) credited = true;
+        std::string bal = modules().lez_core.get_balance(pubId, true);
+        if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) credited = true;
         else std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
     if (!credited) return fundFail("pinata claim never credited the public account");
 
     // 4. Shielded transfer public -> agent's private account (generates a ZK proof).
-    if (!ok(wallet->invokeRemoteMethod(kWalletModule, "transfer_shielded_owned",
-                                       QString::fromStdString(pubId),
-                                       QString::fromStdString(agentAccountId_),
-                                       QString::fromStdString(u128LeHex(fundAmount)), Timeout(120000)))) {
+    if (!ok(modules().lez_core.transfer_shielded_owned(
+                pubId, agentAccountId_, u128LeHex(fundAmount), nullptr, 120000))) {
         return fundFail("transfer_shielded_owned failed");
     }
     syncToHead();
@@ -688,10 +677,8 @@ bool PilotImpl::fundAgentIfNeeded() {
     bool landed = false;
     for (int i = 0; i < 60 && !landed; ++i) {
         syncToHead();
-        QVariant balV = wallet->invokeRemoteMethod(kWalletModule, "get_balance",
-                                                   QString::fromStdString(agentAccountId_),
-                                                   QVariant(false));
-        if (!balV.isNull() && balV.toString().toLongLong() >= fundAmount) landed = true;
+        std::string bal = modules().lez_core.get_balance(agentAccountId_, false);
+        if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) landed = true;
         else std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     if (!landed) {
@@ -726,10 +713,7 @@ std::string PilotImpl::getAccountId() {
 }
 
 std::string PilotImpl::walletBalance() {
-    if (!logosAPI_ || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
-
-    auto* wallet = logosAPI_->getClient(kWalletModule);
-    if (!wallet) return "{\"error\": \"wallet module unavailable\"}";
+    if (!isContextReady() || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
 
     // Sync to chain head so the balance reflects the latest blocks.
     //
@@ -738,26 +722,25 @@ std::string PilotImpl::walletBalance() {
     // 30s cap, so the sync was being CUT OFF mid-flight on every chain of any age. A truncated
     // sync leaves the wallet believing it is further behind than it is, which is how a balance
     // read and a spend end up disagreeing about the same account.
-    QVariant head = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
-    if (!head.isNull())
-        wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
-                                   QString::number(head.toLongLong()), Timeout(kWalletSyncTimeoutMs));
+    logos::CallError herr;
+    int64_t head = modules().lez_core.get_current_block_height(&herr);
+    if (herr.code.empty())
+        modules().lez_core.sync_to_block(head, nullptr, kWalletSyncTimeoutMs);
 
-    QVariant result = wallet->invokeRemoteMethod(
-        kWalletModule, "get_balance",
-        QString::fromStdString(agentAccountId_), QVariant(false));
+    logos::CallError berr;
+    std::string result = modules().lez_core.get_balance(agentAccountId_, false, &berr);
 
-    if (result.isNull())
+    if (!berr.code.empty())
         return "{\"error\": \"balance query failed\"}";
 
     QJsonObject obj;
-    obj["balance"] = result.toString();
+    obj["balance"] = QString::fromStdString(result);
     obj["account"] = QString::fromStdString(agentAccountId_);
     return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::walletHistory() {
-    if (!logosAPI_ || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
     if (!db_) return "{\"error\": \"database not open\"}";
 
     sqlite3_stmt* stmt = nullptr;

@@ -1,6 +1,6 @@
 #include "pilot_impl.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
+// Generated per-build; typed client for lez_core (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <sstream>
 #include <chrono>
@@ -41,37 +41,33 @@ static std::string amountToHexLE(int64_t amount) {
 //     (a private account this wallet owns)
 // A bare account id cannot be shielded-paid without the payee's keys, so id form is
 // only valid for owned recipients.
-static QVariant doPrivateTransfer(LogosAPIClient* wallet, const std::string& fromId,
-                                  const std::string& recipient, int64_t amount) {
+static std::string doPrivateTransfer(LezCore& wallet, const std::string& fromId,
+                                     const std::string& recipient, int64_t amount) {
     const bool hasKeys = recipient.find("nullifier_public_key") != std::string::npos
                       || recipient.find("viewing_public_key") != std::string::npos;
-    const char* method = hasKeys ? "transfer_private" : "transfer_private_owned";
     // A shielded transfer generates a real RISC0 proof when RISC0_DEV_MODE=0: ~44 min wall on a
     // dev box (dev mode returns in seconds). The old 120s cap made every real-proof transfer
     // report TX_FAILED at the 2-min mark while proving was still in flight. 60 min covers the
     // documented ~44 min with margin; it is only a ceiling, so dev-mode transfers are unaffected.
-    return wallet->invokeRemoteMethod(
-        "lez_core", method,
-        QString::fromStdString(fromId),
-        QString::fromStdString(recipient),
-        QString::fromStdString(amountToHexLE(amount)), Timeout(3600000));
+    const std::string amountHex = amountToHexLE(amount);
+    return hasKeys
+        ? wallet.transfer_private(fromId, recipient, amountHex, nullptr, 3600000)
+        : wallet.transfer_private_owned(fromId, recipient, amountHex, nullptr, 3600000);
 }
 
-// A transfer result is JSON: {"error":"...","success":bool,"tx_hash":"..."}.
-// Parse the success flag explicitly — substring-matching is wrong because the
-// "error" key matches even when error is empty, and a real error message may
-// not contain the word "fail".
-static bool transferSucceeded(const QVariant& result) {
-    if (result.isNull()) return false;
-    QJsonDocument d = QJsonDocument::fromJson(result.toString().toUtf8());
+// A transfer result is JSON: {"error":"...","success":bool,"tx_hash":"..."} in a string
+// (empty on transport failure). Parse the success flag explicitly — substring-matching is
+// wrong because the "error" key matches even when error is empty, and a real error message
+// may not contain the word "fail".
+static bool transferSucceeded(const std::string& result) {
+    QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(result).toUtf8());
     return d.isObject() && d.object().value("success").toBool();
 }
 
 // Parse the tx_hash the transfer result already carries ({"error","success","tx_hash"}, see
-// line 48); previously discarded. Empty on null/unparseable/missing.
-static std::string transferTxHash(const QVariant& result) {
-    if (result.isNull()) return std::string();
-    QJsonDocument d = QJsonDocument::fromJson(result.toString().toUtf8());
+// above); previously discarded. Empty on unparseable/missing.
+static std::string transferTxHash(const std::string& result) {
+    QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(result).toUtf8());
     return d.isObject() ? d.object().value("tx_hash").toString().toStdString() : std::string();
 }
 
@@ -198,8 +194,7 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
 
     setSpendState("EXECUTING");
 
-    auto* wallet = logosAPI_ ? logosAPI_->getClient("lez_core") : nullptr;
-    if (!wallet) { setSpendState("TX_FAILED"); return false; }
+    if (!isContextReady()) { setSpendState("TX_FAILED"); return false; }
 
     // transfer_private returns once the SEQUENCER ACCEPTS THE TX INTO ITS MEMPOOL — not once it
     // executes. wallet-ffi sets success:true on send_transaction() alone (wallet/src/lib.rs,
@@ -223,14 +218,13 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     // exactly the shape of "reports 100, then fails with InsufficientFundsError". A spend must
     // not be built on a staler picture than the number that justified it.
     {
-        QVariant head = wallet->invokeRemoteMethod(kWalletModule, "get_current_block_height");
-        if (!head.isNull())
-            wallet->invokeRemoteMethod(kWalletModule, "sync_to_block",
-                                       QString::number(head.toLongLong()),
-                                       Timeout(kWalletSyncTimeoutMs));
+        logos::CallError herr;
+        int64_t head = modules().lez_core.get_current_block_height(&herr);
+        if (herr.code.empty())
+            modules().lez_core.sync_to_block(head, nullptr, kWalletSyncTimeoutMs);
     }
 
-    QVariant result = doPrivateTransfer(wallet, agentAccountId_, recipient, amount);
+    std::string result = doPrivateTransfer(modules().lez_core, agentAccountId_, recipient, amount);
     bool ok = transferSucceeded(result);
     std::string txHash = transferTxHash(result);
     std::string now = currentTimestamp();
@@ -249,7 +243,7 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
 bool PilotImpl::approveSpend(const std::string& requestId) {
     // executeSpend (the real transfer) and sendToOwner both tolerate a missing wallet/transport
     // (honest TX_FAILED / no-op), so the approval FSM + outbound-task advancement still run when
-    // logosAPI_ isn't wired. Gate only on the DB, so an unavailable transport never silently
+    // the module context isn't wired. Gate only on the DB, so an unavailable transport never silently
     // swallows an owner approval (and the path stays unit-testable).
     if (!db_) return false;
 
@@ -493,7 +487,7 @@ std::string PilotImpl::holdForApproval(const std::string& reqId, const std::stri
 }
 
 std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, const std::string& reason) {
-    if (!logosAPI_ || agentAccountId_.empty())
+    if (!isContextReady() || agentAccountId_.empty())
         return "{\"error\": \"not initialized\"}";
 
     // Check per-period spending limit
@@ -582,7 +576,7 @@ void PilotImpl::reconcileExecutingSpends() {
 }
 
 void PilotImpl::recoverPendingTransactions() {
-    if (!db_ || !logosAPI_) return;
+    if (!db_ || !isContextReady()) return;
 
     expireStaleSpends();   // don't re-announce requests that already timed out while we were down
 

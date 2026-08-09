@@ -1,7 +1,7 @@
 #include "pilot_impl.h"
 #include "pilot_crypto.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
+// Generated per-build; typed client for delivery_module (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sstream>
 #include <random>
 #include <QString>
@@ -18,7 +18,7 @@ static std::string genGroupId() {
 }
 
 std::string PilotImpl::messagingSend(const std::string& recipient, const std::string& message) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
     initDeliveryModule();
 
     std::string recipientKey = recipient;
@@ -44,13 +44,8 @@ std::string PilotImpl::messagingSend(const std::string& recipient, const std::st
 
     std::string topic = "/pilot/1/inbox-" + recipientKey + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
-
-    delivery->invokeRemoteMethod(
-        "delivery_module", "send",
-        QString::fromStdString(topic),
-        QString::fromStdString(encPayload));
+    modules().delivery_module.send(
+        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()));
 
     QJsonObject result;
     result["sent"] = true;
@@ -60,33 +55,20 @@ std::string PilotImpl::messagingSend(const std::string& recipient, const std::st
 }
 
 bool PilotImpl::messagingJoin(const std::string& groupId) {
-    if (!logosAPI_) return false;
+    if (!isContextReady()) return false;
 
     std::string topic = "/pilot/1/group-" + groupId + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return false;
-
-    QVariant result = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(topic));
-
-    return !result.isNull();
+    return modules().delivery_module.subscribe(topic).success;
 }
 
 std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
 
     std::string groupId = genGroupId();
     std::string topic = "/pilot/1/group-" + groupId + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
-
-    QVariant subResult = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(topic));
-    if (subResult.isNull())
+    if (!modules().delivery_module.subscribe(topic).success)
         return "{\"error\": \"failed to create group topic\"}";
 
     QJsonObject invite;
@@ -109,10 +91,8 @@ std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
         member = member.substr(start, end - start + 1);
 
         std::string memberTopic = "/pilot/1/inbox-" + member + "/proto";
-        delivery->invokeRemoteMethod(
-            "delivery_module", "send",
-            QString::fromStdString(memberTopic),
-            QString::fromStdString(inviteStr));
+        modules().delivery_module.send(
+            memberTopic, std::vector<uint8_t>(inviteStr.begin(), inviteStr.end()));
     }
 
     QJsonObject result;

@@ -1,17 +1,14 @@
 #include "pilot_impl.h"
 #include "pilot_crypto.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
+// Generated per-build; typed clients for storage_module + delivery_module (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <fstream>
 #include <chrono>
 #include <thread>
 #include <cstring>
 #include <QString>
-#include <QVariant>
-#include <QVariantMap>
 #include <QByteArray>
-#include "logos_types.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -22,7 +19,7 @@ static std::string currentTs() {
 }
 
 std::string PilotImpl::storageUpload(const std::string& path, const std::string& label) {
-    if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || !db_) return "{\"error\": \"not initialized\"}";
     initStorageModule();
 
     std::ifstream file(path, std::ios::binary);
@@ -40,45 +37,26 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     std::vector<uint8_t> plainBytes(content.begin(), content.end());
     std::vector<uint8_t> encrypted = aesEncrypt(plainBytes, fileKey);
 
-    auto* storage = logosAPI_->getClient("storage_module");
-    if (!storage) return "{\"error\": \"storage module unavailable\"}";
-
-    QVariant initResult = storage->invokeRemoteMethod(
-        "storage_module", "uploadInit",
-        QString::fromStdString(label));
-
-    QString sessionId;
-    if (initResult.canConvert<LogosResult>()) {
-        LogosResult lr = initResult.value<LogosResult>();
-        if (lr.success)
-            sessionId = lr.value.toString();
-    } else if (initResult.canConvert<QVariantMap>()) {
-        sessionId = initResult.toMap().value("value").toString();
-    } else {
-        sessionId = initResult.toString();
-    }
-    if (sessionId.isEmpty())
+    StdLogosResult initResult = modules().storage_module.uploadInit(label, 65536);
+    std::string sessionId;
+    if (initResult.success && initResult.value.is_string())
+        sessionId = initResult.value.get<std::string>();
+    if (sessionId.empty())
         return "{\"error\": \"upload init failed\"}";
 
-    QByteArray chunk(reinterpret_cast<const char*>(encrypted.data()),
-                     static_cast<int>(encrypted.size()));
-    storage->invokeRemoteMethod(
-        "storage_module", "uploadChunk",
-        sessionId, QVariant(chunk));
+    // The lp transport marshals arguments as JSON, and JSON strings must be valid UTF-8 —
+    // raw AES ciphertext cannot ride in the chunk argument. Base64-wrap it here; the
+    // download path (storageDownload) unwraps symmetrically. Both ends are pilot code, so
+    // the stored object's format is ours to define.
+    std::string chunkB64 = QByteArray(reinterpret_cast<const char*>(encrypted.data()),
+                                      static_cast<int>(encrypted.size()))
+                               .toBase64().toStdString();
+    modules().storage_module.uploadChunk(sessionId, chunkB64);
 
-    QVariant finalResult = storage->invokeRemoteMethod(
-        "storage_module", "uploadFinalize", sessionId);
-
+    StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId);
     std::string cid;
-    if (finalResult.canConvert<LogosResult>()) {
-        LogosResult lr = finalResult.value<LogosResult>();
-        if (lr.success)
-            cid = lr.value.toString().toStdString();
-    } else if (finalResult.canConvert<QVariantMap>()) {
-        cid = finalResult.toMap().value("value").toString().toStdString();
-    } else {
-        cid = finalResult.toString().toStdString();
-    }
+    if (finalResult.success && finalResult.value.is_string())
+        cid = finalResult.value.get<std::string>();
     if (cid.empty())
         return "{\"error\": \"upload finalize failed\"}";
 
@@ -104,7 +82,7 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
 }
 
 std::string PilotImpl::storageDownload(const std::string& cid, const std::string& path) {
-    if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || !db_) return "{\"error\": \"not initialized\"}";
     initStorageModule();
 
     sqlite3_stmt* stmt = nullptr;
@@ -120,26 +98,15 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     std::string keyHex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     sqlite3_finalize(stmt);
 
-    auto* storage = logosAPI_->getClient("storage_module");
-    if (!storage) return "{\"error\": \"storage module unavailable\"}";
-
     std::string tmpPath = path + ".enc";
-    QVariant result = storage->invokeRemoteMethod(
-        "storage_module", "downloadChunks",
-        QString::fromStdString(cid),
-        QVariant(false),
-        QVariant(65536),
-        QString::fromStdString(tmpPath));
-
-    std::string downloadedData;
-    if (result.canConvert<LogosResult>()) {
-        LogosResult lr = result.value<LogosResult>();
-        if (!lr.success) {
-            QJsonObject err;
-            err["error"] = QString::fromStdString("download failed: " + lr.error.toString().toStdString());
-            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
-        }
-        downloadedData = lr.value.toString().toStdString();
+    // The old four-arg downloadChunks(cid, local, chunkSize, outPath) is now split upstream:
+    // downloadToUrl is the write-to-file variant (downloadChunks lost its path and streams
+    // chunks via events instead).
+    StdLogosResult result = modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
+    if (!result.success) {
+        QJsonObject err;
+        err["error"] = QString::fromStdString("download failed: " + result.error);
+        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
     }
 
     // Poll for async download to complete (max 30s)
@@ -158,7 +125,9 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     std::remove(tmpPath.c_str());
 
     AESKey fileKey = aesKeyFromHex(keyHex);
-    std::vector<uint8_t> encBytes(encContent.begin(), encContent.end());
+    // Uploads are base64-wrapped (see storageUpload) — unwrap before decrypting.
+    QByteArray encRaw = QByteArray::fromBase64(QByteArray::fromStdString(encContent));
+    std::vector<uint8_t> encBytes(encRaw.begin(), encRaw.end());
     if (encBytes.empty())
         return "{\"error\": \"download failed — empty file received\"}";
 
@@ -209,7 +178,7 @@ std::string PilotImpl::storageList() {
 }
 
 std::string PilotImpl::storageShare(const std::string& cid, const std::string& recipientNpk) {
-    if (!logosAPI_ || !db_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || !db_) return "{\"error\": \"not initialized\"}";
     initStorageModule();
 
     sqlite3_stmt* stmt = nullptr;
@@ -248,13 +217,8 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
 
     std::string topic = "/pilot/1/inbox-" + recipientNpk + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery) return "{\"error\": \"delivery module unavailable\"}";
-
-    delivery->invokeRemoteMethod(
-        "delivery_module", "send",
-        QString::fromStdString(topic),
-        QString::fromStdString(encPayload));
+    modules().delivery_module.send(
+        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()));
 
     QJsonObject result;
     result["shared"] = true;

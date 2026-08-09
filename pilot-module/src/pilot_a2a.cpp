@@ -1,9 +1,8 @@
 #include "pilot_impl.h"
 #include "pilot_a2a.h"
 #include "pilot_crypto.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
-#include "logos_mode.h"
+// Generated per-build; typed clients for delivery_module + lez_core (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <sstream>
 #include <chrono>
@@ -21,7 +20,7 @@
 #include <QIODevice>
 #include <QCryptographicHash>
 
-static const Timeout RPC_TIMEOUT(15000);
+static constexpr int kRpcTimeoutMs = 15000;
 
 // M3 — LRU cap on the heavy discovered_agents card_json cache (see a2aEvictDiscoveryCache).
 static const int kA2ADiscoveredAgentsMax = 1000;
@@ -415,15 +414,12 @@ std::string PilotImpl::agentCard() {
     //
     // Idempotent, and cheap on repeat calls: re-assert the subscription here so a card can
     // never go out ahead of the listen.
-    if (openForHire_ && !agentNpk_.empty() && logosAPI_) {
+    if (openForHire_ && !agentNpk_.empty() && isContextReady()) {
         subscribeIdentityTopics();
-        auto* delivery = logosAPI_->getClient("delivery_module");
-        if (delivery && delivery->isConnected()) {
-            delivery->invokeRemoteMethod(
-                "delivery_module", "send",
-                QString("/pilot/1/discovery/proto"),
-                QString::fromStdString(cardStr), RPC_TIMEOUT);
-        }
+        modules().delivery_module.send(
+            "/pilot/1/discovery/proto",
+            std::vector<uint8_t>(cardStr.begin(), cardStr.end()),
+            nullptr, kRpcTimeoutMs);
     }
     return cardStr;
 }
@@ -598,7 +594,7 @@ std::string PilotImpl::agentImportCard(const std::string& cardJson) {
 }
 
 std::string PilotImpl::agentDiscover(const std::string& topic) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
 
     std::string discoveryTopic = topic.empty()
         ? "/pilot/1/discovery/proto"
@@ -627,57 +623,12 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
         sqlite3_finalize(stmt);
     }
 
-    // 2. Try network discovery via delivery_module
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (delivery && delivery->isConnected()) {
-        delivery->invokeRemoteMethod(
-            "delivery_module", "subscribe",
-            QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
-
-        QVariant storeResult = delivery->invokeRemoteMethod(
-            "delivery_module", "storeQuery",
-            QString::fromStdString(discoveryTopic), RPC_TIMEOUT);
-
-        if (!storeResult.isNull()) {
-            QJsonDocument netDoc = QJsonDocument::fromJson(storeResult.toString().toUtf8());
-            QJsonArray netAgents = netDoc.isArray() ? netDoc.array() : QJsonArray();
-
-            // 3. Cache network results in SQLite
-            auto now = std::chrono::system_clock::now();
-            std::string ts = std::to_string(
-                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
-
-            for (const auto& val : netAgents) {
-                if (!val.isObject()) continue;
-                QJsonObject agentCard = val.toObject();
-                // Key the cache on the card's real payment identity (_logos.npk), NOT its display
-                // name: every Pilot card hardcodes name "Pilot Agent", so keying on name collapses
-                // two distinct agents into one row (breaking the two-agent scenario). matchedCardLogos
-                // also resolves by _logos.npk, so this keeps the cache key and the lookup key aligned.
-                QString npk = agentCard["_logos"].toObject()["npk"].toString();
-                if (npk.isEmpty()) continue;
-
-                // L2: verify-before-cache. Never let a non-valid card (e.g. a forged same-npk
-                // card that verifies 'invalid' against the TOFU pin) EVICT a last-known-valid row
-                // — that would make settlement read the forgery, fail verification, and record
-                // pay-failed (denial-of-payment). The helper also TOFU-pins on first contact.
-                if (db_)
-                    a2aCacheDiscoveredCard(db_, agentCard, discoveryTopic, ts);
-
-                // Flag signature validity on the returned card (cache above kept the
-                // unannotated original so it can be re-verified later). DB-aware so first
-                // contact PINS (npk -> signing_key) for TOFU payout binding.
-                agentCard["signature_status"] = verifyCardStatus(agentCard, db_);
-
-                bool found = false;
-                QString cardNpk = agentCard["_logos"].toObject()["npk"].toString();
-                for (const auto& existing : agents)
-                    if (existing.toObject()["_logos"].toObject()["npk"].toString() == cardNpk) { found = true; break; }
-                if (!found)
-                    agents.append(agentCard);
-            }
-        }
-    }
+    // 2. Arm live network discovery via delivery_module. The old storeQuery attempt is gone
+    // with the SDK migration: the current storeQuery API requires a store-peer multiaddr,
+    // which this topology does not have (no archive service), and the old dynamic call
+    // always returned null here anyway — cards arrive over the live discovery subscription
+    // (handleDiscoveryCard), which verifies + TOFU-pins + caches each one.
+    modules().delivery_module.subscribe(discoveryTopic, nullptr, kRpcTimeoutMs);
 
     // M3 — opportunistically LRU-trim the discovered_agents card cache after a discovery pass
     // (it is the table this method grows). Pins and in-flight-outbound cards are spared.
@@ -713,16 +664,15 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     };
     step("enter");
 
-    if (!logosAPI_) { step("no-logosAPI"); return "{\"error\": \"not initialized\"}"; }
+    if (!isContextReady()) { step("no-logosAPI"); return "{\"error\": \"not initialized\"}"; }
 
     std::string taskId = genUuid();
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery || !delivery->isConnected()) {
-        step("no-delivery");
-        return "{\"error\": \"delivery module unavailable\"}";
-    }
+    // No connection probe anymore: the typed client connects lazily, so "delivery down"
+    // surfaces as the subscribe below failing (recorded, non-fatal by design) and the send
+    // failing (whose result the old code never checked either). A down transport can no
+    // longer bail the task out early — same tolerance the recovery paths already assume.
     step("pre-subscribe");
 
     // Arm the reply topic, but do NOT make the task depend on being told it worked.
@@ -766,10 +716,8 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // that window. So the ACK is not being singled out — pilot's channel to delivery is deaf for
     // the duration, which is the starvation described above. Keeping it would only spend 5s of
     // the budget re-answering a settled question.
-    QVariant subResult = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic), Timeout(3000));
-    const bool replyTopicArmed = !subResult.isNull();
+    StdLogosResult subResult = modules().delivery_module.subscribe(replyTopic, nullptr, 3000);
+    const bool replyTopicArmed = subResult.success;
     step(replyTopicArmed ? "subscribe-ok" : "subscribe-unconfirmed");
 
     // Read the declared price for this skill from the target's discovered Agent Card and
@@ -864,10 +812,9 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
 
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
     step("pre-send");
-    delivery->invokeRemoteMethod(
-        "delivery_module", "send",
-        QString::fromStdString(inboxTopic),
-        QString::fromStdString(encPayload), RPC_TIMEOUT);
+    modules().delivery_module.send(
+        inboxTopic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()),
+        nullptr, kRpcTimeoutMs);
     step("post-send");
 
     QJsonObject status;
@@ -887,19 +834,13 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
 }
 
 std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std::string& taskId) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
 
     // Subscribe where the server actually emits: the reply topic. The previous
     // "/pilot/1/task-<id>/proto" topic was never published to, so updates were lost.
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
 
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery || !delivery->isConnected()) return "{\"error\": \"delivery module unavailable\"}";
-
-    QVariant result = delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(replyTopic), RPC_TIMEOUT);
-    if (result.isNull())
+    if (!modules().delivery_module.subscribe(replyTopic, nullptr, kRpcTimeoutMs).success)
         return "{\"error\": \"subscribe failed\"}";
 
     QJsonObject rpcParams;
@@ -942,10 +883,9 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     }
 
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
-    delivery->invokeRemoteMethod(
-        "delivery_module", "send",
-        QString::fromStdString(inboxTopic),
-        QString::fromStdString(subPayload), RPC_TIMEOUT);
+    modules().delivery_module.send(
+        inboxTopic, std::vector<uint8_t>(subPayload.begin(), subPayload.end()),
+        nullptr, kRpcTimeoutMs);
 
     QJsonObject res;
     res["subscribed"] = true;
@@ -955,10 +895,7 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
 }
 
 bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& taskId) {
-    if (!logosAPI_) return false;
-
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery || !delivery->isConnected()) return false;
+    if (!isContextReady()) return false;
 
     QJsonObject rpcParams;
     rpcParams["id"] = QString::fromStdString(taskId);
@@ -990,17 +927,14 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
     }
 
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
-    delivery->invokeRemoteMethod(
-        "delivery_module", "send",
-        QString::fromStdString(inboxTopic),
-        QString::fromStdString(cancelPayload), RPC_TIMEOUT);
+    modules().delivery_module.send(
+        inboxTopic, std::vector<uint8_t>(cancelPayload.begin(), cancelPayload.end()),
+        nullptr, kRpcTimeoutMs);
 
     // Stop listening on the reply topic (where the server emits). The old
     // "/pilot/1/task-<id>/proto" topic is no longer used, so there is nothing to drop.
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
-    delivery->invokeRemoteMethod(
-        "delivery_module", "unsubscribe",
-        QString::fromStdString(replyTopic), RPC_TIMEOUT);
+    modules().delivery_module.unsubscribe(replyTopic, nullptr, kRpcTimeoutMs);
 
     // Mark the local outbound task canceled so a late reply can't trigger a payment.
     if (db_) {
@@ -1413,8 +1347,7 @@ void PilotImpl::outboundTasksRecover() {
     }
 
     // (1) Re-subscribe reply topics for still-open outbound tasks.
-    auto* delivery = logosAPI_ ? logosAPI_->getClient("delivery_module") : nullptr;
-    if (delivery && delivery->isConnected()) {
+    if (isContextReady()) {
         sqlite3_stmt* st = nullptr;
         sqlite3_prepare_v2(db_,
             "SELECT reply_topic FROM outbound_tasks WHERE state='submitted';", -1, &st, nullptr);
@@ -1422,8 +1355,7 @@ void PilotImpl::outboundTasksRecover() {
             if (!sqlite3_column_text(st, 0)) continue;
             std::string topic = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
             if (topic.empty()) continue;
-            delivery->invokeRemoteMethod("delivery_module", "subscribe",
-                QString::fromStdString(topic), RPC_TIMEOUT);
+            modules().delivery_module.subscribe(topic, nullptr, kRpcTimeoutMs);
         }
         sqlite3_finalize(st);
     }
@@ -1475,29 +1407,16 @@ void PilotImpl::outboundTasksRecover() {
 }
 
 std::string PilotImpl::programQuery(const std::string& programId, const std::string& paramsJson) {
-    if (!logosAPI_) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
+    (void)paramsJson;
 
-    auto* wallet = logosAPI_->getClient("lez_core");
-    if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
-
-    QVariant result = wallet->invokeRemoteMethod(
-        "lez_core", "queryProgram",
-        QString::fromStdString(programId),
-        QString::fromStdString(paramsJson), RPC_TIMEOUT);
-
-    if (result.isNull()) {
-        QJsonObject err;
-        err["error"] = QString("program.query unsupported: the lez_core module exposes no program-query method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
-        err["program"] = QString::fromStdString(programId);
-        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
-    }
-
-    QJsonObject res;
-    res["program"] = QString::fromStdString(programId);
-    QJsonDocument resultDoc = QJsonDocument::fromJson(result.toString().toUtf8());
-    res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
-        (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
-    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    // The old code attempted a dynamic "queryProgram" invoke and mapped the null reply to
+    // this error. The typed SDK makes the gap a compile-time fact: LezCore has no
+    // program-query method at the pinned revision, so the honest error is unconditional.
+    QJsonObject err;
+    err["error"] = QString("program.query unsupported: the lez_core module exposes no program-query method at the pinned LEZ revision (verified against upstream source, now enforced by the typed client API). Not a Pilot-side gap.");
+    err["program"] = QString::fromStdString(programId);
+    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
 }
 
 // M3 — LRU-trim ONLY the heavy discovered_agents card_json cache to kA2ADiscoveredAgentsMax by
@@ -1528,7 +1447,7 @@ void a2aEvictDiscoveryCache(sqlite3* db) {
 }
 
 std::string PilotImpl::programCall(const std::string& programId, const std::string& instruction, const std::string& paramsJson) {
-    if (!logosAPI_ || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
 
     int64_t estimatedCost = 10;
 
@@ -1542,34 +1461,19 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    auto* wallet = logosAPI_->getClient("lez_core");
-    if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
+    (void)paramsJson;
 
-    QVariant result = wallet->invokeRemoteMethod(
-        "lez_core", "callProgram",
-        QString::fromStdString(agentAccountId_),
-        QString::fromStdString(programId),
-        QString::fromStdString(instruction),
-        QString::fromStdString(paramsJson), RPC_TIMEOUT);
-
-    if (result.isNull()) {
-        QJsonObject err;
-        err["error"] = QString("program.call unsupported: the lez_core module exposes no program-call method at the pinned LEZ revision (verified against upstream source). Not a Pilot-side gap.");
-        err["program"] = QString::fromStdString(programId);
-        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
-    }
-
-    QJsonObject res;
-    res["program"] = QString::fromStdString(programId);
-    res["instruction"] = QString::fromStdString(instruction);
-    QJsonDocument resultDoc = QJsonDocument::fromJson(result.toString().toUtf8());
-    res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
-        (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
-    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    // Same shape as programQuery: the typed LezCore client has no program-call method at the
+    // pinned revision — the old dynamic invoke always answered null. Honest, unconditional.
+    QJsonObject err;
+    err["error"] = QString("program.call unsupported: the lez_core module exposes no program-call method at the pinned LEZ revision (verified against upstream source, now enforced by the typed client API). Not a Pilot-side gap.");
+    err["program"] = QString::fromStdString(programId);
+    err["instruction"] = QString::fromStdString(instruction);
+    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::programDeploy(const std::string& binaryPath) {
-    if (!logosAPI_ || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
+    if (!isContextReady() || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
 
     // Read the compiled program binary. If we can't read it, say so honestly —
     // do NOT pretend a deploy happened.
@@ -1587,30 +1491,13 @@ std::string PilotImpl::programDeploy(const std::string& binaryPath) {
         QCryptographicHash::hash(binary, QCryptographicHash::Sha256).toHex();
     std::string binaryHash = hashHex.toStdString();
 
-    auto* wallet = logosAPI_->getClient("lez_core");
-    if (!wallet || !wallet->isConnected()) return "{\"error\": \"wallet module unavailable\"}";
-
-    // Attempt the REAL upstream deploy. mirrors programCall/programQuery: invoke
-    // the method and surface an honest error if the runtime returns null.
-    QVariant result = wallet->invokeRemoteMethod(
-        "lez_core", "deployProgram",
-        QString::fromStdString(agentAccountId_),
-        QString::fromStdString(binary.toHex().toStdString()),
-        QString::fromStdString(binaryHash), RPC_TIMEOUT);
-
-    if (result.isNull()) {
-        QJsonObject err;
-        err["error"] = QString("program.deploy unsupported: LEZ program deployment is done via a direct sequencer transaction (NSSATransaction), which the lez_core module does not expose — no wallet-module deploy method exists at the pinned revision (verified against upstream source).");
-        err["binary"] = QString::fromStdString(binaryPath);
-        err["binary_hash"] = QString::fromStdString(binaryHash);
-        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
-    }
-
-    QJsonObject res;
-    res["binary"] = QString::fromStdString(binaryPath);
-    res["binary_hash"] = QString::fromStdString(binaryHash);
-    QJsonDocument resultDoc = QJsonDocument::fromJson(result.toString().toUtf8());
-    res["result"] = resultDoc.isObject() ? QJsonValue(resultDoc.object()) :
-        (resultDoc.isArray() ? QJsonValue(resultDoc.array()) : QJsonValue(result.toString()));
-    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    // Same shape as programQuery/programCall: no wallet-module deploy method exists at the
+    // pinned revision (LEZ deployment is a direct sequencer NSSATransaction) — the old
+    // dynamic "deployProgram" invoke always answered null. The binary read + hash above stay
+    // so the error still reports exactly WHAT could not be deployed.
+    QJsonObject err;
+    err["error"] = QString("program.deploy unsupported: LEZ program deployment is done via a direct sequencer transaction (NSSATransaction), which the lez_core module does not expose — no wallet-module deploy method exists at the pinned revision (verified against upstream source, now enforced by the typed client API).");
+    err["binary"] = QString::fromStdString(binaryPath);
+    err["binary_hash"] = QString::fromStdString(binaryHash);
+    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
 }

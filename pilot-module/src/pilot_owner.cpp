@@ -1,31 +1,24 @@
 #include "pilot_impl.h"
 #include "pilot_crypto.h"
-#include "logos_api.h"
-#include "logos_api_client.h"
-#include "logos_mode.h"
+// Generated per-build; typed client for delivery_module (see pilot_impl.h).
+#include "logos_sdk.h"
 #include <sqlite3.h>
 #include <chrono>
 #include <thread>
 #include <QString>
-#include <QVariant>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDebug>
 
-static const Timeout OWNER_TIMEOUT(15000);
+static constexpr int kOwnerTimeoutMs = 15000;
 
 bool PilotImpl::establishOwnerChannel() {
-    if (!logosAPI_ || agentNpk_.empty()) return false;
+    if (!isContextReady() || agentNpk_.empty()) return false;
     initDeliveryModule();
-
-    auto* delivery = logosAPI_->getClient("delivery_module");
-    if (!delivery || !delivery->isConnected()) return false;
 
     std::string topic = "/pilot/1/owner-" + agentAccountId_ + "/proto";
 
-    delivery->invokeRemoteMethod(
-        "delivery_module", "subscribe",
-        QString::fromStdString(topic), OWNER_TIMEOUT);
+    modules().delivery_module.subscribe(topic, nullptr, kOwnerTimeoutMs);
 
     ownerChannelId_ = topic;
 
@@ -59,31 +52,17 @@ bool PilotImpl::establishOwnerChannel() {
 // is fire-and-forget with no read receipts, so this is the most we can honestly
 // assert. We never claim the owner has seen it.
 bool PilotImpl::deliverToOwner(const std::string& payload) {
-    if (!logosAPI_ || ownerChannelId_.empty()) return false;
-
-    auto accepted = [](const QVariant& v) {
-        if (v.isNull()) return false;
-        const QString s = v.toString();
-        if (s.isEmpty()) return false;
-        const QJsonDocument d = QJsonDocument::fromJson(s.toUtf8());
-        if (d.isObject()) {
-            const QJsonObject o = d.object();
-            if (o.contains("success")) return o.value("success").toBool();
-            if (o.contains("error") && !o.value("error").toString().isEmpty()) return false;
-        }
-        return true;   // non-empty, non-error reply (e.g. a requestId) -> accepted
-    };
+    if (!isContextReady() || ownerChannelId_.empty()) return false;
 
     const int kAttempts = 3;
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
-        auto* delivery = logosAPI_->getClient("delivery_module");
-        if (delivery && delivery->isConnected()) {
-            QVariant r = delivery->invokeRemoteMethod(
-                "delivery_module", "send",
-                QString::fromStdString(ownerChannelId_),
-                QString::fromStdString(payload), OWNER_TIMEOUT);
-            if (accepted(r)) return true;
-        }
+        // Acceptance is the typed result's success flag (the old code re-derived it by
+        // parsing a JSON reply); the value carries the requestId, which we don't need.
+        StdLogosResult r = modules().delivery_module.send(
+            ownerChannelId_,
+            std::vector<uint8_t>(payload.begin(), payload.end()),
+            nullptr, kOwnerTimeoutMs);
+        if (r.success) return true;
         if (attempt + 1 < kAttempts)
             std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
     }
@@ -92,7 +71,7 @@ bool PilotImpl::deliverToOwner(const std::string& payload) {
 }
 
 bool PilotImpl::sendToOwner(const std::string& message) {
-    if (!logosAPI_ || ownerChannelId_.empty()) return false;
+    if (!isContextReady() || ownerChannelId_.empty()) return false;
 
     // Prepare the payload ONCE. Encryption failure is deterministic — report it
     // immediately rather than retrying a broken operation.

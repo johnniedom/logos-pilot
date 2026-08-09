@@ -3,8 +3,8 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include "logos_module_context.h"
 struct sqlite3;
-class LogosAPI;
 class LLMProvider;
 class SkillRegistry;
 
@@ -34,7 +34,16 @@ struct A2AService {
 };
 const std::vector<A2AService>& a2aServiceCatalog();
 
-class PilotImpl {
+// Derives LogosModuleContext (2026-08 SDK): the generated glue no longer hands the impl a
+// LogosAPI — dependencies are reached ONLY through the typed clients in the generated
+// LogosModules umbrella, via modules().lez_core / .delivery_module / .storage_module
+// (logos_sdk.h, generated per-build from metadata.json#dependencies; verified from the
+// kept build sandbox 2026-08-09 — the umbrella carries NO raw API pointer, so there is no
+// bridge shortcut). isContextReady() is the "framework attached" guard replacing the old
+// `if (!logosAPI_)` checks: impls constructed directly (unit tests) have it false and every
+// dependency-touching path must skip, exactly like the old null-API behavior. modules() is
+// NOT valid inside onContextReady() — the glue sets the context before the modules pointer.
+class PilotImpl : public LogosModuleContext {
 public:
     PilotImpl();
     ~PilotImpl();
@@ -259,8 +268,6 @@ public:
 
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
-
-    LogosAPI* logosAPI_ = nullptr;
 
 private:
     // M1 owner-channel auth (see the comment in the public section + a2a-deferred-handoff.md).
