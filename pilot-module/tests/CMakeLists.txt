@@ -8,6 +8,12 @@ include(LogosTest)
 
 logos_test(
     NAME pilot_module_tests
+    # The impl sources include the per-build generated "logos_sdk.h" (typed dependency
+    # clients) since the 2026-08 SDK migration. mkLogosModuleTests generates it into
+    # ../generated_code before cmake runs; this hands the dir to logos_test so the header
+    # resolves and the generated logos_sdk.cpp is compiled into the test binary. Full path:
+    # if(EXISTS) is only well-defined for absolute paths.
+    GENERATED_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../generated_code
     MODULE_SOURCES
         ../src/pilot_impl.cpp
         ../src/pilot_identity.cpp
