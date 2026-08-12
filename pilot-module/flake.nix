@@ -27,11 +27,32 @@
       src = ./.;
       configFile = ./metadata.json;
       flakeInputs = inputs;
-      # No preConfigure. The old one hand-ran `logos-cpp-generator --backend qt` and then
-      # sed-patched an onInit override into the generated Qt glue. Both are obsolete on the
-      # current builder: it generates the universal glue itself, and Qt glue moved out to
-      # logos-qt-generator ("Error: Qt glue generation moved to logos-qt-generator ... this tool
-      # keeps the Qt-free outputs"). Modules on this builder (e.g. lez_core 24e09df2) declare
+      # No module-build preConfigure. The old one hand-ran `logos-cpp-generator --backend qt`
+      # and then sed-patched an onInit override into the generated Qt glue. Both are obsolete
+      # on the current builder: it generates the universal glue itself, and Qt glue moved out
+      # to logos-qt-generator. Modules on this builder (e.g. lez_core 24e09df2) declare
       # codegen in metadata.json and carry no preConfigure — matched here.
+      tests = {
+        dir = ./tests;
+        # mkLogosModuleTests assembles ./generated_code by copying each dep's QT-style
+        # client headers and generating a qt umbrella — but this module is
+        # `interface: "universal"`, so its sources compile against the STD-style clients
+        # (std::string / StdLogosResult / timeout_ms), exactly what the module build
+        # generates in ITS sandbox from each dep's published LIDL contract. Without this
+        # hook the test compile of every impl TU fails on qt/std signature mismatches
+        # (CI run 31440835689). Regenerate the whole tree to match the module build.
+        # x86_64-linux is fixed here because preConfigure is a single string shared by
+        # all systems and this project builds/tests on x86_64-linux only (CI + dev box).
+        preConfigure = ''
+          echo "tests: regenerating dep clients std-style from published LIDL contracts"
+          rm -rf ./generated_code
+          mkdir -p ./generated_code
+          logos-cpp-generator --metadata "$PWD/metadata.json" --api-style std \
+            --dep lez_core=${inputs.lez_core.packages.x86_64-linux.lidl}/lez_core.lidl \
+            --dep delivery_module=${inputs.delivery_module.packages.x86_64-linux.lidl}/delivery_module.lidl \
+            --dep storage_module=${inputs.storage_module.packages.x86_64-linux.lidl}/storage_module.lidl \
+            --output-dir ./generated_code
+        '';
+      };
     };
 }
