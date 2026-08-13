@@ -43,13 +43,17 @@
         # every impl TU fails on qt/lp signature mismatches (CI run 31440835689).
         # NOTE the style name is `lp`, NOT `std` — `--api-style=std` was retired by the
         # generator ("Use 'lp' for the Qt-free std-typed surface", CI run on c701b05).
+        # And --general-only is REQUIRED: in --metadata mode without it the generator
+        # only PRINTS the dependency names and generates nothing (legacy/main.cpp:1099,
+        # observed on the 2c7fc4c CI run). With it, --dep specs become <dep>_api.{h,cpp}
+        # (BindMode::Static) plus the lp umbrella with this module's origin baked in.
         # x86_64-linux is fixed here because preConfigure is a single string shared by
         # all systems and this project builds/tests on x86_64-linux only (CI + dev box).
         preConfigure = ''
           echo "tests: regenerating dep clients std-style from published LIDL contracts"
           rm -rf ./generated_code
           mkdir -p ./generated_code
-          logos-cpp-generator --metadata "$PWD/metadata.json" --api-style lp \
+          logos-cpp-generator --metadata "$PWD/metadata.json" --general-only --api-style lp \
             --dep lez_core=${inputs.lez_core.packages.x86_64-linux.lidl}/lez_core.lidl \
             --dep delivery_module=${inputs.delivery_module.packages.x86_64-linux.lidl}/delivery_module.lidl \
             --dep storage_module=${inputs.storage_module.packages.x86_64-linux.lidl}/storage_module.lidl \
