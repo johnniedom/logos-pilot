@@ -36,18 +36,20 @@
         dir = ./tests;
         # mkLogosModuleTests assembles ./generated_code by copying each dep's QT-style
         # client headers and generating a qt umbrella — but this module is
-        # `interface: "universal"`, so its sources compile against the STD-style clients
-        # (std::string / StdLogosResult / timeout_ms), exactly what the module build
-        # generates in ITS sandbox from each dep's published LIDL contract. Without this
-        # hook the test compile of every impl TU fails on qt/std signature mismatches
-        # (CI run 31440835689). Regenerate the whole tree to match the module build.
+        # `interface: "universal"`, so its sources compile against the LP-style clients
+        # (Qt-free std types: std::string / StdLogosResult / timeout_ms over the
+        # logos-protocol C ABI), exactly what the module build generates in ITS sandbox
+        # from each dep's published LIDL contract. Without this hook the test compile of
+        # every impl TU fails on qt/lp signature mismatches (CI run 31440835689).
+        # NOTE the style name is `lp`, NOT `std` — `--api-style=std` was retired by the
+        # generator ("Use 'lp' for the Qt-free std-typed surface", CI run on c701b05).
         # x86_64-linux is fixed here because preConfigure is a single string shared by
         # all systems and this project builds/tests on x86_64-linux only (CI + dev box).
         preConfigure = ''
           echo "tests: regenerating dep clients std-style from published LIDL contracts"
           rm -rf ./generated_code
           mkdir -p ./generated_code
-          logos-cpp-generator --metadata "$PWD/metadata.json" --api-style std \
+          logos-cpp-generator --metadata "$PWD/metadata.json" --api-style lp \
             --dep lez_core=${inputs.lez_core.packages.x86_64-linux.lidl}/lez_core.lidl \
             --dep delivery_module=${inputs.delivery_module.packages.x86_64-linux.lidl}/delivery_module.lidl \
             --dep storage_module=${inputs.storage_module.packages.x86_64-linux.lidl}/storage_module.lidl \
