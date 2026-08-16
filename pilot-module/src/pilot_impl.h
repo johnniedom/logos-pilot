@@ -52,7 +52,15 @@ public:
     std::string echo(const std::string& input);
 
     // Phase 1: Identity + Wallet
+    // (initializeAndReport is the headless boot-and-verify entry: same initialization as
+    // initialize(), answering with walletBalance()'s JSON. It exists because the daemon
+    // cannot survive a long call — RPC timeout tears the QtRO connection down under the
+    // module and segfaults, 2026-08-13 — and the inline runner needs a renderable result.
+    // Its declaration is deliberately bare: this generator mis-parses comment-adjacent
+    // declarations, cf. the onInit bug.)
     bool initialize(const std::string& dataDir);
+    std::string initializeAndReport(const std::string& dataDir);
+    std::string walletProof(const std::string& dataDir);
     bool isInitialized();
     std::string getAgentNpk();
     std::string getAccountId();

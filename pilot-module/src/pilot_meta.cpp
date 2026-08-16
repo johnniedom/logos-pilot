@@ -16,6 +16,32 @@ std::string PilotImpl::metaSkills() {
     return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
+// Lean headless proof entry: database + identity + wallet + synced balance, WITHOUT the
+// delivery/waku boot or funding replay. Exists because the inline runner renders only
+// calls that finish within its ~15-20s budget (measured 2026-08-13/14) — full
+// initialize() structurally cannot (createNode alone is ~10s), so a headless operator
+// could never SEE a balance. Wallet ops (walletSend et al.) need exactly this much
+// state, so a proof run is: walletProof -> walletSend -> walletProof.
+std::string PilotImpl::walletProof(const std::string& dataDir) {
+    std::string effectiveDir = dataDir;
+    if (const char* env = std::getenv("PILOT_DATA_DIR"); env && *env)
+        effectiveDir = env;
+    initDatabase(effectiveDir);
+    if (!loadIdentity()) return "{\"error\":\"no identity\"}";
+    initialized_ = true;
+    initWallet();
+    return walletBalance();
+}
+
+std::string PilotImpl::initializeAndReport(const std::string& dataDir) {
+    // Returns walletBalance(), not metaStatus(): the inline runner renders small JSON
+    // fine but reports "invalid result" on the full post-init status payload (measured
+    // 2026-08-13 — the method body completes either way; only the rendering differs).
+    // Balance is the one number a headless boot-and-verify actually needs.
+    initialize(dataDir);
+    return walletBalance();
+}
+
 std::string PilotImpl::metaStatus() {
     std::string balance = walletBalance();
     std::string pending = getPendingSpends();
