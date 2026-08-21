@@ -39,6 +39,13 @@ export LOGOS_BLOCKCHAIN_CIRCUITS
 SEQ="$LEZ/target/release/sequencer_service"
 [ -x "$SEQ" ] || { echo "ERROR: $SEQ not built — see Prerequisites (set LEZ=/path/to/logos-execution-zone)"; exit 1; }
 
+# A locally-built sequencer links against a nix libstdc++ that is NOT on the default runtime
+# path, so it dies instantly with "error while loading shared libraries: libstdc++.so.6".
+# Prepend one from the store UNCONDITIONALLY: an `ldd` guard here reported the library as
+# resolvable while the real exec still failed, so the check was worse than useless.
+GCCLIB=$(ls -d /nix/store/*gcc*-lib/lib 2>/dev/null | head -1)
+[ -n "$GCCLIB" ] && export LD_LIBRARY_PATH="$GCCLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 cd "$LEZ"
 WALLET="${PILOT_DATA_DIR:-$HOME/.pilot}/wallet_storage.json"
 if [ "${KEEP_STATE:-}" = "1" ]; then
@@ -62,8 +69,14 @@ fi
 CFG_REL="sequencer/service/configs/debug/sequencer_config.json"
 [ -f "$CFG_REL" ] || CFG_REL="lez/sequencer/service/configs/debug/sequencer_config.json"
 [ -f "$CFG_REL" ] || { echo "ERROR: sequencer_config.json not found in either layout"; exit 1; }
-# Dev tweak carried since the old checkout: 1s blocks instead of 15s, so funding and tests
-# don't crawl. Applied in place, idempotent.
-sed -i 's/"block_create_timeout": "15s"/"block_create_timeout": "1s"/' "$CFG_REL"
+# Dev tweak carried since the old checkout: fast blocks so funding doesn't crawl — but
+# BLOCK_TIME is now a knob, because 1s blocks turned out to DOS the agents (found
+# 2026-08-18): the chain grows 86,400 blocks/day, every block forces the wallet to
+# re-sync + re-store accounts, and the pilot module's single thread is permanently
+# consumed by that churn — every RPC (agentCard, messagingSend…) starves and returns
+# empty. Funding runs want BLOCK_TIME=1s; A2A/agent runs want 15s so the module can
+# actually answer between blocks.
+BLOCK_TIME="${BLOCK_TIME:-1s}"
+sed -i -E 's/"block_create_timeout": "[0-9]+s"/"block_create_timeout": "'"$BLOCK_TIME"'"/' "$CFG_REL"
 echo "Booting LEZ sequencer_service in DEV mode on :3040 (circuits: $LOGOS_BLOCKCHAIN_CIRCUITS, config: $CFG_REL)"
 exec "$SEQ" "$CFG_REL"
