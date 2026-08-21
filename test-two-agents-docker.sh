@@ -93,6 +93,34 @@ if [ ! -d "$MODULES" ] || [ -z "$(ls -A $MODULES 2>/dev/null)" ]; then
   exit 1
 fi
 echo "  ✓ Modules installed"
+
+# Transport preflight (2026-08-18). Both 10/19 runs failed for the same reason: neither
+# agent ever connected to the LOCAL relay, and the public-fleet fallback is quicksand from
+# this network (A's 5 fleet conns rotted mid-run; B's container can't resolve DNS via
+# 1.1.1.1 at all; hongkong-01 refuses TCP outright). The local relay was never dialed
+# because neither address was dialable:
+#   - A's built-in default /ip4/127.0.0.1/tcp/30303 has no /p2p/ peer id → the peer
+#     manager never attempts it (zero dial attempts in a full run's log), and
+#   - B got /ip4/host.docker.internal/tcp/30303 — /ip4/ demands a literal IP, so the
+#     multiaddr is malformed and silently dropped.
+# Fetch the relay's identity at runtime (the peer id CHANGES on every container recreate
+# — no --nodekey) and hand both agents a COMPLETE multiaddr. B joins nwaku's compose
+# network and dials its container IP directly: no port mapping, no DNS, no gateway guess.
+NWAKU_ID=$(curl -s -m 5 http://127.0.0.1:8645/debug/v1/info | python3 -c \
+  "import sys,json;print(json.load(sys.stdin)['listenAddresses'][0].rsplit('/p2p/',1)[1])" 2>/dev/null)
+if [ -z "$NWAKU_ID" ]; then
+  echo "  ✗ Local nwaku not answering on :8645 — start it (docker compose up -d)."
+  echo "    Without it both agents fall back to the public fleet and the run scores fiction."
+  exit 1
+fi
+NWAKU_NET=$(docker inspect pilot-nwaku -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+NWAKU_IP=$(docker inspect pilot-nwaku -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+if [ -z "$NWAKU_NET" ] || [ -z "$NWAKU_IP" ]; then
+  echo "  ✗ Could not read pilot-nwaku's network/IP from docker inspect"
+  exit 1
+fi
+export PILOT_WAKU_ADDR="/ip4/127.0.0.1/tcp/30303/p2p/$NWAKU_ID"
+echo "  ✓ Local relay: $NWAKU_IP (net $NWAKU_NET) p2p ${NWAKU_ID:0:16}…"
 echo ""
 
 # Clean
@@ -192,6 +220,7 @@ docker rm -f $CONTAINER >/dev/null 2>&1
 # is nix-built so SSL_CERT_FILE / NIX_SSL_CERT_FILE are what it honours.
 docker run --rm -d \
   --name $CONTAINER \
+  --network $NWAKU_NET \
   -v /nix/store:/nix/store:ro \
   -v $MODULES_B:/modules:ro \
   -v $AGENT_B:/data \
@@ -201,7 +230,7 @@ docker run --rm -d \
   -e NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   -e LOGOS_HOST_PATH=$LOGOS_HOST_PATH \
   -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
-  -e PILOT_WAKU_ADDR=/ip4/host.docker.internal/tcp/30303 \
+  -e PILOT_WAKU_ADDR=/ip4/$NWAKU_IP/tcp/30303/p2p/$NWAKU_ID \
   -e RISC0_DEV_MODE=1 \
   -e LOGOS_BLOCKCHAIN_CIRCUITS=/nix/store/y8i3f2qiyhbl9kccvl7z12rnbj6h42g9-logos-blockchain-circuits-0.4.1 \
   -e PATH=/root/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -253,6 +282,22 @@ if [ -z "$R" ]; then
 fi
 check "[B] initialize" "$R"
 
+# The module keeps working AFTER initialize returns: self-funding and the first wallet
+# sync ride the same single thread, and every RPC fired into that busy window is
+# abandoned by the daemon at ~40s — scored here as an empty-response FAIL over an agent
+# that is merely mid-funding. Measured 2026-08-18: the same agentCard that "failed"
+# mid-window answered in under a second once the module went quiet, and the relay store
+# held five cards proving the runs' late publishes really went out. Gate the phases on
+# the agent ANSWERING, not on initialize returning.
+echo "  ...   Waiting for both agents to finish funding and answer (up to 4 min each)"
+for who in A B; do
+  for i in $(seq 1 24); do
+    if [ "$who" = "A" ]; then Q=$(call_a getAccountId); else Q=$(call_b getAccountId); fi
+    [ -n "$Q" ] && { echo "  OK    Agent $who is quiet and answering"; break; }
+    sleep 10
+  done
+done
+
 NPK_A=$(call_a getAgentNpk)
 check "[A] getAgentNpk" "$NPK_A"
 
@@ -291,8 +336,13 @@ for who in A B; do
   check_has "[$who] starts CLOSED for hire" "$WAS" '^([Ff]alse|0|)$'
 done
 
-R=$(call_a agentOpenForHire); check_has "[A] opens for hire" "$R" '^([Tt]rue|1)$'
-R=$(call_b agentOpenForHire); check_has "[B] opens for hire" "$R" '^([Tt]rue|1)$'
+# Not scored on the call's own reply: agentOpenForHire() flips the flag, then performs the
+# agent's FIRST-TIME inbox subscribes (~15s each) before returning true — on a fresh agent
+# that honestly outlasts the daemon's ~40s RPC abandon, so the reply reads empty while the
+# open already happened (measured 2026-08-18). The truth is asserted twice below instead:
+# the state read right after, and Phase 8's "listens where its card says".
+R=$(call_a agentOpenForHire); echo "  ·     [A] agentOpenForHire replied: ${R:-<abandoned at daemon timeout — verified by the reads below>}"
+R=$(call_b agentOpenForHire); echo "  ·     [B] agentOpenForHire replied: ${R:-<abandoned at daemon timeout — verified by the reads below>}"
 
 for who in A B; do
   if [ "$who" = "A" ]; then NOW=$(call_a agentIsOpenForHire); else NOW=$(call_b agentIsOpenForHire); fi
@@ -312,13 +362,21 @@ echo "── Phase 2: Agent Discovery ──"
 R=$(call_a agentCard)
 check "[A] publishes Agent Card" "$R"
 
-echo "  ...   Waiting 10s for card to propagate"
-sleep 10
+# 30s, not 10: the card publish can complete AFTER the agentCard RPC is abandoned
+# (the module finishes the send late — relay store proved it). Give the late publish
+# room to land before B looks, and give B a second look for good measure.
+echo "  ...   Waiting 30s for card to propagate"
+sleep 30
 
 # Discovery must FIND something. "" is the shared discovery topic agentCard()
 # publishes to; passing a name builds /pilot/1/discovery-<name>/proto, which no
 # card is ever published to.
 R=$(call_b agentDiscover "")
+if ! echo "$R" | grep -qE '"count":[1-9]'; then
+  echo "  ...   First look found nothing; one more look in 20s"
+  sleep 20
+  R=$(call_b agentDiscover "")
+fi
 check_has "[B] discovers ≥1 agent" "$R" '"count":[1-9]'
 check_has "[B] discovered agent is A" "$R" "$(echo "$NPK_A" | python3 -c "import sys,json;print(json.load(sys.stdin).get('nullifier_public_key','__none__')[:16])" 2>/dev/null || echo '__none__')"
 
