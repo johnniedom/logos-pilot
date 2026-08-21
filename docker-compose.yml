@@ -10,6 +10,12 @@ services:
     volumes:
       - ./store:/store
     command:
+      # nwaku's default TCP port is 60000 — without this flag the 30303:30303
+      # mapping above points at a port nothing listens on, and every agent that
+      # dials the relay (the module's default is /ip4/127.0.0.1/tcp/30303)
+      # connects to a dead socket. Found 2026-08-18; explains the 2026-07-30
+      # A/B transport isolation.
+      - --tcp-port=30303
       - --rest=true
       - --rest-address=0.0.0.0
       - --rest-port=8645
