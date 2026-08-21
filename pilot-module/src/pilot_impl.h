@@ -386,6 +386,15 @@ private:
     bool walletOpened_ = false;
     bool storageInitialized_ = false;
     bool deliveryInitialized_ = false;
+    // Keeps whatever the generated delivery_module.onMessageReceived() returns, for the
+    // life of the agent. On the SDK this box builds against that is a plain bool; on SDKs
+    // whose generated wrapper returns an RAII logos::LpSubscription (which unsubscribes
+    // on destruction) keeping it alive here is what stops the subscription dying at the
+    // end of the registering statement. Held type-erased so this header stays free of
+    // SDK/Qt includes (unit-test build). Inbound-event delivery is under diagnosis
+    // (2026-08-21): delivery's own log shows message_received events arriving; whether
+    // the typed callback registers/fires is what the [pilot] diagnostic lines report.
+    std::shared_ptr<void> deliveryMessageSub_;
     // The owner's standing decision to take work from strangers, restored from config
     // "a2a.open_for_hire" by loadIdentity(). Closed until said otherwise.
     bool openForHire_ = false;

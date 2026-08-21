@@ -241,6 +241,12 @@ void PilotImpl::initStorageModule() {
     modules().storage_module.start(nullptr, 10000);
 }
 
+// The generated onXxx event wrapper returns `bool` on the SDK this box builds against and an
+// RAII handle (with .valid()) on others; report "did the subscription register" for either.
+static bool subscriptionOk(bool ok) { return ok; }
+template <class Handle>
+static bool subscriptionOk(const Handle& h) { return h.valid(); }
+
 void PilotImpl::initDeliveryModule() {
     // isContextReady() replaces the old `if (!logosAPI_)` gate — see initStorageModule.
     if (!isContextReady() || deliveryInitialized_) return;
@@ -259,6 +265,12 @@ void PilotImpl::initDeliveryModule() {
         staticNodes.append(QString::fromStdString(wakuAddr));
         QJsonObject cfgObj;
         cfgObj["preset"] = QString("logos.dev");
+        // The one line whose absence hid every A2A failure for months (found 2026-08-18):
+        // staticNodes was built above and then never attached, so PILOT_WAKU_ADDR never
+        // reached delivery — every agent silently ran on the preset's public fleet alone,
+        // which works or fails with the weather. The key is spelled exactly "staticNodes"
+        // in liblogosdelivery's config schema (verified by strings alongside tcpPort).
+        cfgObj["staticNodes"] = staticNodes;
         if (const char* modeEnv = std::getenv("PILOT_WAKU_MODE"))
             cfgObj["mode"] = QString(modeEnv);
         else
@@ -282,11 +294,23 @@ void PilotImpl::initDeliveryModule() {
         // base64 mistakes that silently dropped every inbound message for weeks (measured
         // 2026-07-27: hash read as topic, so no topic ever matched) are now structurally
         // impossible, not just fixed.
-        modules().delivery_module.onMessageReceived(
+        // Keep whatever the generated wrapper returns (bool on this box's SDK; an RAII
+        // subscription handle on others, which would unsubscribe if dropped). `new auto(...)`
+        // direct-initializes from the returned prvalue (guaranteed elision) — no move/copy
+        // constructor needed, no dependence on the exact return type. The [pilot] lines
+        // below report whether the subscription registered and whether any event arrives.
+        auto* deliverySubPtr = new auto(modules().delivery_module.onMessageReceived(
             [this](const std::string& /*messageHash*/, const std::string& contentTopic,
                    const std::vector<uint8_t>& payloadBytes, int64_t /*timestamp*/) {
                     std::string topic = contentTopic;
                     std::string payload(payloadBytes.begin(), payloadBytes.end());
+                    // Diagnostic (2026-08-21): the FIRST observable proof that delivery's
+                    // messageReceived event reached this module at all. Every run since the
+                    // 2026-08-09 SDK migration showed delivery receiving messages and this
+                    // module recording none; this line separates "event never delivered"
+                    // from "delivered then dropped" without needing a database.
+                    fprintf(stderr, "[pilot] delivery event messageReceived topic=%s bytes=%zu\n",
+                            topic.c_str(), payload.size());
 
                     // Record the handoff FIRST, before any branch can drop the message. A row
                     // here proves delivery_module reached our code; no rows at all proves it
@@ -361,7 +385,18 @@ void PilotImpl::initDeliveryModule() {
                             sendToOwner(response);
                         }
                     } catch (...) {}
-                });
+                }));
+        // Stored type-erased (pilot_impl.h stays SDK-free); the deleter runs the
+        // subscription's own destructor, so the unsubscribe happens exactly once, at
+        // PilotImpl teardown — not at the end of this statement.
+        deliveryMessageSub_ = std::shared_ptr<void>(
+            deliverySubPtr,
+            [](void* p) { delete static_cast<decltype(deliverySubPtr)>(p); });
+        // Diagnostic (2026-08-21): did the subscription REGISTER? The generated wrapper
+        // returns bool on the SDK this box builds against (an LpSubscription handle on
+        // others) — report either form. A `false` here means lp_subscribe itself refused.
+        fprintf(stderr, "[pilot] delivery onMessageReceived registered ok=%d\n",
+                (int)subscriptionOk(*deliverySubPtr));
     }
 }
 
