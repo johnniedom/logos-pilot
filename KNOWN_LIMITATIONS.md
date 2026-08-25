@@ -150,16 +150,32 @@ not a public network.
 
 An earlier revision of this document said no public LEZ testnet existed. **That is
 no longer true**, and the correction matters more than the excuse: a public
-endpoint is live at `https://testnet.lez.logos.co`, serving LEZ **v0.2.0**, and it
-is **not** auth-gated (verified 2026-07-25 — a JSON-RPC POST returns a normal
-`-32601 Method not found`; the auth wall is on the L1 testnet, which is a different
-service). So the blocker on these three criteria is our own remaining work, not
-missing infrastructure.
+endpoint is live at `https://testnet.lez.logos.co` and it is **not** auth-gated
+(re-verified 2026-08-25: plain JSON-RPC POSTs succeed on read and write methods,
+no API key or allowlist; the auth wall is on the L1 testnet, a different service).
+So missing infrastructure is not the blocker.
 
-What is genuinely unknown, rather than assumed: whether the **pinned** wallet
-module and circuits in this repo are wire-compatible with testnet v0.2.0, and how
-an agent obtains an opening balance there — Pilot's self-funding uses a local
-faucet claim that may have no public equivalent. Neither has been tested yet.
+What blocks these criteria is a **version gap on our side**, verified 2026-08-25
+against the live endpoint:
+
+- The testnet is **not** the v0.2.0 an earlier note assumed. Its chain restarted on
+  2026-08-05 (block 2 timestamp), the day LEZ v0.2.2 shipped, and the docs describe
+  it as "Testnet v0.2.1". This repo pins `lez_core` → logos-execution-zone
+  `571f35b3` (v0.2.0 + 13 commits) with circuits v0.5.3.
+- The RPC surface still matches (`checkHealth`, `getLastBlockId`, `getProgramIds`,
+  `getAccount` all answer the pinned client's method names), so **reads and sync
+  work**.
+- **State changes will be rejected.** The testnet's `getProgramIds` lists program
+  image IDs for `pinata` / `authenticated_transfer` / `token` that differ from the
+  `program_owner` IDs our pinned wallet-ffi writes into `wallet_storage.json`; a
+  proof built by the pinned stack targets programs the testnet does not know.
+  v0.2.1/v0.2.2 also carry breaking wallet changes (viewing-key binding, note
+  ordering, two-tip chain state, action structs).
+- The funding route **does** exist publicly: the piñata proof-of-work program is
+  the faucet, the same well-known account Pilot claims locally is live there with
+  a large balance at difficulty 3, and `wallet pinata claim` is the documented
+  procedure. Pilot's self-funding code is the right shape; it is the pinned
+  program IDs that stop it.
 
 In addition:
 
@@ -168,10 +184,13 @@ In addition:
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
   committed.**
 
-**What would close it.** Point `wallet_config.json`'s `sequencer_addr` at the
-public testnet, confirm version compatibility and a funding route, re-run the three
-use cases there, and record the narrated real-proof video. Third-party deployment
-numbers then become an outreach problem rather than an infrastructure one.
+**What would close it.** Move the `lez_core` pin to a module revision that
+tracks LEZ ≥ v0.2.2 (the module repo bumped on 2026-08-05), accept the toolchain
+cascade the flake comment warns about, re-verify the piñata claim and the
+"Nullifier already seen" fix on that revision, point `wallet_config.json`'s
+`sequencer_addr` at the public testnet, re-run the three use cases there, and
+record the narrated real-proof video. Third-party deployment numbers then become
+an outreach problem rather than an infrastructure one.
 
 ---
 
