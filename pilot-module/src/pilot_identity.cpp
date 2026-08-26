@@ -61,18 +61,32 @@ std::string computePinataSolution(const std::string& dataHex) {
     const int difficulty = data[0];
     uint8_t buf[48];
     std::memcpy(buf, data.data() + 1, 32);   // seed
-    const EVP_MD* md = EVP_sha256();
+    // Fetch the digest implementation ONCE and reuse one context. The previous form —
+    // EVP_Digest(..., EVP_sha256(), ...) per candidate — makes OpenSSL 3 perform an implicit
+    // algorithm fetch on every call, tens of microseconds each; at difficulty 3 (~16M
+    // candidates) that turned a ~30 s search into 10+ minutes of a blocked module thread
+    // (measured 2026-08-25: the pilot host at ~40 % CPU with no RPC traffic for 12 min while
+    // the daemon timed out every call), which is what "funding needs several boots" was.
+    EVP_MD* md = EVP_MD_fetch(nullptr, "SHA256", nullptr);
+    if (!md) return {};
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) { EVP_MD_free(md); return {}; }
+    std::string result;
     for (uint64_t sol = 0; sol != 0ULL - 1; ++sol) {
         for (int i = 0; i < 16; ++i)
             buf[32 + i] = (i < 8) ? static_cast<uint8_t>((sol >> (8 * i)) & 0xFF) : 0;
         uint8_t h[EVP_MAX_MD_SIZE];
         unsigned int hlen = 0;
-        if (EVP_Digest(buf, sizeof(buf), h, &hlen, md, nullptr) != 1) return {};
+        if (EVP_DigestInit_ex(ctx, md, nullptr) != 1 ||
+            EVP_DigestUpdate(ctx, buf, sizeof(buf)) != 1 ||
+            EVP_DigestFinal_ex(ctx, h, &hlen) != 1) break;
         bool ok = true;
         for (int i = 0; i < difficulty; ++i) { if (h[i] != 0) { ok = false; break; } }
-        if (ok) return u128LeHex(sol);
+        if (ok) { result = u128LeHex(sol); break; }
     }
-    return {};
+    EVP_MD_CTX_free(ctx);
+    EVP_MD_free(md);
+    return result;
 }
 }  // namespace
 
