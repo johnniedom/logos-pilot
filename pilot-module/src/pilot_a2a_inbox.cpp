@@ -668,7 +668,7 @@ bool PilotImpl::replyToPeer(const std::string& topic, const std::string& recipie
     for (int attempt = 0; attempt < 3; ++attempt) {
         StdLogosResult r = modules().delivery_module.send(
             topic, std::vector<uint8_t>(payload.begin(), payload.end()),
-            nullptr, kInboxTimeoutMs);
+            nullptr, kDeliveryFireAndForgetMs);
         if (r.success) return true;
         if (attempt < 2) std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
     }

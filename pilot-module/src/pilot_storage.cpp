@@ -218,7 +218,7 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
     std::string topic = "/pilot/1/inbox-" + recipientNpk + "/proto";
 
     modules().delivery_module.send(
-        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()));
+        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()), nullptr, kDeliveryFireAndForgetMs);
 
     QJsonObject result;
     result["shared"] = true;

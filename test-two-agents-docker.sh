@@ -120,6 +120,8 @@ if [ -z "$NWAKU_NET" ] || [ -z "$NWAKU_IP" ]; then
   exit 1
 fi
 export PILOT_WAKU_ADDR="/ip4/127.0.0.1/tcp/30303/p2p/$NWAKU_ID"
+# The pull path (agentPoll) reads the relay's REST store directly; B reaches it by container IP.
+export PILOT_WAKU_REST="http://127.0.0.1:8645"
 echo "  ✓ Local relay: $NWAKU_IP (net $NWAKU_NET) p2p ${NWAKU_ID:0:16}…"
 echo ""
 
@@ -231,6 +233,7 @@ docker run --rm -d \
   -e LOGOS_HOST_PATH=$LOGOS_HOST_PATH \
   -e PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040 \
   -e PILOT_WAKU_ADDR=/ip4/$NWAKU_IP/tcp/30303/p2p/$NWAKU_ID \
+  -e PILOT_WAKU_REST=http://$NWAKU_IP:8645 \
   -e RISC0_DEV_MODE=1 \
   -e LOGOS_BLOCKCHAIN_CIRCUITS=/nix/store/y8i3f2qiyhbl9kccvl7z12rnbj6h42g9-logos-blockchain-circuits-0.4.1 \
   -e PATH=/root/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -531,6 +534,10 @@ echo "  ...   Waiting up to 120s for settlement"
 STATE=""
 for i in $(seq 1 12); do
   sleep 10
+  # Pull path (2026-08-25): push events never reach the module, so each side has to ASK the
+  # relay store — B for the task in its inbox, A for B's reply on the task's reply topic.
+  call_b agentPoll > /dev/null 2>&1
+  call_a agentPoll > /dev/null 2>&1
   STATE=$(task_state "$AGENT_A/pilot.db" "$TASK_ID_A")
   case "$STATE" in
     paid|pay-failed|pay-unresolved) break ;;

@@ -45,7 +45,7 @@ std::string PilotImpl::messagingSend(const std::string& recipient, const std::st
     std::string topic = "/pilot/1/inbox-" + recipientKey + "/proto";
 
     modules().delivery_module.send(
-        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()));
+        topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()), nullptr, kDeliveryFireAndForgetMs);
 
     QJsonObject result;
     result["sent"] = true;
@@ -59,7 +59,7 @@ bool PilotImpl::messagingJoin(const std::string& groupId) {
 
     std::string topic = "/pilot/1/group-" + groupId + "/proto";
 
-    return modules().delivery_module.subscribe(topic).success;
+    return modules().delivery_module.subscribe(topic, nullptr, kDeliveryFireAndForgetMs).success;
 }
 
 std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
@@ -68,7 +68,7 @@ std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
     std::string groupId = genGroupId();
     std::string topic = "/pilot/1/group-" + groupId + "/proto";
 
-    if (!modules().delivery_module.subscribe(topic).success)
+    if (!modules().delivery_module.subscribe(topic, nullptr, kDeliveryFireAndForgetMs).success)
         return "{\"error\": \"failed to create group topic\"}";
 
     QJsonObject invite;
@@ -92,7 +92,7 @@ std::string PilotImpl::messagingCreateGroup(const std::string& membersJson) {
 
         std::string memberTopic = "/pilot/1/inbox-" + member + "/proto";
         modules().delivery_module.send(
-            memberTopic, std::vector<uint8_t>(inviteStr.begin(), inviteStr.end()));
+            memberTopic, std::vector<uint8_t>(inviteStr.begin(), inviteStr.end()), nullptr, kDeliveryFireAndForgetMs);
     }
 
     QJsonObject result;

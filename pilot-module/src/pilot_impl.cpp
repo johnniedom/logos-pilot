@@ -257,6 +257,13 @@ void PilotImpl::initDeliveryModule() {
         wakuAddr = env;
     else
         wakuAddr = "/ip4/127.0.0.1/tcp/30303";
+    wakuAddr_ = wakuAddr;
+    // The relay's REST API, read directly by the pull path (pollStore). Agent B in Docker
+    // reaches the relay by container IP, so the test passes PILOT_WAKU_REST explicitly.
+    if (const char* rest = std::getenv("PILOT_WAKU_REST"))
+        wakuRest_ = rest;
+    else
+        wakuRest_ = "http://127.0.0.1:8645";
 
     {
         QJsonArray shards;
@@ -311,80 +318,8 @@ void PilotImpl::initDeliveryModule() {
                     // from "delivered then dropped" without needing a database.
                     fprintf(stderr, "[pilot] delivery event messageReceived topic=%s bytes=%zu\n",
                             topic.c_str(), payload.size());
-
-                    // Record the handoff FIRST, before any branch can drop the message. A row
-                    // here proves delivery_module reached our code; no rows at all proves it
-                    // never did, whatever its subscribe call reported. Deliberately ahead of
-                    // every topic test so a message for an unknown topic still leaves a trace.
-                    //
-                    // Record only OUR traffic. This runs on the delivery thread for every
-                    // message the node relays, and once messages actually started arriving that
-                    // turned out to be a lot of other people's: /radio-basecamp/…,
-                    // /inference/… and more. A database write per public message starved the
-                    // same thread that services our own RPCs — the reply-topic subscribe in
-                    // agentTask began timing out ("failed to subscribe to reply topic"), which
-                    // is a failure CAUSED by the delivery fix working. Ours is all we can act
-                    // on, and all that is worth the write.
-                    if (db_ && topic.rfind("/pilot/1/", 0) == 0) {
-                        sqlite3_stmt* ev = nullptr;
-                        if (sqlite3_prepare_v2(db_,
-                                "INSERT INTO delivery_events (topic, bytes, received_at) "
-                                "VALUES (?, ?, ?);", -1, &ev, nullptr) == SQLITE_OK) {
-                            // Self-contained: nowTimestamp() is local to pilot_a2a.cpp.
-                            std::string ts = std::to_string(
-                                std::chrono::duration_cast<std::chrono::seconds>(
-                                    std::chrono::system_clock::now().time_since_epoch()).count());
-                            sqlite3_bind_text(ev, 1, topic.c_str(), -1, SQLITE_TRANSIENT);
-                            sqlite3_bind_int64(ev, 2, static_cast<sqlite3_int64>(payload.size()));
-                            sqlite3_bind_text(ev, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
-                            sqlite3_step(ev);
-                            sqlite3_finalize(ev);
-                        }
-                    }
-
-                    // Peer task on EITHER of our inboxes -> A2A server (L1). The primary inbox is
-                    // keyed on the enc key (a2aSelfEncKey()); the legacy signing-key inbox is also
-                    // accepted for pre-split peers. handleInboundA2A decrypts with either private
-                    // key (a2aTryDecrypt), consistent with the dual subscribe above.
-                    std::string selfEnc = a2aSelfEncKey();
-                    if ((!selfEnc.empty() && topic == "/pilot/1/inbox-" + selfEnc + "/proto") ||
-                        (!agentEciesPub_.empty() && topic == "/pilot/1/inbox-" + agentEciesPub_ + "/proto")) {
-                        handleInboundA2A(payload);
-                        return;
-                    }
-
-                    // Peer server's reply to a task WE submitted -> requester-side
-                    // pay-on-acceptance consumer.
-                    if (topic.rfind("/pilot/1/reply-", 0) == 0) {
-                        handleA2AReply(topic, payload);
-                        return;
-                    }
-
-                    // A peer's Agent Card broadcast on the shared discovery channel. Without
-                    // this branch the message was received and dropped, so a card could only
-                    // ever be learned by store query (there is no archive service in this
-                    // topology) or by out-of-band import — which is why discovery returned
-                    // {"count":0} forever.
-                    if (topic == "/pilot/1/discovery/proto") {
-                        handleDiscoveryCard(payload);
-                        return;
-                    }
-
-                    if (topic != ownerChannelId_ || agentEciesPriv_.empty()) return;
-
-                    try {
-                        ECIESCiphertext ct = eciesDeserialize(payload);
-                        std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
-                        std::string message(plain.begin(), plain.end());
-                        // M1: authenticate the owner payload FAIL-OPEN. Raw/legacy text is accepted
-                        // (owner never locked out); a SIGNED envelope must pass signature + TOFU pin
-                        // + replay nonce, else it is dropped silently (no LLM processing / no cost).
-                        std::string inner;
-                        if (verifyOwnerMessage(message, inner)) {
-                            std::string response = processOwnerMessage(inner);
-                            sendToOwner(response);
-                        }
-                    } catch (...) {}
+                    // The live event and the store poll (agentPoll) share one funnel from here.
+                    handleInboundMessage(topic, payload);
                 }));
         // Stored type-erased (pilot_impl.h stays SDK-free); the deleter runs the
         // subscription's own destructor, so the unsubscribe happens exactly once, at
@@ -398,6 +333,81 @@ void PilotImpl::initDeliveryModule() {
         fprintf(stderr, "[pilot] delivery onMessageReceived registered ok=%d\n",
                 (int)subscriptionOk(*deliverySubPtr));
     }
+}
+
+// One inbound message, whichever way it reached us: the delivery_module event (when the host
+// delivers it) or a relay-store poll (agentPoll / pollStore). Routing is by topic only, so the
+// two paths cannot disagree about what a message means.
+void PilotImpl::handleInboundMessage(const std::string& topic, const std::string& payload) {
+    // Record the handoff FIRST, before any branch can drop the message. A row here proves the
+    // message reached our code; no rows at all proves it never did, whatever the subscribe
+    // call reported. Deliberately ahead of every topic test so a message for an unknown topic
+    // still leaves a trace.
+    //
+    // Record only OUR traffic. The live path runs on the delivery thread for every message
+    // the node relays, and once messages actually started arriving that turned out to be a
+    // lot of other people's: /radio-basecamp/…, /inference/… and more. A database write per
+    // public message starved the same thread that services our own RPCs — the reply-topic
+    // subscribe in agentTask began timing out ("failed to subscribe to reply topic"), which
+    // is a failure CAUSED by the delivery fix working. Ours is all we can act on, and all
+    // that is worth the write.
+    if (db_ && topic.rfind("/pilot/1/", 0) == 0) {
+        sqlite3_stmt* ev = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT INTO delivery_events (topic, bytes, received_at) "
+                "VALUES (?, ?, ?);", -1, &ev, nullptr) == SQLITE_OK) {
+            // Self-contained: nowTimestamp() is local to pilot_a2a.cpp.
+            std::string ts = std::to_string(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            sqlite3_bind_text(ev, 1, topic.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(ev, 2, static_cast<sqlite3_int64>(payload.size()));
+            sqlite3_bind_text(ev, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(ev);
+            sqlite3_finalize(ev);
+        }
+    }
+
+    // Peer task on EITHER of our inboxes -> A2A server (L1). The primary inbox is keyed on
+    // the enc key (a2aSelfEncKey()); the legacy signing-key inbox is also accepted for
+    // pre-split peers. handleInboundA2A decrypts with either private key (a2aTryDecrypt),
+    // consistent with the dual subscribe in subscribeIdentityTopics().
+    std::string selfEnc = a2aSelfEncKey();
+    if ((!selfEnc.empty() && topic == "/pilot/1/inbox-" + selfEnc + "/proto") ||
+        (!agentEciesPub_.empty() && topic == "/pilot/1/inbox-" + agentEciesPub_ + "/proto")) {
+        handleInboundA2A(payload);
+        return;
+    }
+
+    // Peer server's reply to a task WE submitted -> requester-side pay-on-acceptance consumer.
+    if (topic.rfind("/pilot/1/reply-", 0) == 0) {
+        handleA2AReply(topic, payload);
+        return;
+    }
+
+    // A peer's Agent Card broadcast on the shared discovery channel. Without this branch the
+    // message was received and dropped, so a card could only ever be learned by store query
+    // or by out-of-band import — which is why discovery returned {"count":0} forever.
+    if (topic == "/pilot/1/discovery/proto") {
+        handleDiscoveryCard(payload);
+        return;
+    }
+
+    if (topic != ownerChannelId_ || agentEciesPriv_.empty()) return;
+
+    try {
+        ECIESCiphertext ct = eciesDeserialize(payload);
+        std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
+        std::string message(plain.begin(), plain.end());
+        // M1: authenticate the owner payload FAIL-OPEN. Raw/legacy text is accepted (owner
+        // never locked out); a SIGNED envelope must pass signature + TOFU pin + replay nonce,
+        // else it is dropped silently (no LLM processing / no cost).
+        std::string inner;
+        if (verifyOwnerMessage(message, inner)) {
+            std::string response = processOwnerMessage(inner);
+            sendToOwner(response);
+        }
+    } catch (...) {}
 }
 
 // The topics whose NAMES depend on our own identity keys. Kept pure and separate from the
@@ -445,11 +455,22 @@ void PilotImpl::subscribeIdentityTopics() {
         if (std::find(subscribedTopics_.begin(), subscribedTopics_.end(), topic)
                 != subscribedTopics_.end())
             continue;
-        StdLogosResult r = modules().delivery_module.subscribe(topic, nullptr, 15000);
-        if (r.success)
-            subscribedTopics_.push_back(topic);
-        else
-            qWarning() << "[pilot] subscribeIdentityTopics: delivery REFUSED"
+        StdLogosResult r = modules().delivery_module.subscribe(topic, nullptr,
+                                                               kDeliveryFireAndForgetMs);
+        // Record the topic whether or not delivery confirmed it, and say plainly why: while
+        // the host loses delivery's replies (see agentPoll), r.success is false for EVERY
+        // subscribe even though delivery's own log shows "Subscribe completed … with
+        // success" milliseconds earlier. Recording only on confirmation left the agent
+        // believing it listened nowhere, which made it unhireable in exactly the way this
+        // list exists to detect (2026-08-26 two-agent run).
+        //
+        // This is not a claim we can no longer make good on: the pull path polls precisely
+        // identityTopics() every agentPoll(), so a message on one of these topics reaches the
+        // agent whether delivery's subscription is live or not. The list stays truthful about
+        // WHERE THE AGENT RECEIVES, which is what every caller uses it for.
+        subscribedTopics_.push_back(topic);
+        if (!r.success)
+            qWarning() << "[pilot] subscribeIdentityTopics: unconfirmed (reply channel down)"
                        << QString::fromStdString(topic)
                        << QString::fromStdString(r.error);
     }
@@ -459,7 +480,7 @@ void PilotImpl::subscribeIdentityTopics() {
     // inbox it had already stopped advertising.
     for (auto it = subscribedTopics_.begin(); it != subscribedTopics_.end(); ) {
         if (std::find(want.begin(), want.end(), *it) != want.end()) { ++it; continue; }
-        modules().delivery_module.unsubscribe(*it, nullptr, 15000);
+        modules().delivery_module.unsubscribe(*it, nullptr, kDeliveryFireAndForgetMs);
         it = subscribedTopics_.erase(it);
     }
 }

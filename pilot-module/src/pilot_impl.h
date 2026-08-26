@@ -3,6 +3,18 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <unordered_set>
+
+// A delivery_module call made for its SIDE EFFECT, whose reply we cannot rely on. Delivery
+// performs a send or a subscribe in well under a millisecond (its own log puts "subscribe
+// called" and "Subscribe completed … with success" on the same timestamp), so a healthy
+// channel answers at once. Today it does not answer at all: after delivery emits its first
+// event, its host writes every later reply from the wrong thread and Qt drops them (see
+// agentPoll below), so a 15 s timeout buys nothing but 15 s of a blocked module thread. That
+// starves the agent — the daemon abandons any RPC at 20 s, so one 15 s subscribe is enough to
+// make the NEXT call return empty, which is how "agentCard (empty response)" and
+// "agentOpenForHire abandoned" were produced while both operations actually succeeded.
+inline constexpr int kDeliveryFireAndForgetMs = 3000;
 #include "logos_module_context.h"
 struct sqlite3;
 class LLMProvider;
@@ -105,6 +117,24 @@ public:
     // Phase 5: A2A + Agent skills
     std::string agentCard();
     std::string agentDiscover(const std::string& topic);
+    // Pull-path inbound (2026-08-25). Live `messageReceived` events from delivery_module do
+    // not reach this module, and neither does anything else delivery sends back once it has
+    // emitted its first event: the QtRO source in the delivery host serialises events on the
+    // module's FFI callback thread, not the thread that owns the socket ("QSocketNotifier:
+    // Socket notifiers cannot be enabled or disabled from another thread", journald, delivery
+    // host, tid != pid), and from that moment every event AND every RPC reply on that
+    // connection is lost — measured 2026-08-25 (probes v7/v9: 4 messages received by
+    // delivery, 0 dispatched; subscribe/send replies timing out 15 s after delivery answered
+    // them). That is upstream transport code, already re-queued in newer logos-protocol
+    // revisions but not in the host this CLI ships. Until the host catches up the agent ASKS
+    // the relay for its traffic instead of waiting to be told: agentPoll() reads the relay's
+    // REST store for every topic we listen on (inboxes, open reply topics, discovery, owner
+    // channel) and hands each unseen message to the same handler the event would have.
+    // NOT via delivery_module.storeQuery — its reply rides the same broken channel.
+    // Returns {"topics":N,"new":M,"store":url}. Called by agentDiscover() itself, by the
+    // two-agent test between phases, and by `pilot poll`. Latency becomes one poll interval;
+    // correctness is identical (same handlers, same verification, same dedupe by hash).
+    std::string agentPoll();
     // Learn a peer from a card handed over out-of-band (file, paste, QR) instead of waiting
     // for one to arrive over discovery. Runs the SAME signature + TOFU verification as a
     // broadcast card, so an imported peer is neither more nor less trusted than a discovered
@@ -395,6 +425,24 @@ private:
     // (2026-08-21): delivery's own log shows message_received events arriving; whether
     // the typed callback registers/fires is what the [pilot] diagnostic lines report.
     std::shared_ptr<void> deliveryMessageSub_;
+    // One inbound message, however it arrived (live event or store poll): record the
+    // handoff, then route by topic to the A2A server, the reply consumer, discovery, or the
+    // owner channel. Public for the same reason handleInboundA2A is: the tests drive it.
+public:
+    void handleInboundMessage(const std::string& topic, const std::string& payload);
+private:
+    // Read the relay's REST store for `topics` and hand every unseen message to
+    // handleInboundMessage. Returns how many were handed over, or -1 when the store could
+    // not be reached. Impl in pilot_a2a.cpp.
+    int pollStore(const std::vector<std::string>& topics);
+    // The relay we dial (PILOT_WAKU_ADDR or the local default) and its REST API
+    // (PILOT_WAKU_REST, default http://127.0.0.1:8645) — the pull path reads the latter.
+    std::string wakuAddr_;
+    std::string wakuRest_;
+    // Message hashes already handed over by pollStore, so a message the store returns on
+    // consecutive (overlapping) polls is processed exactly once.
+    std::unordered_set<std::string> seenStoreHashes_;
+    int64_t storePollSinceNs_ = 0;
     // The owner's standing decision to take work from strangers, restored from config
     // "a2a.open_for_hire" by loadIdentity(). Closed until said otherwise.
     bool openForHire_ = false;

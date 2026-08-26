@@ -19,6 +19,15 @@
 #include <QFile>
 #include <QIODevice>
 #include <QCryptographicHash>
+#include <QDebug>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QStringList>
+#include <QTimer>
+#include <QUrl>
+#include <QUrlQuery>
 
 static constexpr int kRpcTimeoutMs = 15000;
 
@@ -419,7 +428,7 @@ std::string PilotImpl::agentCard() {
         modules().delivery_module.send(
             "/pilot/1/discovery/proto",
             std::vector<uint8_t>(cardStr.begin(), cardStr.end()),
-            nullptr, kRpcTimeoutMs);
+            nullptr, kDeliveryFireAndForgetMs);
     }
     return cardStr;
 }
@@ -602,6 +611,12 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
 
     QJsonArray agents;
 
+    // 0. Pull (2026-08-25): ask the relay's store for cards on this topic and run each new one
+    // through handleDiscoveryCard (verify + TOFU-pin + cache) BEFORE reading the cache below.
+    // The live subscription in step 2 stays armed for the day the delivery->pilot event
+    // channel works; until then this is how a card actually gets in. See agentPoll().
+    pollStore({discoveryTopic});
+
     // 1. Check local cache first
     if (db_) {
         sqlite3_stmt* stmt = nullptr;
@@ -628,7 +643,7 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
     // which this topology does not have (no archive service), and the old dynamic call
     // always returned null here anyway — cards arrive over the live discovery subscription
     // (handleDiscoveryCard), which verifies + TOFU-pins + caches each one.
-    modules().delivery_module.subscribe(discoveryTopic, nullptr, kRpcTimeoutMs);
+    modules().delivery_module.subscribe(discoveryTopic, nullptr, kDeliveryFireAndForgetMs);
 
     // M3 — opportunistically LRU-trim the discovered_agents card cache after a discovery pass
     // (it is the table this method grows). Pins and in-flight-outbound cards are spared.
@@ -640,6 +655,130 @@ std::string PilotImpl::agentDiscover(const std::string& topic) {
     res["topic"] = QString::fromStdString(discoveryTopic);
     if (agents.isEmpty())
         res["note"] = QString("no agents found — subscribed for live cards");
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+}
+
+// ---- Pull-path inbound (2026-08-25) -------------------------------------------------------
+// Why this exists is on agentPoll() in pilot_impl.h. The relay's REST store (nwaku
+// /store/v3/messages) is read directly over HTTP. delivery_module.storeQuery would be the
+// natural call, but its REPLY rides the same delivery->pilot QtRO channel that delivery's
+// first event emission breaks, so it would never come back either — measured 2026-08-25.
+namespace {
+// Blocking GET with a hard deadline, on the same nested-QEventLoop pattern the LLM providers
+// use. Returns the body; *httpStatus is 0 when no response arrived in time.
+std::string httpGetBody(const std::string& url, int timeoutMs, int* httpStatus) {
+    QNetworkAccessManager manager;
+    QNetworkRequest request{QUrl(QString::fromStdString(url))};
+    QNetworkReply* reply = manager.get(request);
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    deadline.start(timeoutMs);
+    loop.exec();
+    std::string body;
+    int status = 0;
+    if (reply->isFinished()) {
+        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        body = reply->readAll().toStdString();
+    } else {
+        reply->abort();
+    }
+    if (httpStatus) *httpStatus = status;
+    reply->deleteLater();
+    return body;
+}
+}  // namespace
+
+int PilotImpl::pollStore(const std::vector<std::string>& topics) {
+    if (!initialized_ || topics.empty() || wakuRest_.empty()) return 0;
+    using namespace std::chrono;
+    const int64_t nowNs =
+        duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+    // First poll looks back 15 minutes (a card or task published while we were still
+    // booting); later polls overlap the previous window by 60 s so a message that landed in
+    // the store late is not skipped. seenStoreHashes_ makes the overlap idempotent.
+    const int64_t sinceNs = storePollSinceNs_ ? storePollSinceNs_ - 60LL * 1000000000LL
+                                              : nowNs - 15LL * 60LL * 1000000000LL;
+
+    QStringList ct;
+    for (const auto& t : topics) ct << QString::fromStdString(t);
+    QUrl url(QString::fromStdString(wakuRest_ + "/store/v3/messages"));
+    QUrlQuery q;
+    q.addQueryItem("includeData", "true");
+    q.addQueryItem("contentTopics", ct.join(","));
+    q.addQueryItem("startTime", QString::number(static_cast<qlonglong>(sinceNs)));
+    q.addQueryItem("pageSize", "100");
+    q.addQueryItem("ascending", "true");
+    url.setQuery(q);
+
+    int status = 0;
+    // 5 s, not 8: agentDiscover pays this AND a delivery subscribe inside the daemon's 20 s
+    // per-RPC ceiling, and the relay is a loopback service — if it has not answered in five
+    // seconds it is down, which the caller learns from the "new": -1 / error field.
+    std::string body = httpGetBody(url.toString(QUrl::FullyEncoded).toStdString(), 5000, &status);
+    if (status != 200) {
+        qWarning() << "[pilot] pollStore: relay store answered" << status
+                   << "at" << QString::fromStdString(wakuRest_);
+        return -1;
+    }
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(body));
+    if (!doc.isObject()) return -1;
+
+    int handed = 0;
+    for (const QJsonValue& v : doc.object().value("messages").toArray()) {
+        QJsonObject m = v.toObject();
+        std::string hash = m.value("messageHash").toString().toStdString();
+        if (hash.empty() || seenStoreHashes_.count(hash)) continue;
+        QJsonObject msg = m.value("message").toObject();
+        std::string topic = msg.value("contentTopic").toString().toStdString();
+        // nwaku's REST encodes the payload as base64; the FFI event form is a byte array.
+        // Accept both so the parser does not depend on which side of the relay answered.
+        QJsonValue pv = msg.value("payload");
+        std::string payload;
+        if (pv.isString()) {
+            payload = QByteArray::fromBase64(pv.toString().toLatin1()).toStdString();
+        } else if (pv.isArray()) {
+            for (const QJsonValue& b : pv.toArray())
+                payload.push_back(static_cast<char>(b.toInt()));
+        }
+        if (seenStoreHashes_.size() > 20000) seenStoreHashes_.clear();
+        seenStoreHashes_.insert(hash);
+        handleInboundMessage(topic, payload);
+        ++handed;
+    }
+    storePollSinceNs_ = nowNs;
+    return handed;
+}
+
+std::string PilotImpl::agentPoll() {
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
+
+    // Everything we would be subscribed to on the live path, plus the reply topics of every
+    // outbound task still waiting on its peer.
+    std::vector<std::string> topics = identityTopics();
+    topics.push_back("/pilot/1/discovery/proto");
+    if (!ownerChannelId_.empty()) topics.push_back(ownerChannelId_);
+    if (db_) {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT reply_topic FROM outbound_tasks WHERE state IN ('submitted', 'settling');",
+                -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const unsigned char* t = sqlite3_column_text(st, 0);
+                if (t) topics.push_back(reinterpret_cast<const char*>(t));
+            }
+            sqlite3_finalize(st);
+        }
+    }
+
+    int handed = pollStore(topics);
+    QJsonObject res;
+    res["topics"] = static_cast<int>(topics.size());
+    res["new"] = handed < 0 ? 0 : handed;
+    res["store"] = QString::fromStdString(wakuRest_);
+    if (handed < 0) res["error"] = QString("relay store unreachable");
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
@@ -716,7 +855,7 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     // that window. So the ACK is not being singled out — pilot's channel to delivery is deaf for
     // the duration, which is the starvation described above. Keeping it would only spend 5s of
     // the budget re-answering a settled question.
-    StdLogosResult subResult = modules().delivery_module.subscribe(replyTopic, nullptr, 3000);
+    StdLogosResult subResult = modules().delivery_module.subscribe(replyTopic, nullptr, kDeliveryFireAndForgetMs);
     const bool replyTopicArmed = subResult.success;
     step(replyTopicArmed ? "subscribe-ok" : "subscribe-unconfirmed");
 
@@ -814,7 +953,7 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     step("pre-send");
     modules().delivery_module.send(
         inboxTopic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()),
-        nullptr, kRpcTimeoutMs);
+        nullptr, kDeliveryFireAndForgetMs);
     step("post-send");
 
     QJsonObject status;
@@ -840,8 +979,11 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     // "/pilot/1/task-<id>/proto" topic was never published to, so updates were lost.
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
 
-    if (!modules().delivery_module.subscribe(replyTopic, nullptr, kRpcTimeoutMs).success)
-        return "{\"error\": \"subscribe failed\"}";
+    // Issued, not asserted: an unconfirmed subscribe is not a failed one while the host loses
+    // delivery's replies (see agentPoll), and refusing here would abandon a task update the
+    // agent will in fact receive — agentPoll() covers every open task's reply topic.
+    StdLogosResult subRes =
+        modules().delivery_module.subscribe(replyTopic, nullptr, kDeliveryFireAndForgetMs);
 
     QJsonObject rpcParams;
     rpcParams["id"] = QString::fromStdString(taskId);
@@ -885,12 +1027,16 @@ std::string PilotImpl::agentSubscribe(const std::string& agentAddress, const std
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
     modules().delivery_module.send(
         inboxTopic, std::vector<uint8_t>(subPayload.begin(), subPayload.end()),
-        nullptr, kRpcTimeoutMs);
+        nullptr, kDeliveryFireAndForgetMs);
 
     QJsonObject res;
     res["subscribed"] = true;
     res["task_id"] = QString::fromStdString(taskId);
     res["topic"] = QString::fromStdString(replyTopic);
+    // Report the two apart rather than collapsing them: "subscribed" is what the agent will
+    // act on (the poll covers this topic either way), "delivery_confirmed" is whether delivery
+    // said so — false for every call while its replies are being dropped.
+    res["delivery_confirmed"] = subRes.success;
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
@@ -929,12 +1075,12 @@ bool PilotImpl::agentCancel(const std::string& agentAddress, const std::string& 
     std::string inboxTopic = "/pilot/1/inbox-" + routingKey + "/proto";
     modules().delivery_module.send(
         inboxTopic, std::vector<uint8_t>(cancelPayload.begin(), cancelPayload.end()),
-        nullptr, kRpcTimeoutMs);
+        nullptr, kDeliveryFireAndForgetMs);
 
     // Stop listening on the reply topic (where the server emits). The old
     // "/pilot/1/task-<id>/proto" topic is no longer used, so there is nothing to drop.
     std::string replyTopic = "/pilot/1/reply-" + taskId + "/proto";
-    modules().delivery_module.unsubscribe(replyTopic, nullptr, kRpcTimeoutMs);
+    modules().delivery_module.unsubscribe(replyTopic, nullptr, kDeliveryFireAndForgetMs);
 
     // Mark the local outbound task canceled so a late reply can't trigger a payment.
     if (db_) {
@@ -1355,7 +1501,7 @@ void PilotImpl::outboundTasksRecover() {
             if (!sqlite3_column_text(st, 0)) continue;
             std::string topic = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
             if (topic.empty()) continue;
-            modules().delivery_module.subscribe(topic, nullptr, kRpcTimeoutMs);
+            modules().delivery_module.subscribe(topic, nullptr, kDeliveryFireAndForgetMs);
         }
         sqlite3_finalize(st);
     }

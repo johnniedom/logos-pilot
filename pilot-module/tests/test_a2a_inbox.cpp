@@ -986,6 +986,46 @@ LOGOS_TEST(inbound_ecies_roundtrip_decrypts_and_dispatches) {
     LOGOS_ASSERT_EQ(taskCol(dir, "t-rt", "sender_ecies"), std::string(peer.publicKeyHex));
 }
 
+// The same leg entered where a STORE-POLLED message enters: handleInboundMessage is the one
+// funnel the live delivery event and the pull path (agentPoll/pollStore) share, so a payload
+// on the doer's own inbox topic must reach handleInboundA2A and dispatch exactly as the live
+// event would — and a payload on a topic we do not own must be ignored quietly.
+LOGOS_TEST(inbound_message_on_inbox_topic_routes_to_a2a) {
+    std::string dir = inboxDir("inbound_message_route");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }
+    seedEciesIdentity(dir, kp);
+    PilotImpl doer; doer.initialize(dir);
+
+    ECIESKeypair peer = generateECIESKeypair();
+    QJsonObject metadata; metadata["skill"] = QString("ping");
+    QJsonObject params;
+    params["id"] = QString("t-route");
+    params["metadata"] = metadata;
+    params["message"] = QJsonObject();
+    QJsonObject logos;
+    logos["sender_npk"] = QString("peer");
+    logos["sender_ecies"] = QString::fromStdString(peer.publicKeyHex);
+    logos["reply_topic"] = QString("/pilot/1/reply-t-route/proto");
+    QJsonObject env;
+    env["jsonrpc"] = QString("2.0");
+    env["method"] = QString("tasks/send");
+    env["id"] = QString("t-route");
+    env["params"] = params;
+    env["_logos"] = logos;
+    std::string req = signRequest(env, peer);
+    std::vector<uint8_t> plain(req.begin(), req.end());
+    std::string payload = eciesSerialize(eciesEncrypt(kp.publicKeyHex, plain));
+
+    // Wrong topic first: nothing may dispatch, so the task must not exist yet.
+    doer.handleInboundMessage("/pilot/1/inbox-someone-else/proto", payload);
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-route", "state"), std::string(""));
+
+    // Our own inbox topic: routed to handleInboundA2A, decrypted, verified, dispatched.
+    doer.handleInboundMessage("/pilot/1/inbox-" + kp.publicKeyHex + "/proto", payload);
+    LOGOS_ASSERT_EQ(taskCol(dir, "t-route", "state"), std::string("completed"));
+}
+
 // Negative control: a payload encrypted to a DIFFERENT key cannot be decrypted with the
 // doer's agentEciesPriv_, so handleInboundA2A drops it (ambiguity -> inaction) and creates
 // NO task row. Proves the decrypt is real, not a pass-through that would dispatch anything.

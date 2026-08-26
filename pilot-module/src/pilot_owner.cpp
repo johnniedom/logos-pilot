@@ -18,7 +18,7 @@ bool PilotImpl::establishOwnerChannel() {
 
     std::string topic = "/pilot/1/owner-" + agentAccountId_ + "/proto";
 
-    modules().delivery_module.subscribe(topic, nullptr, kOwnerTimeoutMs);
+    modules().delivery_module.subscribe(topic, nullptr, kDeliveryFireAndForgetMs);
 
     ownerChannelId_ = topic;
 
@@ -61,7 +61,7 @@ bool PilotImpl::deliverToOwner(const std::string& payload) {
         StdLogosResult r = modules().delivery_module.send(
             ownerChannelId_,
             std::vector<uint8_t>(payload.begin(), payload.end()),
-            nullptr, kOwnerTimeoutMs);
+            nullptr, kDeliveryFireAndForgetMs);
         if (r.success) return true;
         if (attempt + 1 < kAttempts)
             std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));

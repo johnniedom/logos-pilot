@@ -14,6 +14,7 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
   status                       Agent status overview
   verify                       Full verification report
   discover [topic]             Discover peer agents
+  poll                         Pull new peer cards/tasks/replies from the relay store
   contact <name> <keys|file>   Save an address as @name (list them with: contact)
   peer add <card.json>         Learn a peer from its Agent Card (list them with: peer)
   open                         Open your agent for hire — strangers can send it paid work
@@ -265,6 +266,13 @@ proc main() =
       fail("Usage: pilot configure <key> <value>")
       quit(1)
     runConfigure(cfg, rest[0], rest[1])
+
+  of "poll":
+    # Pull inbound A2A traffic (peer cards, tasks for us, replies to our tasks) from the
+    # relay's store. The current delivery host loses every push event after its first one
+    # (measured 2026-08-25), so until that is fixed upstream this is how the agent learns
+    # what arrived. Idempotent — safe to run any time, as often as you like.
+    echo daemonCall(cfg, "agentPoll")
 
   of "status":
     let jsonOutput = "--json" in rest
