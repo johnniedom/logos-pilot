@@ -127,10 +127,17 @@ jobs:
             sleep 5
           done
 
-      - name: Build runtime (logoscore) + installer (lgpm)
+      - name: Fetch runtime (logoscore) + installer (lgpm) from Cachix
         run: |
-          nix build 'github:logos-co/logos-logoscore-cli' -o result-logoscore
-          nix build 'github:logos-co/logos-package-manager' -o result-lgpm
+          # Pinned store paths, pushed from the dev box 2026-08-28. Building the
+          # unpinned logos-logoscore-cli ref from source has killed three hosted
+          # runners in a row (~60 min Qt build starves the 4-core VM until GitHub
+          # pulls the plug); these are the exact closures the local test rig runs.
+          LS_PATH=/nix/store/l2c4m1mn6lcy6crj1azbv63dmsndir7a-logos-logoscore-cli-bin-0.1.0
+          LGPM_PATH=/nix/store/l2kcbdg9hn7lb053lx111smrvi88jl38-logos-package-manager-cli-1.0.0
+          nix copy --from https://logos-pilot-johnniedom.cachix.org "$LS_PATH" "$LGPM_PATH"
+          ln -sfn "$LS_PATH" result-logoscore
+          ln -sfn "$LGPM_PATH" result-lgpm
 
       - name: Build module LGX packages (pilot + deps, pinned to flake.lock)
         run: |
