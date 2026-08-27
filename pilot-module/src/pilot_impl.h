@@ -455,6 +455,12 @@ private:
     std::vector<std::pair<std::string,std::string>> chatHistory_;
 };
 
+// The JSON handed to storage_module.init for an agent whose data dir is `dataDir` (empty
+// before initialize(): then "{}"). A free function so the module generator never wraps it,
+// and so tests can pin the shape libstorage was measured to accept — see the definition in
+// pilot_impl.cpp for why {"nat":"none"} was fatal. Creates <dataDir>/storage.
+std::string pilotStorageInitConfig(const std::string& dataDir);
+
 // Test/DI seam for the LLM provider: installs `provider` (or NoOpProvider when null) into impl.
 // A free function (not a PilotImpl method) so the Qt Remote Objects generator never tries to
 // marshal std::unique_ptr<LLMProvider>; friended above for access to the private llm_ member.

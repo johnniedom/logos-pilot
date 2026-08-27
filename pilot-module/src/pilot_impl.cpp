@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <sys/stat.h>
 #include <thread>
 #include <chrono>
@@ -237,8 +238,43 @@ void PilotImpl::initStorageModule() {
     if (!isContextReady() || storageInitialized_) return;
     storageInitialized_ = true;
 
-    modules().storage_module.init("{\"nat\":\"none\"}", nullptr, 10000);
+    std::string cfg = pilotStorageInitConfig(dataDir_);
+    bool inited = modules().storage_module.init(cfg, nullptr, 10000);
+    qWarning() << "[pilot] storage init" << (inited ? "ok" : "FAILED") << QString::fromStdString(cfg);
     modules().storage_module.start(nullptr, 10000);
+}
+
+// The JSON handed to storage_module.init. libstorage parses it with confutils against its
+// StorageConf (logos-storage-nim storage/conf.nim); any value that does not parse is a
+// ConfigurationError the library can only report as "Failed to create Storage: unable to
+// load configuration." — which is exactly what every FRESH agent's first upload died with
+// ("upload init failed", two-agent test Phase 4, through 2026-08-27). Measured with a
+// four-config probe on the installed module: {"nat":"none"} -> init false; {} -> true;
+// {"data-dir":…} -> true, start true, peerId answered. The `nat` field accepts only `auto`
+// or `extip:<IP>` on this libstorage; "none" was a nim-codex-era value that never parsed
+// here, so the module had been failing init on every agent and nobody's upload ever ran.
+//
+// - data-dir: a repo of the agent's own, under its data dir. Without it libstorage opens
+//   ~/.cache/storage — one repo shared by every agent on the host (the two-agent test had to
+//   delete its provider LOCK at teardown to run twice). Absolute, created here: in daemon
+//   mode the module's cwd is not ours and libstorage opens exactly the path it is given.
+// - log-file/log-level: the node's own log next to its repo, so a storage fault is readable
+//   without grepping the daemon's stderr.
+// - nat: omitted (= auto) unless PILOT_STORAGE_NAT names one of the accepted forms; demo.sh
+//   style isolated runs pass extip:127.0.0.1.
+std::string pilotStorageInitConfig(const std::string& dataDir) {
+    QJsonObject cfg;
+    if (!dataDir.empty()) {
+        std::string repo = dataDir + "/storage";
+        std::error_code ec;
+        std::filesystem::create_directories(repo, ec);
+        cfg["data-dir"] = QString::fromStdString(repo);
+        cfg["log-level"] = QString("INFO");
+        cfg["log-file"] = QString::fromStdString(repo + "/storage.log");
+    }
+    if (const char* nat = std::getenv("PILOT_STORAGE_NAT"))
+        if (*nat) cfg["nat"] = QString(nat);
+    return QJsonDocument(cfg).toJson(QJsonDocument::Compact).toStdString();
 }
 
 // The generated onXxx event wrapper returns `bool` on the SDK this box builds against and an

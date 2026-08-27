@@ -41,6 +41,7 @@ logos_test(
         test_a2a_outbound.cpp
         test_agent_card.cpp
         test_boot_order.cpp
+        test_storage_config.cpp
 )
 
 target_link_libraries(pilot_module_tests PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
