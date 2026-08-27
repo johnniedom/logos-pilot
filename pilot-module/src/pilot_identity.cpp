@@ -387,8 +387,12 @@ bool PilotImpl::initWallet() {
     std::string configPath = dataDir_ + "/wallet_config.json";
     // Storage MUST be a file path (wallet_ffi_open/create_new write a file, not a dir).
     std::string storagePath = dataDir_ + "/wallet_storage.json";
+    // LEZ v0.2.2 (lez_core module 549cf115) added a third path to wallet_ffi_open /
+    // wallet_ffi_create_new: where the wallet keeps its request statistics. A file path
+    // like the storage, alongside it.
+    std::string statsPath = dataDir_ + "/wallet_statistics.json";
 
-    std::string sequencerAddr = "http://127.0.0.1:3040";   // v0.1.2 standalone sequencer
+    std::string sequencerAddr = "http://127.0.0.1:3040";   // local standalone sequencer
     if (const char* env = std::getenv("PILOT_SEQUENCER_ADDR"))
         sequencerAddr = env;
 
@@ -397,7 +401,15 @@ bool PilotImpl::initWallet() {
         std::ofstream cf(configPath, std::ios::trunc);
         if (cf.is_open()) {
             QJsonObject walletCfg;
-            walletCfg["sequencer_addr"] = QString::fromStdString(sequencerAddr);
+            // WalletConfig at LEZ v0.2.2 (lez/wallet/src/config.rs) takes a LIST of
+            // sequencers — `sequencers: [{sequencer_addr, basic_auth?}]` — in place of the
+            // v0.2.0 top-level `sequencer_addr`/`basic_auth`; the old key is unknown to the
+            // new struct and `sequencers` is required, so the old shape fails to parse.
+            // One entry, no auth (the public testnet is unauthenticated). The
+            // multi-sequencer client settings are serde-defaulted and left out.
+            QJsonObject seq;
+            seq["sequencer_addr"] = QString::fromStdString(sequencerAddr);
+            walletCfg["sequencers"] = QJsonArray{seq};
             // Inclusion polling must outlast real-proof block production (RISC0_DEV_MODE=0:
             // blocks carry a real proof and are minutes apart). The old 15-block / 10-retry
             // budget gave up long before a proven transfer landed. Wider budgets are only
@@ -416,7 +428,7 @@ bool PilotImpl::initWallet() {
 
     auto tryOpen = [&](const std::string& path) -> bool {
         logos::CallError err;
-        int64_t rc = modules().lez_core.open(configPath, path, &err, 15000);
+        int64_t rc = modules().lez_core.open(configPath, path, statsPath, &err, 15000);
         return err.code.empty() && rc == 0;
     };
     auto copyFile = [](const std::string& from, const std::string& to) {
@@ -454,7 +466,7 @@ bool PilotImpl::initWallet() {
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
     logos::CallError cerr;
     std::string createResult = modules().lez_core.create_new(
-        configPath, storagePath, walletName, &cerr, 15000);
+        configPath, storagePath, statsPath, walletName, &cerr, 15000);
     qWarning() << "[pilot] initWallet: create_new result:" << QString::fromStdString(createResult);
     // Same acceptance as the old QVariant::toInt()==0 check: any non-numeric or "0" body
     // counts as success (atoll of both is 0), an error reply does not.

@@ -50,9 +50,9 @@ echo "[1/6] Building runtime + module + dependencies (nix; heavy deps come from 
 nix build 'github:logos-co/logos-logoscore-cli' -o "$WORK/r-logoscore"
 nix build 'github:logos-co/logos-package-manager' -o "$WORK/r-lgpm"
 ( cd "$ROOT/pilot-module" && nix build .#lgx -o "$WORK/r-pilot" )
-# 033f807a pins execution-zone 571f35b3 — the rev with the #268 fix (pay-by-keys to an
-# account with on-chain history no longer rejects "Nullifier already seen").
-nix build 'github:logos-blockchain/logos-execution-zone-module/033f807a3b1690fb2f8e661cb8067646b8a98242#lgx' -o "$WORK/r-ez"
+# 549cf115 pins execution-zone v0.2.2 — the wallet generation the public testnet accepts
+# (same lez_core revision as pilot-module/flake.nix; see the comment there).
+nix build 'github:logos-blockchain/logos-execution-zone-module/549cf1159f20fa0c3fe8e88a5ab71de68a5aa34b#lgx' -o "$WORK/r-ez"
 nix build 'github:logos-co/logos-delivery-module/b18ec067517e#lgx'               -o "$WORK/r-delivery"
 nix build 'github:logos-co/logos-storage-module/b1d82a32c1ba#lgx'                -o "$WORK/r-storage"
 nix build 'github:logos-co/logos-chat-module/a0d251f9d764#lgx'                   -o "$WORK/r-chat"

@@ -135,7 +135,7 @@ jobs:
           ( cd pilot-module && nix build .#lgx -o ../result-pilot-lgx )
           # Same revisions as pilot-module/flake.lock — the module is named lez_core now, and
           # metadata.json#dependencies is [lez_core, delivery_module, storage_module].
-          nix build 'github:logos-blockchain/logos-execution-zone-module/24e09df2af5774cab3f83d2f521533abb7ddffdd#lgx' -o result-ez-lgx
+          nix build 'github:logos-blockchain/logos-execution-zone-module/549cf1159f20fa0c3fe8e88a5ab71de68a5aa34b#lgx' -o result-ez-lgx
           nix build 'github:logos-co/logos-delivery-module/3258cdb0132e37228aa2519e0c01c0e7429a20dd#lgx'   -o result-delivery-lgx
           nix build 'github:logos-co/logos-storage-module/7307910f0e5728e08c77820e21698e903c73d987#lgx'    -o result-storage-lgx
           nix build 'github:logos-co/logos-chat-module/dfe8ccf3eff3e95da0ba54043577270474a216ae#lgx'       -o result-chat-lgx
