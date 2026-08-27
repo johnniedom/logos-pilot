@@ -102,6 +102,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            max-jobs = 2
+            cores = 2
 
       - uses: cachix/cachix-action@v15
         with:
