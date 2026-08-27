@@ -63,6 +63,27 @@ check_has() {
   fi
 }
 
+# Money-truth reader. A spend row turns COMPLETED at MEMPOOL-ACCEPT (wallet-ffi sets
+# success:true on send_transaction alone), and the sequencer only folds the mempool into a
+# block every BLOCK_TIME (15s here). So a walletBalance read the instant the row turns
+# terminal is a read from INSIDE the block interval, and it reports the pre-block figure —
+# which is chain-true for that second and wrong as a verdict. Measured 2026-08-26: the A2A
+# spend completed at 17:19:46Z, the balance was read at ~17:19:47Z (99), the block carrying
+# the tx was produced at 17:20:02Z, and the same wallet synced later read 94. The transfer
+# was never in doubt; the reading was. Poll walletBalance (it syncs to head before
+# answering) for up to four block intervals and stop the moment it moves. Prints the
+# last reading. Never pass a target: a poll that waits for a specific number would be
+# rewarded for guessing; this one only waits for the chain.
+wait_balance_drop() {   # $1 = balance before; prints the balance after
+  local before="$1" after=""
+  for _ in $(seq 1 12); do
+    after=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
+    if [ -n "$after" ] && [ -n "$before" ] && [ "$after" -lt "$before" ]; then break; fi
+    sleep 5
+  done
+  echo "$after"
+}
+
 call_a() {
   # 120s to match call_b: a cold agent replays the whole chain inside initialize,
   # and 30s turned a long chain into bogus "(empty response)" failures.
@@ -220,6 +241,22 @@ docker rm -f $CONTAINER >/dev/null 2>&1
 # that is worse than having no certs, and the run where it was mounted that way is also the run
 # where B stopped receiving anything at all. The bundle is the single real file, and the module
 # is nix-built so SSL_CERT_FILE / NIX_SSL_CERT_FILE are what it honours.
+#
+# Pin the LLM API host into the container (2026-08-26). Docker's embedded DNS (127.0.0.11,
+# forwarding to the host's resolvers) answered for api.deepseek.com in the 18:14 run and
+# returned "Host api.deepseek.com not found" in the 19:44 run — same image, same network,
+# same key. B then honestly replied 'failed' and A rightly paid nothing, so the run was
+# scored on the WORK and the payment path never ran. Resolve once on the host and hand the
+# container a static entry; its own DNS is left as it was for everything else.
+LLM_API_HOST=api.deepseek.com
+LLM_API_IP=$(getent hosts $LLM_API_HOST | awk '{print $1}' | head -1)
+LLM_HOST_PIN=""
+if [ -n "$LLM_API_IP" ]; then
+  LLM_HOST_PIN="--add-host=$LLM_API_HOST:$LLM_API_IP"
+  echo "  ·     pinned $LLM_API_HOST -> $LLM_API_IP for Agent B"
+else
+  echo "  WARN  host cannot resolve $LLM_API_HOST — B's agent-ask will depend on container DNS"
+fi
 docker run --rm -d \
   --name $CONTAINER \
   --network $NWAKU_NET \
@@ -238,6 +275,7 @@ docker run --rm -d \
   -e LOGOS_BLOCKCHAIN_CIRCUITS=/nix/store/y8i3f2qiyhbl9kccvl7z12rnbj6h42g9-logos-blockchain-circuits-0.4.1 \
   -e PATH=/root/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   --add-host=host.docker.internal:host-gateway \
+  $LLM_HOST_PIN \
   ubuntu:22.04 \
   $LOGOSCORE --config-dir /data/.logoscore -D -m /modules \
   > /dev/null 2>&1
@@ -451,8 +489,10 @@ echo "── Phase 6: Wallet Transfer ──"
 # tx and the sequencer took it into its mempool — wallet-ffi sets success:true on
 # send_transaction() alone. Run 01:54 recorded COMPLETED + tx_hash 490fb031… and
 # the sequencer then REJECTED that tx at block production ("Nullifier already
-# seen", seq.log 01:15:48Z). So this assertion proves the transfer path ran to a
-# terminal state — the balance assertion in Phase 7 is the only money-truth here.
+# seen", seq.log 01:15:48Z — a LEZ bug fixed upstream in #268; the pinned rev
+# carries the fix). So the row proves the transfer path ran to a terminal state;
+# the balance assertion below is what measures money.
+BAL6_BEFORE=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
 R=$(call_a walletSend "$NPK_B" 1 "test transfer A to B")
 SPEND_STATE=""
 for _ in $(seq 1 24); do
@@ -473,6 +513,24 @@ except Exception:
   sleep 5
 done
 check_has "[A→B] walletSend spend reached a terminal state" "state:$SPEND_STATE" 'state:(COMPLETED|HELD|NOTIFIED)'
+
+# The same pay-by-keys route Phase 7 settles on (walletSend with B's keys JSON ->
+# transfer_private), asserted on the chain, not the row. A HELD/NOTIFIED spend is
+# parked for the owner and moves nothing — say so instead of failing a balance
+# that was never supposed to change. Also pins BAL_A_BEFORE in Phase 7 to a
+# settled figure: without this wait, a Phase 6 tx still in the mempool would
+# land during Phase 7 and show up there as a 6-LEZ drop on a 5-LEZ price.
+if [ "$SPEND_STATE" = "COMPLETED" ]; then
+  BAL6_AFTER=$(wait_balance_drop "$BAL6_BEFORE")
+  echo "  A balance ${BAL6_BEFORE:-?} -> ${BAL6_AFTER:-?} (walletSend 1 LEZ)"
+  if [ -n "$BAL6_BEFORE" ] && [ -n "$BAL6_AFTER" ] && [ $((BAL6_BEFORE - BAL6_AFTER)) -eq 1 ]; then
+    echo "  PASS  [A→B] balance decreased by exactly 1 LEZ"; ((PASS++))
+  else
+    echo "  FAIL  [A→B] balance did not decrease by 1 LEZ (${BAL6_BEFORE:-?} -> ${BAL6_AFTER:-?})"; ((FAIL++))
+  fi
+else
+  echo "  ·     [A→B] spend is $SPEND_STATE (owner-gated) — no on-chain movement expected"
+fi
 
 echo ""
 
@@ -546,29 +604,49 @@ for i in $(seq 1 12); do
 done
 echo "  ...   Final task state: ${STATE:-<none>}"
 
-check_has "[A] task ledger is readable" "$STATE" '^(paid|pay-failed|pay-unresolved|submitted|settling|NO-SUCH-TASK)$'
+# Every state settleOutboundReply can write is "readable" — including the doer's
+# terminal negatives (failed/canceled/rejected: B said the WORK failed, so A
+# refused to pay, which is correct and must not read as a broken ledger) and the
+# owner gate (awaiting-approval / accepted-nopay). Run 19:44 on 2026-08-26 scored
+# an honest 'failed' as three failures because this list stopped at 'settling'.
+check_has "[A] task ledger is readable" "$STATE" \
+  '^(paid|pay-failed|pay-unresolved|submitted|settling|awaiting-approval|accepted-nopay|failed|canceled|rejected|NO-SUCH-TASK)$'
 check_has "[A] task reached a terminal payment state" "$STATE" '^(paid|pay-failed)$'
 check_has "[A] task was PAID" "$STATE" '^paid$'
 
-# This is the money-truth assertion and it is expected to stay RED until an
-# upstream LEZ bug is fixed. Measured 2026-08-01 (4-way experiment, fresh
-# fully-synced wallet): transfer_private (pay-by-keys, what A2A uses) is
-# rejected at block production with "Nullifier already seen" whenever the
-# RECIPIENT account has any on-chain history — and a funded agent always has
-# history (its funding claim). Same wallet, same moment: an owned-account send
-# executed (100->98) and a pay-by-keys send to a VIRGIN account executed
-# (98->96), so the plumbing works; the PrivateForeign flow builds the
-# recipient's transition against an assumed-fresh state. Meanwhile wallet-ffi
-# reports success at mempool-accept, so the spend row reads COMPLETED over a
-# rejected tx. The balance reading 100 -> 100 is chain-TRUE. Do NOT soften
-# this assertion to make the suite green — it is the only line that measures
-# money, and it is the one telling the truth.
-BAL_A_AFTER=$(call_a walletBalance | grep -oE '"balance":"[0-9]+"' | grep -oE '[0-9]+')
-echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}"
-if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ "$BAL_A_AFTER" -lt "$BAL_A_BEFORE" ]; then
-  echo "  PASS  [A] balance decreased by the price"; ((PASS++))
+# This is the money-truth assertion: 'paid' above is written when the wallet
+# reports success, and wallet-ffi reports success at MEMPOOL-ACCEPT — so 'paid'
+# alone can never distinguish a settled tx from one the sequencer later drops.
+# Only the chain can, and this is the line that asks it.
+#
+# History, so nobody re-derives it: 2026-08-01 this line was RED for a real
+# reason — LEZ rejected pay-by-keys (transfer_private, the A2A route) with
+# "Nullifier already seen" whenever the recipient had on-chain history. That was
+# fixed upstream (#268) and the pinned lez_core rev carries the fix; pay-by-keys
+# to a recipient WITH history measured 98->96 on 2026-08-16. On 2026-08-26 the
+# line went RED again (99 -> 99) with the tx in a 2-tx block 16s later and the
+# wallet reading 94 once synced past it: the balance had been read INSIDE the
+# 15s block interval. wait_balance_drop is the fix for that; the exact-price
+# check below is what makes this line sharper than "it moved". Do NOT soften
+# it to make the suite green — it is the only line that measures money.
+PRICE_A=$(python3 - "$AGENT_A/pilot.db" "$TASK_ID_A" <<'PY' 2>/dev/null
+import sqlite3, sys
+db, task = sys.argv[1], sys.argv[2]
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    row = con.execute("SELECT price FROM outbound_tasks WHERE id=?;", (task,)).fetchone()
+    print(row[0] if row and row[0] is not None else "")
+except Exception:
+    print("")
+PY
+)
+BAL_A_AFTER=$(wait_balance_drop "$BAL_A_BEFORE")
+echo "  A balance ${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?} (declared price ${PRICE_A:-?} LEZ)"
+if [ -n "$BAL_A_BEFORE" ] && [ -n "$BAL_A_AFTER" ] && [ -n "$PRICE_A" ] && [ "$PRICE_A" -gt 0 ] \
+   && [ $((BAL_A_BEFORE - BAL_A_AFTER)) -eq "$PRICE_A" ]; then
+  echo "  PASS  [A] balance decreased by exactly the declared price"; ((PASS++))
 else
-  echo "  FAIL  [A] balance did not move (${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?})"; ((FAIL++))
+  echo "  FAIL  [A] balance did not decrease by the declared price (${BAL_A_BEFORE:-?} -> ${BAL_A_AFTER:-?}, price ${PRICE_A:-?})"; ((FAIL++))
 fi
 
 echo ""

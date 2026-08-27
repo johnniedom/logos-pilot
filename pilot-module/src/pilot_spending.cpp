@@ -199,13 +199,15 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
     // transfer_private returns once the SEQUENCER ACCEPTS THE TX INTO ITS MEMPOOL — not once it
     // executes. wallet-ffi sets success:true on send_transaction() alone (wallet/src/lib.rs,
     // send_privacy_preserving_tx_with_pre_check), so "COMPLETED" below means submitted, not
-    // settled: a tx later rejected at block production still reads COMPLETED here. Measured
-    // 2026-08-01 (4-way experiment): transfer_private — the pay-by-keys path every A2A payment
-    // takes — is rejected with InvalidInput("Nullifier already seen") whenever the RECIPIENT
-    // account has any on-chain history, and a funded agent ALWAYS has history (its funding
-    // claim). The same wallet in the same minute executed an owned-account send (100->98) and a
-    // pay-by-keys send to a VIRGIN account (98->96), so the fault is the PrivateForeign flow
-    // building the recipient's transition against an assumed-fresh state. Upstream (LEZ).
+    // settled: a tx later rejected at block production still reads COMPLETED here, and even a
+    // good tx is only in a block up to one BLOCK_TIME later — a balance read straight after
+    // this row turns COMPLETED is a read from inside that interval (measured 2026-08-26: row
+    // COMPLETED 17:19:46Z, block with the tx 17:20:02Z, balance 99 then 94).
+    // The one rejection this path has actually produced — InvalidInput("Nullifier already
+    // seen") for pay-by-keys to a recipient with on-chain history, measured 2026-08-01 — was a
+    // LEZ bug fixed upstream in #268; the pinned lez_core rev carries the fix, and pay-by-keys
+    // to a recipient WITH history measured 98->96 on 2026-08-16 and 100->94 (1 + 5 LEZ, two
+    // txs, each in the next block) in the two-agent run of 2026-08-26.
     // Confirming execution from here would need a working tx query (the sequencer's
     // getTransaction answers null for every hash, real or bogus), so COMPLETED is the strongest
     // claim this module can currently make.

@@ -130,9 +130,17 @@ building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RIS
 substituter. CI (with the Cachix cache `logos-pilot-johnniedom` and a disk-freed
 runner) is the source of truth — and is green.
 
+**What is measured outside CI.** The live two-agent round trip
+(`test-two-agents-docker.sh`, host agent + Docker agent, local sequencer in dev
+mode) does assert money on the chain: after the paid `agent-ask` task settles it
+polls the payer's synced balance for up to four block intervals and requires the
+drop to equal the declared price (measured 2026-08-26: 100 → 99 for the direct
+transfer, then → 94 for the 5-LEZ task payment, both in the next block). It runs
+on the development box, not in CI.
+
 **What would close the remainder.** A run that drives real funding/spending with
-`RISC0_DEV_MODE=0` against a sequencer, plus a live two-agent A2A settlement, to
-confirm the on-chain behavior the unit/E2E suites do not assert.
+`RISC0_DEV_MODE=0` against a sequencer, and the two-agent settlement above in CI,
+to confirm the on-chain behavior the unit/E2E suites do not assert.
 
 ---
 
@@ -141,7 +149,11 @@ confirm the on-chain behavior the unit/E2E suites do not assert.
 The following submission criteria are **not satisfied**:
 
 - **F9 — ≥ 3 use cases demoed end-to-end on testnet:** not met.
-- **F10 — ≥ 5 third-party deployments:** not met.
+- **F10 — three agents deployed on the public testnet, one per skill category
+  (Storage, Messaging, Blockchain), each with reproducible deployment steps and
+  on-chain evidence:** not met. (An earlier revision of this document quoted the
+  pre-2026-05-25 wording, "≥ 5 third-party deployments"; the criterion has been
+  the three-agents-on-testnet form since then.)
 - **Supportability #1 — public testnet deployment:** not met.
 
 **Why.** Every demonstration to date runs against a **local sequencer**
@@ -188,9 +200,9 @@ In addition:
 tracks LEZ ≥ v0.2.2 (the module repo bumped on 2026-08-05), accept the toolchain
 cascade the flake comment warns about, re-verify the piñata claim and the
 "Nullifier already seen" fix on that revision, point `wallet_config.json`'s
-`sequencer_addr` at the public testnet, re-run the three use cases there, and
-record the narrated real-proof video. Third-party deployment numbers then become
-an outreach problem rather than an infrastructure one.
+`sequencer_addr` at the public testnet, deploy the three category agents there
+with their steps and explorer links, re-run the three use cases, and record the
+narrated real-proof video.
 
 ---
 
