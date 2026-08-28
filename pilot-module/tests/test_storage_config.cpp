@@ -32,12 +32,37 @@ static std::string scratchDir(const char* tag) {
 LOGOS_TEST(storage_config_gives_the_node_a_repo_under_the_agent_data_dir) {
     std::string dir = scratchDir("repo");
     unsetenv("PILOT_STORAGE_NAT");
+    unsetenv("PILOT_STORAGE_API_PORT");
     QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
     LOGOS_ASSERT_EQ(cfg.value("data-dir").toString().toStdString(), dir + "/storage");
     LOGOS_ASSERT_EQ(cfg.value("log-file").toString().toStdString(), dir + "/storage/storage.log");
     LOGOS_ASSERT_TRUE(cfg.contains("log-level"));
     // libstorage opens exactly the path it is given and does not create it.
     LOGOS_ASSERT_TRUE(std::filesystem::is_directory(dir + "/storage"));
+    std::filesystem::remove_all(dir);
+}
+
+LOGOS_TEST(storage_config_turns_on_the_loopback_rest_api_uploads_ride) {
+    // Upload/download go through libstorage's REST API, not the typed client (whose replies
+    // the host drops after its first event emit — see pilotStorageApiPort in pilot_impl.h).
+    // The config must therefore always open the API, and only on loopback: it has no auth.
+    std::string dir = scratchDir("rest");
+    unsetenv("PILOT_STORAGE_NAT");
+    unsetenv("PILOT_STORAGE_API_PORT");
+    QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
+    LOGOS_ASSERT_EQ(cfg.value("api-bindaddr").toString().toStdString(), std::string("127.0.0.1"));
+    LOGOS_ASSERT_EQ(cfg.value("api-port").toInt(), pilotStorageApiPort());
+    LOGOS_ASSERT_TRUE(pilotStorageApiPort() > 0);
+    std::filesystem::remove_all(dir);
+}
+
+LOGOS_TEST(storage_config_honours_the_api_port_override_for_multi_agent_hosts) {
+    // Two agents on one host each need their own node API; the env var keeps them apart.
+    std::string dir = scratchDir("port");
+    setenv("PILOT_STORAGE_API_PORT", "6021", 1);
+    QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
+    unsetenv("PILOT_STORAGE_API_PORT");
+    LOGOS_ASSERT_EQ(cfg.value("api-port").toInt(), 6021);
     std::filesystem::remove_all(dir);
 }
 

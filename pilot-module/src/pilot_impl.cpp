@@ -271,10 +271,24 @@ std::string pilotStorageInitConfig(const std::string& dataDir) {
         cfg["data-dir"] = QString::fromStdString(repo);
         cfg["log-level"] = QString("INFO");
         cfg["log-file"] = QString::fromStdString(repo + "/storage.log");
+        // The REST API the upload/download path talks to — see pilotStorageApiPort() in
+        // pilot_impl.h for why the typed client cannot be used. Loopback only: the API is
+        // unauthenticated and nothing off-box has any business on it.
+        cfg["api-bindaddr"] = QString("127.0.0.1");
+        cfg["api-port"] = pilotStorageApiPort();
     }
     if (const char* nat = std::getenv("PILOT_STORAGE_NAT"))
         if (*nat) cfg["nat"] = QString(nat);
     return QJsonDocument(cfg).toJson(QJsonDocument::Compact).toStdString();
+}
+
+int pilotStorageApiPort() {
+    if (const char* p = std::getenv("PILOT_STORAGE_API_PORT"))
+        if (*p) {
+            int v = std::atoi(p);
+            if (v > 0 && v < 65536) return v;
+        }
+    return 5988;
 }
 
 // The generated onXxx event wrapper returns `bool` on the SDK this box builds against and an

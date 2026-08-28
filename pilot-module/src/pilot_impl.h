@@ -461,6 +461,16 @@ private:
 // pilot_impl.cpp for why {"nat":"none"} was fatal. Creates <dataDir>/storage.
 std::string pilotStorageInitConfig(const std::string& dataDir);
 
+// The localhost port libstorage's REST API listens on (config key `api-port`). Uploads and
+// downloads ride this REST API, not the typed client: the storage host forwards its first
+// FFI event ("storageStart") as a Qt signal from the wrong thread, and from that moment every
+// QtRO reply on the channel is dropped — uploadInit's answer died exactly this way, measured
+// 2026-08-28 (journald: "QSocketNotifier: Socket notifiers cannot be enabled or disabled from
+// another thread" then "callRemoteMethod timed out"). Same upstream host bug, and same
+// workaround, as the delivery pull path (agentPoll). PILOT_STORAGE_API_PORT overrides for
+// multi-agent hosts; default 5988.
+int pilotStorageApiPort();
+
 // Test/DI seam for the LLM provider: installs `provider` (or NoOpProvider when null) into impl.
 // A free function (not a PilotImpl method) so the Qt Remote Objects generator never tries to
 // marshal std::unique_ptr<LLMProvider>; friended above for access to the private llm_ member.
