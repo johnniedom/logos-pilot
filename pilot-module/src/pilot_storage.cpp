@@ -88,7 +88,9 @@ std::set<std::string> storageManifestCids(const std::string& repoDir) {
     return out;
 }
 
-// The node binds its API during start; give it a moment before declaring it absent.
+// Is the REST API answering? Callers pass deadline 0 (a single probe): this module build
+// never opens the port, and every 250 ms spent here counts against the CLI's ~10 s RPC
+// window that the whole upload/download must fit inside.
 bool storageRestReady(int deadlineMs) {
     const std::string url = storageRestBase() + "/debug/info";
     for (int waited = 0; waited <= deadlineMs; waited += 250) {
@@ -144,7 +146,7 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
                               .toBase64();
 
     std::string cid;
-    if (storageRestReady(3000)) {
+    if (storageRestReady(0)) {
         // One POST replaces uploadInit/uploadChunk/uploadFinalize: the response body is the
         // CID — as bare text, but accept a {"cid": …} JSON shape too. (This module build's
         // FFI path does not start the API server — measured 2026-08-28, config accepted but
@@ -175,9 +177,10 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
             sessionId = initResult.value.get<std::string>();
         if (sessionId.empty())
             return "{\"error\": \"upload init failed\"}";
-        modules().storage_module.uploadChunk(sessionId, chunkB64.toStdString());
-
+        // The chunk's reply races the storageUploadProgress emit (measured both ways within
+        // 2 ms of each other); the data lands either way, so do not wait 20 s for it.
         std::set<std::string> before = storageManifestCids(repoDir);
+        modules().storage_module.uploadChunk(sessionId, chunkB64.toStdString(), nullptr, 3000);
         // Short timeout: the reply is expected to be lost; the manifest lands within ~50 ms.
         StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId, nullptr, 3000);
         if (finalResult.success && finalResult.value.is_string())
@@ -237,7 +240,7 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     // typed client as the fallback — same two-world reasoning as storageUpload above.
     std::string encContent;
     bool haveContent = false;
-    if (storageRestReady(3000)) {
+    if (storageRestReady(0)) {
         int status = 0;
         encContent = storageRest("GET", storageRestBase() + "/data/" + cid, {}, 30000, &status);
         if (status != 200) {
@@ -257,7 +260,9 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
         std::string tmpPath = path + ".enc";
         // The old four-arg downloadChunks(cid, local, chunkSize, outPath) is now split
         // upstream: downloadToUrl is the write-to-file variant.
-        modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
+        // Short timeout: post-start the reply is lost every time, but the module has the
+        // file on disk within ~60 ms (measured: storageDownloadDone 58 ms after the call).
+        modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536, nullptr, 3000);
         for (int i = 0; i < 60; i++) {
             std::ifstream check(tmpPath, std::ios::binary | std::ios::ate);
             if (check.is_open() && check.tellg() > 0) break;
