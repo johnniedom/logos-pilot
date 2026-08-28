@@ -12,6 +12,72 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QTimer>
+#include <QUrl>
+
+// ---- REST transport (2026-08-28) ----------------------------------------------------------
+// Uploads and downloads talk to libstorage's own REST API on loopback instead of the typed
+// client. Why is on pilotStorageApiPort() in pilot_impl.h: the storage host's first event
+// emission ("storageStart", forwarded from its FFI thread) breaks the QtRO channel's socket
+// notifier, and every reply after it is dropped — uploadInit's answer included, so the old
+// three-call upload hung forever on a session id that had already been created. Same upstream
+// host bug, same shape of workaround, as the delivery pull path in pilot_a2a.cpp.
+namespace {
+
+std::string storageRestBase() {
+    return "http://127.0.0.1:" + std::to_string(pilotStorageApiPort()) + "/api/storage/v1";
+}
+
+// Blocking HTTP with a hard deadline, on the same nested-QEventLoop pattern as the delivery
+// pull path's httpGetBody. verb is "GET" or "POST"; *httpStatus is 0 when nothing came back.
+std::string storageRest(const char* verb, const std::string& url, const QByteArray& body,
+                        int timeoutMs, int* httpStatus) {
+    QNetworkAccessManager manager;
+    QNetworkRequest request{QUrl(QString::fromStdString(url))};
+    QNetworkReply* reply = nullptr;
+    if (std::strcmp(verb, "POST") == 0) {
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
+        reply = manager.post(request, body);
+    } else {
+        reply = manager.get(request);
+    }
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    deadline.start(timeoutMs);
+    loop.exec();
+    std::string out;
+    int status = 0;
+    if (reply->isFinished()) {
+        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        out = reply->readAll().toStdString();
+    } else {
+        reply->abort();
+    }
+    if (httpStatus) *httpStatus = status;
+    reply->deleteLater();
+    return out;
+}
+
+// The node binds its API during start; give it a moment before declaring it absent.
+bool storageRestReady(int deadlineMs) {
+    const std::string url = storageRestBase() + "/debug/info";
+    for (int waited = 0; waited <= deadlineMs; waited += 250) {
+        int status = 0;
+        storageRest("GET", url, {}, 2000, &status);
+        if (status == 200) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    return false;
+}
+
+}  // namespace
 
 static std::string currentTs() {
     auto now = std::chrono::system_clock::now();
@@ -37,28 +103,50 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
     std::vector<uint8_t> plainBytes(content.begin(), content.end());
     std::vector<uint8_t> encrypted = aesEncrypt(plainBytes, fileKey);
 
-    StdLogosResult initResult = modules().storage_module.uploadInit(label, 65536);
-    std::string sessionId;
-    if (initResult.success && initResult.value.is_string())
-        sessionId = initResult.value.get<std::string>();
-    if (sessionId.empty())
-        return "{\"error\": \"upload init failed\"}";
+    // The stored object stays base64-wrapped ciphertext (the download path unwraps
+    // symmetrically; both ends are pilot code, so the format is ours to define).
+    QByteArray chunkB64 = QByteArray(reinterpret_cast<const char*>(encrypted.data()),
+                                     static_cast<int>(encrypted.size()))
+                              .toBase64();
 
-    // The lp transport marshals arguments as JSON, and JSON strings must be valid UTF-8 —
-    // raw AES ciphertext cannot ride in the chunk argument. Base64-wrap it here; the
-    // download path (storageDownload) unwraps symmetrically. Both ends are pilot code, so
-    // the stored object's format is ours to define.
-    std::string chunkB64 = QByteArray(reinterpret_cast<const char*>(encrypted.data()),
-                                      static_cast<int>(encrypted.size()))
-                               .toBase64().toStdString();
-    modules().storage_module.uploadChunk(sessionId, chunkB64);
-
-    StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId);
     std::string cid;
-    if (finalResult.success && finalResult.value.is_string())
-        cid = finalResult.value.get<std::string>();
-    if (cid.empty())
-        return "{\"error\": \"upload finalize failed\"}";
+    if (storageRestReady(3000)) {
+        // One POST replaces uploadInit/uploadChunk/uploadFinalize: the response body is the
+        // CID — as bare text, but accept a {"cid": …} JSON shape too. (This module build's
+        // FFI path does not start the API server — measured 2026-08-28, config accepted but
+        // the port never opens — so this branch waits for a build that does.)
+        int status = 0;
+        cid = storageRest("POST", storageRestBase() + "/data", chunkB64, 60000, &status);
+        if (!cid.empty() && cid.front() == '{') {
+            QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(cid));
+            cid = d.isObject() ? d.object().value("cid").toString().toStdString() : "";
+        }
+        while (!cid.empty() && (cid.back() == '\n' || cid.back() == '\r' || cid.back() == '"'))
+            cid.pop_back();
+        if (!cid.empty() && cid.front() == '"') cid.erase(cid.begin());
+        if (status != 200) cid.clear();
+    }
+    if (cid.empty()) {
+        // Typed-client path. The host forwards the node's storageStart event from its FFI
+        // thread right after start, and a reply in flight at that moment is lost (measured
+        // 2026-08-28: uploadInit raced the emit and timed out at 20 s). Whether replies
+        // AFTER the emit still arrive is an open question — hence one retry per call once
+        // the event has had time to fire, instead of trusting the first timeout.
+        std::string chunkStr = chunkB64.toStdString();
+        for (int attempt = 0; attempt < 2 && cid.empty(); attempt++) {
+            StdLogosResult initResult = modules().storage_module.uploadInit(label, 65536);
+            std::string sessionId;
+            if (initResult.success && initResult.value.is_string())
+                sessionId = initResult.value.get<std::string>();
+            if (sessionId.empty()) continue;
+            modules().storage_module.uploadChunk(sessionId, chunkStr);
+            StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId);
+            if (finalResult.success && finalResult.value.is_string())
+                cid = finalResult.value.get<std::string>();
+        }
+        if (cid.empty())
+            return "{\"error\": \"upload failed on both the REST and typed paths\"}";
+    }
 
     std::string keyHex = aesKeyToHex(fileKey);
     sqlite3_stmt* stmt = nullptr;
@@ -98,31 +186,44 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
     std::string keyHex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     sqlite3_finalize(stmt);
 
-    std::string tmpPath = path + ".enc";
-    // The old four-arg downloadChunks(cid, local, chunkSize, outPath) is now split upstream:
-    // downloadToUrl is the write-to-file variant (downloadChunks lost its path and streams
-    // chunks via events instead).
-    StdLogosResult result = modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
-    if (!result.success) {
-        QJsonObject err;
-        err["error"] = QString::fromStdString("download failed: " + result.error);
-        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    // REST first (local repo, then the storage network for a CID a peer shared with us),
+    // typed client as the fallback — same two-world reasoning as storageUpload above.
+    std::string encContent;
+    bool haveContent = false;
+    if (storageRestReady(3000)) {
+        int status = 0;
+        encContent = storageRest("GET", storageRestBase() + "/data/" + cid, {}, 30000, &status);
+        if (status != 200) {
+            status = 0;
+            encContent = storageRest(
+                "GET", storageRestBase() + "/data/" + cid + "/network/stream", {}, 120000,
+                &status);
+        }
+        haveContent = (status == 200);
     }
-
-    // Poll for async download to complete (max 30s)
-    for (int i = 0; i < 60; i++) {
-        std::ifstream check(tmpPath, std::ios::binary | std::ios::ate);
-        if (check.is_open() && check.tellg() > 0) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!haveContent) {
+        std::string tmpPath = path + ".enc";
+        // The old four-arg downloadChunks(cid, local, chunkSize, outPath) is now split
+        // upstream: downloadToUrl is the write-to-file variant.
+        StdLogosResult result = modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
+        if (!result.success) {
+            QJsonObject err;
+            err["error"] = QString::fromStdString("download failed: " + result.error);
+            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        }
+        for (int i = 0; i < 60; i++) {
+            std::ifstream check(tmpPath, std::ios::binary | std::ios::ate);
+            if (check.is_open() && check.tellg() > 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        std::ifstream encFile(tmpPath, std::ios::binary);
+        if (!encFile.is_open())
+            return "{\"error\": \"download timed out — file not received from network\"}";
+        encContent.assign((std::istreambuf_iterator<char>(encFile)),
+                          std::istreambuf_iterator<char>());
+        encFile.close();
+        std::remove(tmpPath.c_str());
     }
-
-    std::ifstream encFile(tmpPath, std::ios::binary);
-    if (!encFile.is_open())
-        return "{\"error\": \"download timed out — file not received from network\"}";
-    std::string encContent((std::istreambuf_iterator<char>(encFile)),
-                            std::istreambuf_iterator<char>());
-    encFile.close();
-    std::remove(tmpPath.c_str());
 
     AESKey fileKey = aesKeyFromHex(keyHex);
     // Uploads are base64-wrapped (see storageUpload) — unwrap before decrypting.
