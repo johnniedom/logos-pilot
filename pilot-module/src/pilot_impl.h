@@ -315,6 +315,11 @@ private:
     bool verifyOwnerMessage(const std::string& raw, std::string& innerOut);
     void initDatabase(const std::string& dataDir);
     void initStorageModule();
+    // Starts the storage node exactly once, and only when the network is needed (announce
+    // after an upload, fetch a remote CID). Deferred because the host's first event emission
+    // — fired by start — permanently drops every later typed-call reply for this host boot;
+    // pre-start calls answer normally. See initStorageModule's definition.
+    void startStorageNodeIfNeeded();
     void initDeliveryModule();
     bool initWallet();
     bool loadIdentity();
@@ -415,6 +420,7 @@ private:
     bool initialized_ = false;
     bool walletOpened_ = false;
     bool storageInitialized_ = false;
+    bool storageNodeStarted_ = false;
     bool deliveryInitialized_ = false;
     // Keeps whatever the generated delivery_module.onMessageReceived() returns, for the
     // life of the agent. On the SDK this box builds against that is a plain bool; on SDKs
