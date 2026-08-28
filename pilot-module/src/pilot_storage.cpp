@@ -79,6 +79,17 @@ bool storageRestReady(int deadlineMs) {
 
 }  // namespace
 
+void PilotImpl::startStorageNodeIfNeeded() {
+    if (storageNodeStarted_) return;
+    storageNodeStarted_ = true;
+    // From this point the host's reply channel is poisoned (storageStart's emit) — every
+    // typed storage call AFTER this start loses its reply until the host restarts. Uploads
+    // therefore happen before the first start; the REST path, when a build serves it, has
+    // no such limit.
+    modules().storage_module.start(nullptr, 10000);
+    qWarning() << "[pilot] storage node started (announcing)";
+}
+
 static std::string currentTs() {
     auto now = std::chrono::system_clock::now();
     return std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
@@ -148,6 +159,10 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
             return "{\"error\": \"upload failed on both the REST and typed paths\"}";
     }
 
+    // Announce what we just stored — this is the first (and only) start of the node, done
+    // AFTER the upload so the typed calls above ran on the un-poisoned pre-start channel.
+    startStorageNodeIfNeeded();
+
     std::string keyHex = aesKeyToHex(fileKey);
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
@@ -202,15 +217,15 @@ std::string PilotImpl::storageDownload(const std::string& cid, const std::string
         haveContent = (status == 200);
     }
     if (!haveContent) {
+        // A remote CID needs the node on the network. This may be the first start (fine) or
+        // a later one (no-op); either way downloadToUrl's REPLY may be lost to the post-start
+        // poisoned channel — so its status is ignored and the FILE is the truth: the module
+        // writes it asynchronously regardless of whether the reply got back to us.
+        startStorageNodeIfNeeded();
         std::string tmpPath = path + ".enc";
         // The old four-arg downloadChunks(cid, local, chunkSize, outPath) is now split
         // upstream: downloadToUrl is the write-to-file variant.
-        StdLogosResult result = modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
-        if (!result.success) {
-            QJsonObject err;
-            err["error"] = QString::fromStdString("download failed: " + result.error);
-            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
-        }
+        modules().storage_module.downloadToUrl(cid, tmpPath, false, 65536);
         for (int i = 0; i < 60; i++) {
             std::ifstream check(tmpPath, std::ios::binary | std::ios::ate);
             if (check.is_open() && check.tellg() > 0) break;

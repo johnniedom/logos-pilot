@@ -241,7 +241,12 @@ void PilotImpl::initStorageModule() {
     std::string cfg = pilotStorageInitConfig(dataDir_);
     bool inited = modules().storage_module.init(cfg, nullptr, 10000);
     qWarning() << "[pilot] storage init" << (inited ? "ok" : "FAILED") << QString::fromStdString(cfg);
-    modules().storage_module.start(nullptr, 10000);
+    // start is DEFERRED (pilotStorageStartNode) — the host's first event emission
+    // (storageStart, fired by start) permanently breaks the reply channel for this host
+    // boot (measured 2026-08-28: uploadInit 4 s AFTER the emit never got its reply back).
+    // Before start, replies flow — so upload work happens pre-start, and the node is
+    // started only when something needs the network (announcing a share, fetching a
+    // remote CID).
 }
 
 // The JSON handed to storage_module.init. libstorage parses it with confutils against its
