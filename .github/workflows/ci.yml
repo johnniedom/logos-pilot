@@ -135,7 +135,10 @@ jobs:
           # pulls the plug); these are the exact closures the local test rig runs.
           LS_PATH=/nix/store/l2c4m1mn6lcy6crj1azbv63dmsndir7a-logos-logoscore-cli-bin-0.1.0
           LGPM_PATH=/nix/store/l2kcbdg9hn7lb053lx111smrvi88jl38-logos-package-manager-cli-1.0.0
-          nix copy --from https://logos-pilot-johnniedom.cachix.org "$LS_PATH" "$LGPM_PATH"
+          # nix-store -r, not nix copy --from: cachix skips deps that live on
+          # cache.nixos.org (e.g. qtsvg), so a single-source copy dies on them;
+          # realising goes through ALL configured substituters.
+          nix-store -r "$LS_PATH" "$LGPM_PATH"
           ln -sfn "$LS_PATH" result-logoscore
           ln -sfn "$LGPM_PATH" result-lgpm
 
