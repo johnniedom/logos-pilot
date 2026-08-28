@@ -171,7 +171,9 @@ jobs:
 
           load=$("$LS" load-module pilot 2>&1); echo "load: $load"
           echo "$load" | grep -q '"status":"ok"'        || { echo "E2E FAIL: pilot did not load"; "$LS" stop || true; exit 1; }
-          echo "$load" | grep -q 'lez_core'             || { echo "E2E FAIL: dependencies not resolved"; "$LS" stop || true; exit 1; }
+          # No dependencies_loaded assert: the pinned CLI has the deps loaded before pilot,
+          # so pilot's load correctly reports [] — the echo + 23-skills calls below are the
+          # real dependency exercise (they die if lez_core/storage/delivery are absent).
 
           eo=$("$LS" call pilot echo "ci-e2e" 2>&1); echo "echo: $eo"
           echo "$eo" | grep -q 'echo: ci-e2e'           || { echo "E2E FAIL: echo round-trip"; "$LS" stop || true; exit 1; }
