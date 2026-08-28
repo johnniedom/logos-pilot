@@ -6,6 +6,8 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <filesystem>
+#include <set>
 #include <cstring>
 #include <QString>
 #include <QByteArray>
@@ -62,6 +64,27 @@ std::string storageRest(const char* verb, const std::string& url, const QByteArr
     }
     if (httpStatus) *httpStatus = status;
     reply->deleteLater();
+    return out;
+}
+
+// The manifest CIDs the node's repo holds on disk. libstorage keys each stored manifest by
+// its CID: <data-dir>/repo/manifests/<xx>/<cid>.dsobj (measured 2026-08-28: the upload's
+// "Stored data manifestCid=zDv*HKVQZT" log line matched a file named
+// zDvZRwzm…szHKVQZT.dsobj). The repo is pilot's own data dir, so this is a side channel the
+// broken host reply path cannot corrupt — the delivery pull path's idea, applied to storage.
+std::set<std::string> storageManifestCids(const std::string& repoDir) {
+    std::set<std::string> out;
+    std::error_code ec;
+    std::filesystem::path root = std::filesystem::path(repoDir) / "manifests";
+    if (!std::filesystem::is_directory(root, ec)) return out;
+    for (auto it = std::filesystem::recursive_directory_iterator(root, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        std::string name = it->path().filename().string();
+        auto dot = name.find('.');
+        if (dot != std::string::npos) name = name.substr(0, dot);
+        if (!name.empty()) out.insert(name);
+    }
     return out;
 }
 
@@ -138,25 +161,34 @@ std::string PilotImpl::storageUpload(const std::string& path, const std::string&
         if (status != 200) cid.clear();
     }
     if (cid.empty()) {
-        // Typed-client path. The host forwards the node's storageStart event from its FFI
-        // thread right after start, and a reply in flight at that moment is lost (measured
-        // 2026-08-28: uploadInit raced the emit and timed out at 20 s). Whether replies
-        // AFTER the emit still arrive is an open question — hence one retry per call once
-        // the event has had time to fire, instead of trusting the first timeout.
-        std::string chunkStr = chunkB64.toStdString();
-        for (int attempt = 0; attempt < 2 && cid.empty(); attempt++) {
-            StdLogosResult initResult = modules().storage_module.uploadInit(label, 65536);
-            std::string sessionId;
-            if (initResult.success && initResult.value.is_string())
-                sessionId = initResult.value.get<std::string>();
-            if (sessionId.empty()) continue;
-            modules().storage_module.uploadChunk(sessionId, chunkStr);
-            StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId);
-            if (finalResult.success && finalResult.value.is_string())
-                cid = finalResult.value.get<std::string>();
+        // Typed-client path, measured end to end on 2026-08-28 (journald + the node's own
+        // log): with the node not yet started, uploadInit and uploadChunk both get their
+        // replies; the chunk's storageUploadProgress event is the host's FIRST emit and it
+        // poisons the channel, so uploadFinalize EXECUTES module-side ("Stored data
+        // manifestCid=…" in storage.log) but its reply never arrives. The CID is therefore
+        // read from the repo on disk, where the node keys the new manifest by it. No retry:
+        // a second uploadInit on the poisoned channel only burns 20 s.
+        const std::string repoDir = dataDir_ + "/storage/repo";
+        StdLogosResult initResult = modules().storage_module.uploadInit(label, 65536);
+        std::string sessionId;
+        if (initResult.success && initResult.value.is_string())
+            sessionId = initResult.value.get<std::string>();
+        if (sessionId.empty())
+            return "{\"error\": \"upload init failed\"}";
+        modules().storage_module.uploadChunk(sessionId, chunkB64.toStdString());
+
+        std::set<std::string> before = storageManifestCids(repoDir);
+        // Short timeout: the reply is expected to be lost; the manifest lands within ~50 ms.
+        StdLogosResult finalResult = modules().storage_module.uploadFinalize(sessionId, nullptr, 3000);
+        if (finalResult.success && finalResult.value.is_string())
+            cid = finalResult.value.get<std::string>();
+        for (int i = 0; cid.empty() && i < 20; i++) {
+            for (const auto& c : storageManifestCids(repoDir))
+                if (!before.count(c)) { cid = c; break; }
+            if (cid.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         if (cid.empty())
-            return "{\"error\": \"upload failed on both the REST and typed paths\"}";
+            return "{\"error\": \"upload finalized but no new manifest appeared in the repo\"}";
     }
 
     // Announce what we just stored — this is the first (and only) start of the node, done
