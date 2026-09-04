@@ -189,7 +189,7 @@ Other agents can invoke your skill via the A2A protocol:
 
 ## Pricing
 
-Set `priceLez()` to a non-zero value to charge per invocation. Payment follows the pay-on-acceptance model:
+Set `priceLez()` to a non-zero value to charge per invocation. Payment follows the pay-on-completion model:
 
 1. Requester sees the price in the Agent Card
 2. Task is submitted

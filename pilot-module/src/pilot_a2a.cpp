@@ -353,12 +353,12 @@ std::string PilotImpl::buildCard() {
     logos["pricing"] = pricing;
 
     logos["payment"] = QString("lez");
-    logos["payment_timing"] = QString("on-acceptance");
+    logos["payment_timing"] = QString("on-completion");
 
     // Payout account (M5): the shielded LEZ recipient a requester transfers the price
     // to. This is the agent's private-account PUBLIC KEYS blob (the same
     // {nullifier_public_key, viewing_public_key} JSON get_private_account_keys returns).
-    // A requester pays it via doPrivateTransfer, which sees those key fields and routes
+    // A requester pays it via doTransfer, which sees those key fields and routes
     // to transfer_private (external payee) — so this value round-trips straight through
     // the payment path. It is deliberately NOT the waku messaging id (paying that would
     // mis-target / TX_FAIL), and NOT a bare owned account id (a bare id can only be paid
@@ -960,8 +960,8 @@ std::string PilotImpl::agentTask(const std::string& agentAddress, const std::str
     status["state"] = QString("submitted");
     QJsonObject logosReply;
     logosReply["reply_topic"] = QString::fromStdString(replyTopic);
-    logosReply["price"] = static_cast<double>(price);   // declared LEZ price to settle on acceptance
-    logosReply["payment"] = QString(price > 0 ? "pending-on-acceptance" : "none-declared");
+    logosReply["price"] = static_cast<double>(price);   // declared LEZ price, settled on completion
+    logosReply["payment"] = QString(price > 0 ? "pending-on-completion" : "none-declared");
     // Say whether delivery actually confirmed the reply topic. The task proceeds either way, so
     // the owner is told which of the two happened rather than being left to assume the good one.
     logosReply["reply_topic_armed"] = replyTopicArmed;
@@ -1438,7 +1438,7 @@ void PilotImpl::settleOutboundReply(const std::string& taskId, const std::string
     // outbound row is linked to the spend id and so the path is exercised even before a
     // wallet account is wired.)
     std::string spendId = createSpendRequest(payout, price,
-        "A2A pay-on-acceptance: " + skill + " (task " + taskId + ")");
+        "A2A pay-on-completion: " + skill + " (task " + taskId + ")");
     setOutbound("settling", payout, spendId);
     sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);  // L8: claim+create+link durable as one unit; gate runs in its own autocommit (never a write lock across a wallet RPC)
 

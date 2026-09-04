@@ -14,7 +14,7 @@
 #include <QJsonDocument>
 #include <QByteArray>
 
-// Requester-side pay-on-acceptance loop (ASKER PAYS THE DOER). settleOutboundReply is the
+// Requester-side pay-on-completion loop (ASKER PAYS THE DOER). settleOutboundReply is the
 // transport-free FSM seam — handleA2AReply decrypts a peer's reply with agentEciesPriv_
 // then calls this; these tests drive it directly against real on-disk SQLite.
 //

@@ -111,7 +111,7 @@ input/output modes, skills) it carries a `_logos` block:
   payout account is a tracked follow-up that would require binding `payout` into the
   TOFU pin.
 - `signing_key` — the public key that signs *this* card (`agentEciesPub_`).
-- `payment` / `payment_timing` — `"lez"`, `"on-acceptance"`.
+- `payment` / `payment_timing` — `"lez"`, `"on-completion"`.
 
 ### Per-skill access tag (`x_access`)
 

@@ -195,7 +195,7 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
         "ALTER TABLE outbound_tasks ADD COLUMN payout TEXT NOT NULL DEFAULT '';",
         nullptr, nullptr, nullptr);
 
-    // Migrate DBs created before the rest of the outbound_tasks pay-on-acceptance columns
+    // Migrate DBs created before the rest of the outbound_tasks pay-on-completion columns
     // were added across passes: price (declared LEZ price to settle), reply_topic (where the
     // doer's reply is consumed), spend_request_id (the linked spend the settlement/recovery
     // path drives). Each ADD COLUMN is a no-op error if the column already exists, which we
@@ -440,7 +440,7 @@ void PilotImpl::handleInboundMessage(const std::string& topic, const std::string
         return;
     }
 
-    // Peer server's reply to a task WE submitted -> requester-side pay-on-acceptance consumer.
+    // Peer server's reply to a task WE submitted -> requester-side pay-on-completion consumer.
     if (topic.rfind("/pilot/1/reply-", 0) == 0) {
         handleA2AReply(topic, payload);
         return;

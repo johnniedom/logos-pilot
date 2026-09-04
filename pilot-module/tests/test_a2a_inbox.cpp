@@ -310,7 +310,7 @@ LOGOS_TEST(inbound_tasks_table_created) {
     LOGOS_ASSERT_TRUE(found);
 }
 
-// The requester-side pay-on-acceptance loop persists pending outbound tasks so the
+// The requester-side pay-on-completion loop persists pending outbound tasks so the
 // reply consumer can settle exactly once. The table must exist after initialize().
 LOGOS_TEST(outbound_tasks_table_created) {
     std::string dir = inboxDir("outbound_schema");
@@ -773,11 +773,11 @@ LOGOS_TEST(inbound_inflight_tasks_fail_on_restart) {
 // program.deploy used to FAKE a deploy: it opened a 100-LEZ spend request to the
 // literal recipient "program_deploy" and, on approval, transferred tokens there.
 // The honest implementation attempts the real upstream deploy on
-// logos_execution_zone and surfaces an error when that runtime is absent — it must
+// lez_core and surfaces an error when that runtime is absent — it must
 // NEVER create a "program_deploy" spend request or an owner-approval envelope.
 LOGOS_TEST(program_deploy_never_creates_program_deploy_spend) {
     std::string dir = inboxDir("deploy_nospend");
-    PilotImpl impl; impl.initialize(dir);   // no wallet wired -> logos_execution_zone absent
+    PilotImpl impl; impl.initialize(dir);   // no wallet wired -> lez_core absent
 
     std::string r = impl.programDeploy("/nonexistent/program.bin");
 
@@ -1783,4 +1783,20 @@ LOGOS_TEST(migration_wrapped_enc_priv_not_rotated_without_passphrase) {
     LOGOS_ASSERT_FALSE(encPubBefore.empty());
     LOGOS_ASSERT_EQ(encPubAfter, encPubBefore);    // enc.pub NOT overwritten (key not regenerated)
     LOGOS_ASSERT_EQ(cardEncKey, encPubBefore);     // advertised enc_key is the original, not a new random key
+}
+
+// The card must state the payment model the requester side actually runs. settleOutboundReply
+// pays ONLY on the doer's terminal 'completed' (accepted / working / input-required never
+// settle, failed / canceled / rejected never pay), so a card advertising "on-acceptance" told
+// a peer to expect money at a moment it would not arrive.
+LOGOS_TEST(card_advertises_pay_on_completion) {
+    std::string dir = inboxDir("card_timing");
+    ECIESKeypair kp = generateECIESKeypair();
+    { PilotImpl boot; boot.initialize(dir); }   // create schema (no wallet -> returns false)
+    seedEciesIdentity(dir, kp);
+    PilotImpl impl; impl.initialize(dir);
+
+    QJsonObject logos = QJsonDocument::fromJson(QByteArray::fromStdString(impl.agentCard()))
+                            .object()["_logos"].toObject();
+    LOGOS_ASSERT_EQ(logos["payment_timing"].toString().toStdString(), std::string("on-completion"));
 }
