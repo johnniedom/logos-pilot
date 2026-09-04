@@ -162,6 +162,34 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             signing_key TEXT NOT NULL,
             first_seen TEXT NOT NULL
         );
+
+        -- Messaging receive side (2026-09-04). Until this table existed a direct message, a
+        -- group invite or a shared file key reached our inbox topic, was decrypted, and was
+        -- DROPPED for not being a signed A2A request; the sender saw "sent": true and nothing
+        -- arrived anywhere (the two-agent test only ever asserted the send). Rows here are what
+        -- messagingInbox() shows. `sender` is the sender's CLAIM (these payloads are sealed,
+        -- not signed).
+        CREATE TABLE IF NOT EXISTS received_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            group_id TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            received_at TEXT NOT NULL
+        );
+
+        -- Groups we created or were invited to: the topic and the 32-byte AES-256-GCM group key
+        -- (hex) every message on that topic is sealed with. joined = 0 is invited-only: not
+        -- polled, not readable, until the owner calls messaging.join.
+        CREATE TABLE IF NOT EXISTS messaging_groups (
+            group_id TEXT PRIMARY KEY,
+            topic TEXT NOT NULL,
+            key_hex TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT '',
+            joined INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
     )SQL";
 
     char* errMsg = nullptr;
@@ -290,6 +318,29 @@ std::string pilotStorageInitConfig(const std::string& dataDir) {
     }
     if (const char* nat = std::getenv("PILOT_STORAGE_NAT"))
         if (*nat) cfg["nat"] = QString(nat);
+    // Two nodes on one host (the storage-role job runs two daemons in one runner): the
+    // discovery UDP port defaults to 8090 for every node, so the second must be moved; a
+    // FIXED listen port gives the node an address a peer can dial (default 0 = random); and
+    // `bootstrap-node` (an ARRAY of SPRs) lets a node start already knowing a peer. Keys as
+    // documented in logos-storage-module's storage_module_plugin.h.
+    auto portFromEnv = [&](const char* name, const char* key) {
+        if (const char* p = std::getenv(name))
+            if (*p) {
+                int v = std::atoi(p);
+                if (v > 0 && v < 65536) cfg[key] = v;
+            }
+    };
+    portFromEnv("PILOT_STORAGE_DISC_PORT", "disc-port");
+    portFromEnv("PILOT_STORAGE_LISTEN_PORT", "listen-port");
+    if (const char* boots = std::getenv("PILOT_STORAGE_BOOTSTRAP"))
+        if (*boots) {
+            QJsonArray arr;
+            for (const QString& s : QString(boots).split(',')) {
+                QString t = s.trimmed();
+                if (!t.isEmpty()) arr.append(t);
+            }
+            if (!arr.isEmpty()) cfg["bootstrap-node"] = arr;
+        }
     return QJsonDocument(cfg).toJson(QJsonDocument::Compact).toStdString();
 }
 
@@ -451,6 +502,12 @@ void PilotImpl::handleInboundMessage(const std::string& topic, const std::string
     // or by out-of-band import — which is why discovery returned {"count":0} forever.
     if (topic == "/pilot/1/discovery/proto") {
         handleDiscoveryCard(payload);
+        return;
+    }
+
+    // A message on a group topic we joined -> opened with the group key into the inbox.
+    if (topic.rfind("/pilot/1/group-", 0) == 0) {
+        handleInboundGroupMessage(topic, payload);
         return;
     }
 

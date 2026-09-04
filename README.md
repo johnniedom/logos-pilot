@@ -181,14 +181,21 @@ pilot-module/
 | storage.upload | `storageUpload(path, label)` | Encrypts and uploads a file |
 | storage.download | `storageDownload(cid, path)` | Retrieves and decrypts a file |
 | storage.list | `storageList()` | Lists all stored files |
-| storage.share | `storageShare(cid, recipientNpk)` | Shares file access with another identity |
+| storage.share | `storageShare(cid, recipient)` | Sends the file key, sealed to the recipient's encryption key; the receiver records it so its own `storage.download` can fetch and decrypt the CID |
 
 ### Messaging (3)
 | Skill | Method | Description |
 |-------|--------|-------------|
-| messaging.send | `messagingSend(recipient, message)` | Sends encrypted message to an inbox |
-| messaging.join | `messagingJoin(groupId)` | Joins a group topic |
-| messaging.create_group | `messagingCreateGroup(membersJson)` | Creates a group and invites members |
+| messaging.send | `messagingSend(recipient, message)` | Direct: sealed (ECIES) to the recipient's encryption key — a bare key, or the peer's card JSON. `recipient` = `group:<id>` sends to a joined group, sealed (AES-256-GCM) with the group key |
+| messaging.join | `messagingJoin(groupId)` | Joins a group we were invited to (we hold its key); joined groups are polled |
+| messaging.create_group | `messagingCreateGroup(membersJson)` | Creates a group with a fresh group key and sends each member (JSON array of keys or cards) an invite sealed to that member alone |
+
+Receiving is a method, not a skill: `messagingInbox()` lists what arrived — direct and group
+messages, group invites, file shares — newest first. Before 2026-09-04 every one of those was
+decrypted and dropped on arrival; the sender saw `"sent": true`. An agent's inbox is named after
+its encryption key (`_logos.enc_key` in its card) and is listened on only while the agent is
+open for hire. `storagePeerInfo()` / `storageConnect(peerId, addrs)` let one agent's storage
+node dial another's so a shared CID can be fetched over the storage network.
 
 ### Agent Coordination — A2A (6)
 | Skill | Method | Description |
@@ -431,8 +438,12 @@ logoscore call pilot walletSend '{"nullifier_public_key":"<npk-hex>","viewing_pu
 # Upload a file to encrypted storage
 logoscore call pilot storageUpload /path/to/file.txt "my document"
 
-# Send a message to another agent
-logoscore call pilot messagingSend recipientNpk "hello from pilot"
+# Send a message to another agent: the recipient is the peer's ENCRYPTION key (its card's
+# _logos.enc_key) or the card JSON itself; "group:<id>" sends to a joined group
+logoscore call pilot messagingSend <peer-enc-key-hex> "hello from pilot"
+# Read what arrived (direct + group messages, invites, file shares); agentPoll pulls the relay store first
+logoscore call pilot agentPoll
+logoscore call pilot messagingInbox
 
 # Publish Agent Card for A2A discovery
 logoscore call pilot agentCard

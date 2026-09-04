@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <set>
 #include <cstring>
+#include <cctype>
 #include <QString>
 #include <QByteArray>
 #include <QJsonDocument>
@@ -336,7 +337,7 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_,
-        "SELECT file_key_encrypted FROM stored_files WHERE cid = ?;",
+        "SELECT file_key_encrypted, label FROM stored_files WHERE cid = ?;",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, cid.c_str(), -1, SQLITE_TRANSIENT);
 
@@ -345,16 +346,24 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
         return "{\"error\": \"unknown CID\"}";
     }
     std::string keyHex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    std::string label = sqlite3_column_text(stmt, 1)
+        ? reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)) : "";
     sqlite3_finalize(stmt);
 
-    std::string recipientKey = recipientNpk;
-    QJsonDocument recipientDoc = QJsonDocument::fromJson(QByteArray::fromStdString(recipientNpk));
-    if (recipientDoc.isObject() && recipientDoc.object().contains("viewing_public_key"))
-        recipientKey = recipientDoc.object()["viewing_public_key"].toString().toStdString();
+    // The recipient's ENCRYPTION key — the one its inbox topic is named after. A bare key, the
+    // peer's card (_logos.enc_key) or an npk blob (viewing_public_key, legacy) are accepted.
+    std::string recipientKey = pilotRecipientKey(recipientNpk);
+    std::string self = a2aSelfEncKey();
+    if (self.empty()) self = agentNpk_;
 
+    // The receiver records this under stored_files (INSERT OR IGNORE, never over its own
+    // files) so its storageDownload can find the key — see handleInboundApplication.
     QJsonObject shareObj;
+    shareObj["type"] = QString("file_share");
     shareObj["cid"] = QString::fromStdString(cid);
     shareObj["key"] = QString::fromStdString(keyHex);
+    shareObj["from"] = QString::fromStdString(self);
+    shareObj["label"] = QString::fromStdString(label);
     std::string sharePayload = QJsonDocument(shareObj).toJson(QJsonDocument::Compact).toStdString();
     std::vector<uint8_t> plainBytes(sharePayload.begin(), sharePayload.end());
 
@@ -368,7 +377,7 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
         return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    std::string topic = "/pilot/1/inbox-" + recipientNpk + "/proto";
+    std::string topic = "/pilot/1/inbox-" + recipientKey + "/proto";
 
     modules().delivery_module.send(
         topic, std::vector<uint8_t>(encPayload.begin(), encPayload.end()), nullptr, kDeliveryFireAndForgetMs);
@@ -376,7 +385,86 @@ std::string PilotImpl::storageShare(const std::string& cid, const std::string& r
     QJsonObject result;
     result["shared"] = true;
     result["cid"] = QString::fromStdString(cid);
-    result["recipient"] = QString::fromStdString(recipientNpk);
+    result["recipient"] = QString::fromStdString(recipientKey);
+    result["topic"] = QString::fromStdString(topic);
     result["encrypted"] = true;
     return QJsonDocument(result).toJson(QJsonDocument::Compact).toStdString();
+}
+
+std::string PilotImpl::storagePeerInfo() {
+    if (!isContextReady() || !db_) return "{\"error\": \"not initialized\"}";
+    initStorageModule();
+
+    QJsonObject res;
+    // Both are synchronous FFI reads on the storage host. Pre-start they answer; post-start the
+    // host drops the reply (see startStorageNodeIfNeeded), so each gets 3 s and the node's own
+    // log is read as the fallback — the same side channel the upload path uses for the CID.
+    std::string peerId;
+    StdLogosResult pid = modules().storage_module.peerId(nullptr, 3000);
+    if (pid.success && pid.value.is_string()) peerId = pid.value.get<std::string>();
+    StdLogosResult spr = modules().storage_module.spr(nullptr, 3000);
+    if (spr.success && spr.value.is_string())
+        res["spr"] = QString::fromStdString(spr.value.get<std::string>());
+
+    // Every /ip4/... token the node logged (listen and announce addresses), and its peer id
+    // when the typed call did not answer. libp2p peer ids are base58 and start with 16Uiu2.
+    QJsonArray logAddrs;
+    std::set<std::string> seen;
+    const std::string logPath = dataDir_ + "/storage/storage.log";
+    std::ifstream log(logPath);
+    std::string line;
+    auto tokenEnd = [](const std::string& s, size_t p) {
+        while (p < s.size() && !std::isspace(static_cast<unsigned char>(s[p])) && s[p] != '"'
+               && s[p] != '\'' && s[p] != ',' && s[p] != ']' && s[p] != ')')
+            ++p;
+        return p;
+    };
+    while (std::getline(log, line)) {
+        size_t p = 0;
+        while ((p = line.find("/ip4/", p)) != std::string::npos) {
+            size_t e = tokenEnd(line, p);
+            std::string a = line.substr(p, e - p);
+            if (seen.insert(a).second && logAddrs.size() < 20) logAddrs.append(QString::fromStdString(a));
+            p = e;
+        }
+        if (peerId.empty()) {
+            size_t q = line.find("16Uiu2");
+            if (q != std::string::npos) peerId = line.substr(q, tokenEnd(line, q) - q);
+        }
+    }
+    res["peer_id"] = QString::fromStdString(peerId);
+    res["log_addrs"] = logAddrs;
+    res["log"] = QString::fromStdString(logPath);
+    res["node_started"] = storageNodeStarted_;
+    // The one address a peer should dial, when the operator fixed it: PILOT_STORAGE_NAT=extip:<IP>
+    // + PILOT_STORAGE_LISTEN_PORT=<port> (see pilotStorageInitConfig).
+    const char* nat = std::getenv("PILOT_STORAGE_NAT");
+    const char* lp = std::getenv("PILOT_STORAGE_LISTEN_PORT");
+    if (nat && std::strncmp(nat, "extip:", 6) == 0 && lp && *lp && !peerId.empty()) {
+        res["addr"] = QString::fromStdString(
+            "/ip4/" + std::string(nat + 6) + "/tcp/" + std::string(lp));
+        res["dial"] = QString::fromStdString(
+            "/ip4/" + std::string(nat + 6) + "/tcp/" + std::string(lp) + "/p2p/" + peerId);
+    }
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+}
+
+std::string PilotImpl::storageConnect(const std::string& peerId, const std::string& addrsJson) {
+    if (!isContextReady() || !db_) return "{\"error\": \"not initialized\"}";
+    if (peerId.empty()) return "{\"error\": \"peer id required\"}";
+    std::vector<std::string> addrs = pilotParseMembers(addrsJson);   // JSON array or comma list
+    if (addrs.empty()) return "{\"error\": \"at least one multiaddr required\"}";
+    initStorageModule();
+    // Dialing needs a running switch; this may be the node's first start (announce nothing,
+    // fetch later) — after it the host drops replies, so `accepted` below can read false for a
+    // connect that went out. "requested" is what this call can honestly claim; the download
+    // that follows is the proof of the connection.
+    startStorageNodeIfNeeded();
+    StdLogosResult r = modules().storage_module.connect(peerId, addrs, nullptr, 3000);
+    QJsonObject res;
+    res["requested"] = true;
+    res["peer_id"] = QString::fromStdString(peerId);
+    res["addrs"] = static_cast<int>(addrs.size());
+    res["accepted"] = r.success;
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }

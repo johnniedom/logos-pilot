@@ -1,0 +1,101 @@
+name: Testnet agents (one per skill category)
+
+# LP-0008: "Three separate agents are deployed on LEZ testnet — one per default skill category
+# (Storage, Messaging, and Blockchain) — each with a demonstrated, reproducible deployment and
+# evidence provided." One job per category runs agents/deploy-agent.sh --role <category> from a
+# clean clone on a hosted runner against the PUBLIC testnet, every step asserted, and keeps the
+# run's evidence (logs, inbox dumps, the shared file and its fetched copy) as an artifact. The
+# rows in evidence/testnet-agents.tsv point at these runs.
+#
+# Manual trigger plus a weekly run: every run claims faucet accounts (1 for blockchain, 2 each for
+# storage and messaging), so this does not run nightly.
+on:
+  workflow_dispatch:
+    inputs:
+      roles:
+        description: "Comma list of roles to run (storage,messaging,blockchain)"
+        default: "storage,messaging,blockchain"
+        required: false
+  schedule:
+    - cron: "17 4 * * 0"   # Sundays 04:17 UTC
+
+jobs:
+  agent:
+    name: ${{ matrix.role }} agent (public LEZ testnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # a cold wallet replays the whole chain before it can fund (~1,000-3,000 blocks/min)
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [storage, messaging, blockchain]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip roles not requested
+        id: want
+        shell: bash
+        run: |
+          WANT="${{ github.event.inputs.roles || 'storage,messaging,blockchain' }}"
+          if echo ",$WANT," | grep -q ",${{ matrix.role }},"; then echo "run=1" >> "$GITHUB_OUTPUT"; else echo "run=0" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Free disk space
+        if: steps.want.outputs.run == '1'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - uses: cachix/install-nix-action@v27
+        if: steps.want.outputs.run == '1'
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = 2
+            cores = 2
+
+      - uses: cachix/cachix-action@v15
+        if: steps.want.outputs.run == '1'
+        with:
+          name: logos-pilot-johnniedom
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        continue-on-error: true
+
+      - name: Fetch runtime (logoscore) + installer (lgpm) from Cachix
+        if: steps.want.outputs.run == '1'
+        shell: bash
+        run: |
+          # Pinned store paths (the same closures the development box runs); building the
+          # unpinned CLI from source has starved hosted runners three times.
+          LS_PATH=/nix/store/l2c4m1mn6lcy6crj1azbv63dmsndir7a-logos-logoscore-cli-bin-0.1.0
+          LGPM_PATH=/nix/store/l2kcbdg9hn7lb053lx111smrvi88jl38-logos-package-manager-cli-1.0.0
+          nix-store -r "$LS_PATH" "$LGPM_PATH"
+          ln -sfn "$LS_PATH" result-logoscore
+          ln -sfn "$LGPM_PATH" result-lgpm
+
+      - name: "Deploy the ${{ matrix.role }} agent against the public testnet (every step asserted)"
+        if: steps.want.outputs.run == '1'
+        env:
+          LOGOSCORE_BIN: ${{ github.workspace }}/result-logoscore/bin/logoscore
+          LGPM_BIN: ${{ github.workspace }}/result-lgpm/bin/lgpm
+          LEZ_RPC: https://testnet.lez.logos.co
+          RISC0_DEV_MODE: "1"     # the public rail needs no client proof
+          DEMO_AMOUNT: "1"
+        shell: bash   # bash -eo pipefail: a failing script must fail the job even through tee
+        run: |
+          mkdir -p agents/out/${{ matrix.role }}
+          agents/deploy-agent.sh --role ${{ matrix.role }} 2>&1 | tee agents/out/${{ matrix.role }}/run.log
+
+      - name: Keep the evidence (run log, daemon + storage logs, inbox dumps, the file and its fetched copy)
+        if: always() && steps.want.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-agent-${{ matrix.role }}
+          path: |
+            agents/out/${{ matrix.role }}/
+            demo.log
+            demo-daemon.log
+          if-no-files-found: ignore

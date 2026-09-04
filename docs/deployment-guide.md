@@ -153,6 +153,43 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 
 Expected: "Results: 30 passed, 0 failed" (last full run 2026-08-28).
 
+## Three agents on the public testnet, one per skill category
+
+`agents/deploy-agent.sh` deploys one agent per default skill category against the public LEZ
+testnet from a clean clone, runs that category's skills end to end, and asserts every step
+(exit 1 the moment something does not do what it claims). It needs `nix`, `python3`, `curl`
+and, for the two-agent roles, `docker` (one local nwaku relay). No keys, no wallet, no
+sequencer of your own: each agent creates its identity and funds itself from the faucet.
+
+```bash
+# Blockchain agent: identity, faucet funding, a spend through the spending FSM, all read back
+# from the chain (this is ./demo.sh). ~20-25 min, one faucet claim.
+agents/deploy-agent.sh --role blockchain
+
+# Storage agent: A uploads an encrypted file, lists it, shares the key with a second identity B
+# over Logos Messaging; B receives the key, dials A's storage node, fetches the CID over the
+# storage network and decrypts it byte-identical. Two daemons, two faucet claims.
+agents/deploy-agent.sh --role storage
+
+# Messaging agent: A -> B direct message; A creates a group whose sealed invite carries the
+# group key, B joins; one AES-GCM group message each way — every message READ BACK on the
+# receiving side (messagingInbox), not just sent. Two daemons, two faucet claims.
+agents/deploy-agent.sh --role messaging
+```
+
+Each run leaves its evidence in `agents/out/<role>/`: the run log with `EVIDENCE` lines
+(accounts, keys, CID, topics, message bodies), both daemons' logs, the storage nodes' own
+logs, the inbox dumps, and for the storage role the original file next to B's fetched copy.
+`.github/workflows/testnet-agents.yml` runs the three roles as three jobs (manual trigger and
+weekly) and uploads that directory as the artifact `testnet-agent-<role>`; the identities from
+those runs are the rows of `evidence/testnet-agents.tsv`, which `evidence/verify-testnet.sh`
+re-checks against the chain.
+
+Two agents on one host need distinct ports; the script sets them (`PILOT_TCP_PORT` for the
+Waku node, `PILOT_STORAGE_API_PORT` / `PILOT_STORAGE_DISC_PORT` / `PILOT_STORAGE_LISTEN_PORT`
+for the storage node) and dials the relay it starts. An agent receives messages and shared keys
+only while it is open for hire (`agentOpenForHire`): closed means nobody can reach its inbox.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -163,6 +200,12 @@ Expected: "Results: 30 passed, 0 failed" (last full run 2026-08-28).
 | `PILOT_TCP_PORT` | `60000` | Waku relay TCP port |
 | `PILOT_WAKU_MODE` | `Core` | `Core` (full relay) or `Edge` (lightweight) |
 | `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` for WSL |
+| `PILOT_WAKU_REST` | `http://127.0.0.1:8645` | The relay's REST API the pull path (`agentPoll`) reads |
+| `PILOT_STORAGE_API_PORT` | `5988` | Storage node REST port (loopback); distinct per agent on one host |
+| `PILOT_STORAGE_DISC_PORT` | (libstorage default, 8090) | Storage node discovery UDP port; distinct per agent on one host |
+| `PILOT_STORAGE_LISTEN_PORT` | (random) | Storage node libp2p listen port; fix it so a peer can dial `/ip4/<extip>/tcp/<port>` |
+| `PILOT_STORAGE_NAT` | (auto) | Storage node NAT: `extip:<IP>` (the only other form libstorage accepts) |
+| `PILOT_STORAGE_BOOTSTRAP` | — | Comma list of storage SPRs handed to the node as `bootstrap-node` |
 | `ANTHROPIC_API_KEY` | — | Anthropic Claude API key |
 | `PILOT_LLM_PROVIDER` | — | Headless `pilot deploy`: `anthropic`, `openai`, `deepseek`, `google`, `openrouter`, `groq` or `none` — skips the provider selector (which needs a terminal) |
 | `PILOT_LLM_MODEL` | — | Headless `pilot deploy`: model id — skips the model selector |

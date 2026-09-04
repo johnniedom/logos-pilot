@@ -83,11 +83,12 @@ Dependencies (declared in `metadata.json`):
 | Channel | Encryption | Implementation |
 |---------|-----------|----------------|
 | Owner channel | ECIES to owner NPK via delivery_module | `pilot_crypto.cpp` ([details](owner-channel.md)) |
-| Agent inbox (`/pilot/1/inbox-{npk}/proto`) | ECIES to agent NPK | `pilot_crypto.cpp` |
-| A2A reply topics | ECIES to sender NPK | `pilot_crypto.cpp` |
+| Agent inbox (`/pilot/1/inbox-{enc_key}/proto`) | ECIES to the agent's encryption key (`_logos.enc_key` in its card) | `pilot_crypto.cpp` |
+| A2A reply topics | ECIES to the sender's ECIES key | `pilot_crypto.cpp` |
 | Discovery topic | Plaintext (Agent Cards are public) | No encryption |
 | Stored files | AES-256-GCM per-file | `pilot_crypto.cpp` |
-| Shared file keys | ECIES to recipient NPK | `pilot_crypto.cpp` |
+| Shared file keys, direct messages, group invites | ECIES to the recipient's encryption key (inbox payloads; recorded by the receiver, see `messagingInbox`) | `pilot_messaging.cpp` |
+| Group topics (`/pilot/1/group-{id}/proto`) | AES-256-GCM under the group key carried by the sealed invite; fresh IV per message | `pilot_messaging.cpp` |
 
 ECIES flow: ephemeral EC keypair (secp256k1) → ECDH with recipient NPK → SHA256 KDF → AES-256-GCM.
 

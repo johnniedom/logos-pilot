@@ -752,14 +752,17 @@ int PilotImpl::pollStore(const std::vector<std::string>& topics) {
     return handed;
 }
 
-std::string PilotImpl::agentPoll() {
-    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
-
+std::vector<std::string> PilotImpl::agentPollTopics() {
     // Everything we would be subscribed to on the live path, plus the reply topics of every
-    // outbound task still waiting on its peer.
-    std::vector<std::string> topics = identityTopics();
-    topics.push_back("/pilot/1/discovery/proto");
-    if (!ownerChannelId_.empty()) topics.push_back(ownerChannelId_);
+    // outbound task still waiting on its peer, plus every group the owner joined.
+    std::vector<std::string> topics = identityTopics();   // discovery always; inboxes while open
+    auto add = [&](const std::string& t) {
+        if (t.empty()) return;
+        for (const auto& x : topics) if (x == t) return;
+        topics.push_back(t);
+    };
+    add("/pilot/1/discovery/proto");
+    add(ownerChannelId_);
     if (db_) {
         sqlite3_stmt* st = nullptr;
         if (sqlite3_prepare_v2(db_,
@@ -767,11 +770,27 @@ std::string PilotImpl::agentPoll() {
                 -1, &st, nullptr) == SQLITE_OK) {
             while (sqlite3_step(st) == SQLITE_ROW) {
                 const unsigned char* t = sqlite3_column_text(st, 0);
-                if (t) topics.push_back(reinterpret_cast<const char*>(t));
+                if (t) add(reinterpret_cast<const char*>(t));
+            }
+            sqlite3_finalize(st);
+        }
+        st = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "SELECT topic FROM messaging_groups WHERE joined = 1;", -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const unsigned char* t = sqlite3_column_text(st, 0);
+                if (t) add(reinterpret_cast<const char*>(t));
             }
             sqlite3_finalize(st);
         }
     }
+    return topics;
+}
+
+std::string PilotImpl::agentPoll() {
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
+
+    std::vector<std::string> topics = agentPollTopics();
 
     int handed = pollStore(topics);
     QJsonObject res;

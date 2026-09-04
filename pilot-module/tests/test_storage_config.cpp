@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <QString>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QJsonDocument>
 
 // The JSON pilot hands to storage_module.init is parsed by libstorage (confutils against
@@ -82,6 +83,49 @@ LOGOS_TEST(storage_config_honours_an_explicit_nat_override) {
     QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
     unsetenv("PILOT_STORAGE_NAT");
     LOGOS_ASSERT_EQ(cfg.value("nat").toString().toStdString(), std::string("extip:127.0.0.1"));
+    std::filesystem::remove_all(dir);
+}
+
+LOGOS_TEST(storage_config_honours_the_disc_port_override_for_multi_agent_hosts) {
+    // libstorage's discovery (UDP) port defaults to 8090 for every node. Two agents on one
+    // host — the storage-role job runs two daemons in one runner — need distinct ports or the
+    // second node cannot bind.
+    std::string dir = scratchDir("disc");
+    unsetenv("PILOT_STORAGE_DISC_PORT");
+    LOGOS_ASSERT_FALSE(parseCfg(pilotStorageInitConfig(dir)).contains("disc-port"));
+    setenv("PILOT_STORAGE_DISC_PORT", "8091", 1);
+    QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
+    unsetenv("PILOT_STORAGE_DISC_PORT");
+    LOGOS_ASSERT_EQ(cfg.value("disc-port").toInt(), 8091);
+    std::filesystem::remove_all(dir);
+}
+
+LOGOS_TEST(storage_config_honours_a_fixed_listen_port_so_a_peer_can_dial_us) {
+    // The default listen-port is 0 (random). A node another agent must dial needs a known
+    // address: fix the port and the address is /ip4/<extip>/tcp/<port>/p2p/<peerId>.
+    std::string dir = scratchDir("listen");
+    unsetenv("PILOT_STORAGE_LISTEN_PORT");
+    LOGOS_ASSERT_FALSE(parseCfg(pilotStorageInitConfig(dir)).contains("listen-port"));
+    setenv("PILOT_STORAGE_LISTEN_PORT", "8070", 1);
+    QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
+    unsetenv("PILOT_STORAGE_LISTEN_PORT");
+    LOGOS_ASSERT_EQ(cfg.value("listen-port").toInt(), 8070);
+    std::filesystem::remove_all(dir);
+}
+
+LOGOS_TEST(storage_config_passes_bootstrap_nodes_as_a_json_array) {
+    // libstorage's `bootstrap-node` is an ARRAY of SPRs. A comma list in the env var becomes
+    // that array; unset means the key is absent and libstorage keeps its own default.
+    std::string dir = scratchDir("boot");
+    unsetenv("PILOT_STORAGE_BOOTSTRAP");
+    LOGOS_ASSERT_FALSE(parseCfg(pilotStorageInitConfig(dir)).contains("bootstrap-node"));
+    setenv("PILOT_STORAGE_BOOTSTRAP", "spr:AAA, spr:BBB", 1);
+    QJsonObject cfg = parseCfg(pilotStorageInitConfig(dir));
+    unsetenv("PILOT_STORAGE_BOOTSTRAP");
+    QJsonArray boots = cfg.value("bootstrap-node").toArray();
+    LOGOS_ASSERT_EQ(boots.size(), 2);
+    LOGOS_ASSERT_EQ(boots[0].toString().toStdString(), std::string("spr:AAA"));
+    LOGOS_ASSERT_EQ(boots[1].toString().toStdString(), std::string("spr:BBB"));
     std::filesystem::remove_all(dir);
 }
 

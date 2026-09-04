@@ -12,5 +12,7 @@ __pycache__/
 *.pyc
 .DS_Store
 store/
+# Per-run output of agents/deploy-agent.sh (logs, inbox dumps, fetched files) — CI keeps it as an artifact
+agents/out/
 # Local working docs/scripts — NOT for the public submission repo (kept off Logos's view).
 private/

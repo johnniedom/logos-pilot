@@ -690,6 +690,15 @@ void PilotImpl::handleInboundA2A(const std::string& encryptedPayload) {
     if (!reqDoc.isObject()) return;
     QJsonObject reqObj = reqDoc.object();
 
+    // Not a JSON-RPC request: a direct message, a group invite or a shared file key from
+    // messagingSend / messagingCreateGroup / storageShare. Until 2026-09-04 these fell through
+    // to verifyInboundRequest, failed it (no signature), and were dropped — the sender saw
+    // "sent" and the receiver kept nothing. They are recorded, never dispatched.
+    if (!reqObj.contains("jsonrpc")) {
+        handleInboundApplication(request);
+        return;
+    }
+
     // AUTHENTICATE every network request before dispatch (H2). Drop unsigned / forged-signature /
     // pin-mismatch requests (ambiguity -> inaction). firstContact feeds the owner prompt's trust
     // label so a stranger's very first request is never shown as a known peer (L4).

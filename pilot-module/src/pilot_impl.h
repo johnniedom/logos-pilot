@@ -103,11 +103,27 @@ public:
     std::string storageDownload(const std::string& cid, const std::string& path);
     std::string storageList();
     std::string storageShare(const std::string& cid, const std::string& recipientNpk);
+    // Two storage nodes finding each other (2026-09-04). A CID one agent stored is fetched by
+    // another only if the second node is CONNECTED to the first; with no bootstrap peers a node
+    // is an island. storagePeerInfo() reports this node's peer id / SPR (typed calls, which
+    // answer pre-start), the /ip4/ addresses its own log names, and — when PILOT_STORAGE_NAT
+    // (extip) and PILOT_STORAGE_LISTEN_PORT are set — the one dialable address a peer should
+    // use. storageConnect() starts the node if needed and dials a peer by id + multiaddrs
+    // (JSON array or comma list). Post-start the host drops the reply, so "requested" is what
+    // it can honestly say; the download that follows is the proof.
+    std::string storagePeerInfo();
+    std::string storageConnect(const std::string& peerId, const std::string& addrsJson);
 
     // Phase 4: Messaging skills
+    // recipient: the peer's ENCRYPTION key (its card's _logos.enc_key), the card JSON itself,
+    // or "group:<id>" for a group we joined. See pilot_messaging.cpp for the wire shapes.
     std::string messagingSend(const std::string& recipient, const std::string& message);
     bool messagingJoin(const std::string& groupId);
     std::string messagingCreateGroup(const std::string& membersJson);
+    // What arrived (2026-09-04): direct messages, group messages, group invites and file shares,
+    // newest first — {"messages":[{id,kind,from,group_id,message,topic,received_at}],"count"}.
+    // Before this existed every one of those was decrypted and thrown away on arrival.
+    std::string messagingInbox();
 
     // Phase 4: Meta skills
     std::string metaSkills();
@@ -135,6 +151,11 @@ public:
     // two-agent test between phases, and by `pilot poll`. Latency becomes one poll interval;
     // correctness is identical (same handlers, same verification, same dedupe by hash).
     std::string agentPoll();
+    // The topic set agentPoll() reads: identityTopics() (discovery + inboxes while open), the
+    // owner channel, the reply topic of every outbound task still in flight, and every group
+    // the owner JOINED. Pure (no I/O beyond pilot.db), so the invariant "a joined group is
+    // polled, an invited one is not" is testable without a relay.
+    std::vector<std::string> agentPollTopics();
     // Learn a peer from a card handed over out-of-band (file, paste, QR) instead of waiting
     // for one to arrive over discovery. Runs the SAME signature + TOFU verification as a
     // broadcast card, so an imported peer is neither more nor less trusted than a discovered
@@ -320,6 +341,18 @@ private:
     // — fired by start — permanently drops every later typed-call reply for this host boot;
     // pre-start calls answer normally. See initStorageModule's definition.
     void startStorageNodeIfNeeded();
+    // Receive side of messaging (pilot_messaging.cpp). handleInboundApplication takes the
+    // DECRYPTED JSON of an inbox payload that is not a JSON-RPC request — a direct message, a
+    // group invite, a file share — records it, and returns true when it consumed (or knowingly
+    // dropped) it; false means "this is an RPC, carry on". handleInboundGroupMessage opens a
+    // group-topic payload with the joined group's key. recordInbound writes one inbox row;
+    // groupKeyFor reads a group's key (and topic) from pilot.db.
+    bool handleInboundApplication(const std::string& plainJson);
+    void handleInboundGroupMessage(const std::string& topic, const std::string& payload);
+    void recordInbound(const std::string& kind, const std::string& sender,
+                       const std::string& groupId, const std::string& body,
+                       const std::string& topic);
+    std::string groupKeyFor(const std::string& groupId, std::string* topicOut, bool requireJoined);
     void initDeliveryModule();
     bool initWallet();
     bool loadIdentity();
@@ -485,6 +518,22 @@ std::string pilotStorageInitConfig(const std::string& dataDir);
 // workaround, as the delivery pull path (agentPoll). PILOT_STORAGE_API_PORT overrides for
 // multi-agent hosts; default 5988.
 int pilotStorageApiPort();
+
+// Messaging helpers (pilot_messaging.cpp) — free functions so the module generator never wraps
+// them and so they are unit-testable without a delivery module.
+//
+// pilotRecipientKey: the key a message to `recipient` is sealed to and whose inbox topic it is
+// published on — a bare hex key as given; a card JSON -> its _logos.enc_key; an npk JSON ->
+// its viewing_public_key (legacy).
+std::string pilotRecipientKey(const std::string& recipient);
+// pilotParseMembers: a JSON array of keys/cards, or the legacy comma list, -> keys.
+std::vector<std::string> pilotParseMembers(const std::string& membersJson);
+// Group message envelope: AES-256-GCM under the 32-byte group key (64 hex), fresh IV per
+// message. Seal returns "" for an unusable key; open returns false for a wrong key or junk.
+std::string pilotSealGroupMessage(const std::string& groupKeyHex, const std::string& from,
+                                  const std::string& message);
+bool pilotOpenGroupMessage(const std::string& groupKeyHex, const std::string& payload,
+                           std::string& fromOut, std::string& messageOut);
 
 // Test/DI seam for the LLM provider: installs `provider` (or NoOpProvider when null) into impl.
 // A free function (not a PilotImpl method) so the Qt Remote Objects generator never tries to
