@@ -79,11 +79,21 @@ complete list is reproduced here so nothing is hidden.
    authenticates nothing — authenticity comes only from the ECDSA-secp256k1
    signature checked against the doer's *pinned* signing key.
 
+7. **`agent.cancel` has no refund path — by design, because there is nothing to
+   refund.** The asker pays the doer only on the doer's terminal `completed` reply
+   (`settleOutboundReply`); `accepted` / `working` / `input-required` never settle
+   and `failed` / `canceled` / `rejected` never pay. So a task cancelled before
+   completion has moved no money. The other side of that design: a task cannot
+   be cancelled once it is `completed`, and its payment is final. An escrow-style
+   refund (pay on acceptance, claw back on cancel) is the future model described in
+   [`docs/payment-model.md`](docs/payment-model.md) and needs an on-chain program.
+
 **What would close them.** (1) an `owner-execute`/`owner-approve-task` command that
 resumes a parked risky inbound task; (2) offloading `agent.ask` LLM execution off
 the delivery thread; (3) an out-of-band identity attestation to defeat first-seen
 squatting; (4) on-demand card fetch at settlement time; (5) finer-grained outbound
-state journaling; (6) a documented canonical-JSON spec independent of Qt.
+state journaling; (6) a documented canonical-JSON spec independent of Qt; (7) an
+escrow program on LEZ, if pay-before-completion is ever wanted.
 
 ---
 
@@ -115,15 +125,20 @@ trusted code, not a defense against untrusted code.**
 
 ---
 
-## 4. Build & test — CI-verified green; real on-chain settlement still manual
+## 4. Build & test — unit suite green; the end-to-end CI job was rewritten on 2026-09-04 and awaits its first run
 
-**What it is.** The module **builds**, the full **unit suite (109 tests) passes**,
-and the **end-to-end job passes** in CI — pilot + its dependencies load into the
-`logoscore` runtime against a **standalone LEZ sequencer**, the echo round-trip
-works, and all 22 skills are present. (CI run on the default branch, all three jobs:
-Build C++ Module, Build Nim CLI, E2E.) What is **not** yet exercised in automation is
-**real on-chain settlement** — funding/spending with RISC0 proofs — and the **live
-two-agent A2A round trip**; those remain the manual / video path.
+**What it is.** The module **builds** and the full **unit suite (188 tests) passes**.
+The end-to-end CI job used to boot a Docker devnet sequencer on port 8080 that the
+wallet never talked to (the module defaults to `:3040`, `PILOT_SEQUENCER_ADDR` was
+never set, `initialize` was never called, and the only wallet line was `|| true`) —
+so its "E2E OK" proved that four modules load and echo answers, nothing about money.
+On 2026-09-04 it was replaced by a job that runs the same `./demo.sh` a reviewer runs
+from a clean clone, against the **public testnet**, with every step asserted: load,
+23 skills, echo, self-funding from the faucet verified on chain, a spend through the
+spending FSM verified by `getTransaction` and the recipient's balance, and the vault
+round-trip. That job has **not run yet** at the time of writing; its status is
+whatever the Actions tab shows. What remains outside automation is the **shielded
+leg** (a real RISC0 proof, ~16 GB of RAM) and the **live two-agent A2A round trip**.
 
 **Why CI rather than local.** A local build is infeasible on the development box:
 building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RISC0
@@ -144,65 +159,66 @@ to confirm the on-chain behavior the unit/E2E suites do not assert.
 
 ---
 
-## 5. Testnet evidence & demo video — not met
+## 5. Testnet evidence & demo video — public-chain spending works; the evidence set and the video are not yet in the repo
 
-The following submission criteria are **not satisfied**:
+Status of the submission criteria:
 
-- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** not met.
+- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** not yet met (the recorded
+  runs below are single operations, not the three use cases).
 - **F10 — three agents deployed on the public testnet, one per skill category
   (Storage, Messaging, Blockchain), each with reproducible deployment steps and
-  on-chain evidence:** not met. (An earlier revision of this document quoted the
-  pre-2026-05-25 wording, "≥ 5 third-party deployments"; the criterion has been
-  the three-agents-on-testnet form since then.)
-- **Supportability #1 — public testnet deployment:** not met.
+  on-chain evidence:** not yet met. The Blockchain agent's spend path is live (see
+  below); the three deployments and their evidence files are not yet committed.
+  (An earlier revision of this document quoted the pre-2026-05-25 wording, "≥ 5
+  third-party deployments"; the criterion has been the three-agents-on-testnet
+  form since then.)
+- **Supportability #1 — public testnet deployment:** partially met — one agent has
+  registered, been funded, and spent on the public testnet from this module; the
+  reproducible steps are not yet written up.
 
-**Why.** Every demonstration to date runs against a **local sequencer**
-(`run-sequencer.sh` in dev mode, `run-sequencer-realproof.sh` with real proofs),
-not a public network.
+**What is proven on the public testnet** (`https://testnet.lez.logos.co`, not
+auth-gated; every item below is a chain read via `getAccount` / `getTransaction`,
+not a module log line):
 
-An earlier revision of this document said no public LEZ testnet existed. **That is
-no longer true**, and the correction matters more than the excuse: a public
-endpoint is live at `https://testnet.lez.logos.co` and it is **not** auth-gated
-(re-verified 2026-08-25: plain JSON-RPC POSTs succeed on read and write methods,
-no API key or allowlist; the auth wall is on the L1 testnet, a different service).
-So missing infrastructure is not the blocker.
+- 2026-08-27: `lez_core` re-pinned to the module revision tracking **LEZ v0.2.2**
+  (branch `feat/lez-v0.2.2`). 2026-08-29: all five program image IDs the testnet's
+  `getProgramIds` returns are **byte-identical** to the pinned build's. The version
+  gap an earlier revision of this section described is closed.
+- 2026-08-29: `register_public_account` and the piñata `claim_pinata` issued by
+  Pilot's own funding code were **mined** — the account it created shows
+  `program_owner = authenticated_transfer`, balance 150, nonce 1.
+- 2026-09-02: a **public transfer** between two accounts this wallet owns was
+  **mined in one block** (tx `1bbd306b…`; sender 150 → 140, receiver 150 → 160,
+  both nonces 1 → 2). A public transfer is signed by the client and proven by the
+  sequencer, so it needs **no client-side RISC0 proof**. `wallet.send` exposes
+  this rail as the `public:<64-hex account id>` recipient form, spending from the
+  public account the faucet credited.
 
-What blocks these criteria is a **version gap on our side**, verified 2026-08-25
-against the live endpoint:
+**What is not proven, and why.**
 
-- The testnet is **not** the v0.2.0 an earlier note assumed. Its chain restarted on
-  2026-08-05 (block 2 timestamp), the day LEZ v0.2.2 shipped, and the docs describe
-  it as "Testnet v0.2.1". This repo pins `lez_core` → logos-execution-zone
-  `571f35b3` (v0.2.0 + 13 commits) with circuits v0.5.3.
-- The RPC surface still matches (`checkHealth`, `getLastBlockId`, `getProgramIds`,
-  `getAccount` all answer the pinned client's method names), so **reads and sync
-  work**.
-- **State changes will be rejected.** The testnet's `getProgramIds` lists program
-  image IDs for `pinata` / `authenticated_transfer` / `token` that differ from the
-  `program_owner` IDs our pinned wallet-ffi writes into `wallet_storage.json`; a
-  proof built by the pinned stack targets programs the testnet does not know.
-  v0.2.1/v0.2.2 also carry breaking wallet changes (viewing-key binding, note
-  ordering, two-tip chain state, action structs).
-- The funding route **does** exist publicly: the piñata proof-of-work program is
-  the faucet, the same well-known account Pilot claims locally is live there with
-  a large balance at difficulty 3, and `wallet pinata claim` is the documented
-  procedure. Pilot's self-funding code is the right shape; it is the pinned
-  program IDs that stop it.
-
-In addition:
-
+- The **shielded step** (public → the agent's private account, and every private
+  spend after it) requires a real proof: with `RISC0_DEV_MODE=1` the testnet
+  accepts the transaction into its mempool and never mines it (2026-08-29:
+  balances unchanged after the wait). With `RISC0_DEV_MODE=0` the prover holds
+  ~4.5 GB inside the 5 GB WSL VM of the 8 GB development laptop, runs swap-bound
+  for hours, and has not completed there (six attempts, 2026-08-29 to 2026-09-04;
+  the last one proved for four hours of VM time, swap-bound throughout, before the
+  module's own four-hour ceiling on the wallet call expired). It is a memory
+  problem, not a protocol one: the same proof is
+  documented at ~44 min on this box against a local sequencer when the box is
+  otherwise idle, and at minutes on a 16 GB machine. Until it completes, the
+  agent's private balance on the public testnet is 0 and all its spending goes
+  over the public rail.
 - The `RISC0_DEV_MODE=0` real-proof scripts **are** committed
   (`run-sequencer-realproof.sh`, `demo-realproof.sh`, both with a `REHEARSE=1`
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
   committed.**
 
-**What would close it.** Move the `lez_core` pin to a module revision that
-tracks LEZ ≥ v0.2.2 (the module repo bumped on 2026-08-05), accept the toolchain
-cascade the flake comment warns about, re-verify the piñata claim and the
-"Nullifier already seen" fix on that revision, point `wallet_config.json`'s
-`sequencer_addr` at the public testnet, deploy the three category agents there
-with their steps and explorer links, re-run the three use cases, and record the
-narrated real-proof video.
+**What would close it.** Commit the three category agents' deployment steps and
+their recorded transaction hashes with a re-verification script that reads them
+back from the chain; run the three use cases against those agents; finish one
+shielded funding proof on a ≥ 16 GB machine (a public CI runner qualifies) so the
+private rail is demonstrated too; record the narrated video.
 
 ---
 

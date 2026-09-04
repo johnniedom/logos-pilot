@@ -41,7 +41,7 @@ Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix fi
 | 4 | `logoscore call pilot getPendingSpends` | the 100 shown as `NOTIFIED`, awaiting approval |
 | 5 | `logoscore call pilot approveSpend <request_id>` | owner approves → executes |
 
-## Demo 4 — Paid agent marketplace / 2-agent A2A ✅ (verified: discover→message→task→pay, 13/14; run via `test-two-agents-docker.sh`, needs nwaku container up)
+## Demo 4 — Paid agent marketplace / 2-agent A2A ✅ (verified: discover→message→task→pay, 30/30 on 2026-08-28; run via `test-two-agents-docker.sh`, needs nwaku container up)
 | # | Action (run) | On screen |
 |---|---|---|
 | 1 | Agent B: `logoscore call pilot agentCard` | B advertises a skill + LEZ price |
@@ -54,7 +54,7 @@ Status legend: ✅ verified working · 🟡 logic works, transfer broken (fix fi
 
 ### Status — ALL FOUR VERIFIED ✅ (2026-06-05)
 - Demo 1 funding, Demo 2 vault, Demo 3 spending threshold (30 auto / 60 held→approved),
-  Demo 4 two-agent A2A (13/14, host+Docker) — all working.
+  Demo 4 two-agent A2A (30/30 on 2026-08-28, host+Docker) — all working.
 - Demo 3 `transfer_private` fixed (use `transfer_private_owned` for owned recipient by id;
   parse the result `success` field, not substrings).
 - #35 real proofs (`RISC0_DEV_MODE=0`) verified end-to-end: shielded 77 transfer → private balance 77.

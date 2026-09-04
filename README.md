@@ -49,23 +49,30 @@ docker-compose up -d
 ### Step 4: Deploy and chat
 
 ```bash
-# Deploy: creates identity, selects LLM, publishes Agent Card
+# Deploy: creates identity, selects LLM, publishes Agent Card (local sequencer by default)
 ./pilot-cli/result/bin/pilot deploy
+
+# Same, against the public LEZ testnet (points the wallet at https://testnet.lez.logos.co)
+./pilot-cli/result/bin/pilot deploy --testnet
+
+# Headless deploy (no terminal: CI, a remote box, a systemd unit) — name provider + model in the env
+PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-sonnet-4-6-20250514 \
+  PILOT_OWNER_NPK=<your npk> ./pilot-cli/result/bin/pilot deploy
 
 # Chat: starts daemon, LLM-powered conversation
 ./pilot-cli/result/bin/pilot chat
 ```
 
-### Step 5: Test suites (unit suite green in CI; integration suites run locally against a sequencer)
+### Step 5: Test suites (unit suite in CI; the E2E job runs demo.sh against the public testnet; two-agent suite runs locally)
 
 ```bash
-# Unit tests — no runtime needed (green in CI: build + unit suite + E2E)
+# Unit tests — no runtime needed (run in CI on every push)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L && cd ..
 
 # Single-agent integration (28) — needs sequencer
 ./test-phases.sh
 
-# Two-agent Docker (14) — needs sequencer + Docker
+# Two-agent Docker (30 checks) — needs sequencer + Docker
 pkill -9 -f logos_host_qt; pkill -9 -f logoscore
 rm -f ~/.cache/storage/dht/providers/LOCK
 ./test-two-agents-docker.sh
@@ -78,9 +85,9 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 | `run-sequencer.sh` | First | Boots the standalone LEZ sequencer in dev mode on **:3040** (the endpoint the wallet reads), **fresh genesis each start — an already-funded wallet goes stale with the wiped chain and must be re-funded** (to keep a funded wallet, boot without the wipe: see [docs/troubleshooting.md](docs/troubleshooting.md)) — needs a local logos-execution-zone build (see the script header) |
 | `docker-compose up -d` | First | Starts Waku node on port 30303 |
 | `setup-modules.sh` | After build | Installs all modules from nix cache to `/tmp/pilot-logoscore/modules` |
-| `demo.sh` | Anytime | Automated demo: build + verify + smoke test |
+| `demo.sh` | Anytime, from a clean clone | End-to-end against the public testnet: build → load → 23 skills → self-fund from the faucet → spend through the spending FSM (verified on chain) → vault round-trip; every step asserted, exit 1 on failure |
 | `test-phases.sh` | After setup | 28 single-agent integration tests |
-| `test-two-agents-docker.sh` | After setup | 14 two-agent cross-network tests |
+| `test-two-agents-docker.sh` | After setup | 30 two-agent cross-network checks incl. a paid task settled on chain |
 | `install-basecamp.sh` | For GUI | Installs pilot into Logos Basecamp |
 | `run-sequencer-realproof.sh` | For the spec demo | Boots the standalone LEZ sequencer with **real** RISC0 proofs (`RISC0_DEV_MODE=0`) — needs the prerequisites below |
 | `demo-realproof.sh` | For the spec demo | End-to-end flow against the real-proof sequencer (the flow the demo video captures) |
@@ -103,7 +110,7 @@ So the fastest way to see the agent run is **build → `setup-modules.sh` → `p
 ### Real-proof demo (`RISC0_DEV_MODE=0`)
 
 The spec requires an end-to-end demo with **real** RISC0 proofs, shown on camera. Unlike the
-dev-mode `demo.sh` (which clone-and-runs against the Docker demo-sequencer), the real-proof
+public-rail `demo.sh` (which clone-and-runs against the public testnet with no client proof), the real-proof
 flow needs a standalone LEZ sequencer + the RISC0 toolchain — a documented prerequisite, since
 the sequencer is a separate project not bundled in this repo.
 
@@ -262,7 +269,7 @@ Agent-to-agent coordination follows the [A2A specification](https://a2a-protocol
 
 Only `agent.ask` (a pure-compute LLM query) is served autonomously to a stranger; every other inbound storage/messaging/wallet/program skill is owner-gated (`input-required`). See [docs/security-model.md §4/§6](docs/security-model.md).
 
-- **Identity**: shielded LEZ account via `create_account_private` / `get_private_account_keys` on `logos_execution_zone`; plus a separate ECIES messaging/signing keypair
+- **Identity**: shielded LEZ account via `create_account_private` / `get_private_account_keys` on `lez_core`; plus a separate ECIES messaging/signing keypair
 - **Encryption**: ECIES (secp256k1) for owner channel + agent inboxes + file sharing, AES-256-GCM for files
 - **Key storage**: Wallet keys in LEZ wallet module, agent ECIES keypair in SQLite config
 
@@ -285,7 +292,7 @@ See [docs/security-model.md §5](docs/security-model.md) for the trust model and
 
 | Module | Purpose |
 |--------|---------|
-| `logos_execution_zone` | Shielded wallet, account creation, transfers |
+| `lez_core` | Shielded wallet, account creation, transfers |
 | `delivery_module` | Waku pub/sub messaging transport (also carries the E2E owner channel) |
 | `storage_module` | Encrypted file upload/download |
 
@@ -297,7 +304,7 @@ All commands run from `pilot-module/`. Nix flakes must be enabled.
 nix --extra-experimental-features "nix-command flakes" build          # Module binary (.so)
 nix --extra-experimental-features "nix-command flakes" build .#lgx    # Installable package (.lgx)
 nix --extra-experimental-features "nix-command flakes" build .#install       # Module + manifest for logoscore
-nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (44)
+nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (188)
 nix --extra-experimental-features "nix-command flakes" build .#include       # Module headers (for dependents)
 ```
 
@@ -322,7 +329,7 @@ Version:      1.0.0
 Description:  Autonomous AI agent with wallet, storage, and messaging on LEZ
 Author:       Johnnie Dom
 Type:         core
-Dependencies: logos_execution_zone, delivery_module, storage_module
+Dependencies: lez_core, delivery_module, storage_module
 
 Plugin Methods:
 ===============
@@ -377,7 +384,7 @@ Note: Calling methods (e.g. `logoscore call pilot echo hello`) requires the depe
 
 The pilot module depends on 3 other Logos modules. These must be installed in Logos Basecamp first:
 
-1. `logos_execution_zone` — Shielded wallet and account creation
+1. `lez_core` — Shielded wallet and account creation
 2. `delivery_module` — Waku pub/sub messaging (and the E2E-encrypted owner channel)
 3. `storage_module` — Encrypted file storage
 
@@ -480,7 +487,7 @@ Chat features:
 docker-compose up -d
 ```
 
-### Suite 1: Unit Tests (44 tests)
+### Suite 1: Unit Tests (188 tests)
 
 Tests crypto, skill registry, LLM factory, and core module behavior. No runtime needed.
 
@@ -509,30 +516,32 @@ Tests cover:
 - Phase 5: A2A (card, discover, task, subscribe, cancel)
 - Meta: skills, status, configure
 
-### Suite 3: Two-Agent Integration (14 tests)
+### Suite 3: Two-Agent Integration (30 checks)
 
 Tests cross-agent communication with Agent A on host and Agent B in Docker.
 
 ```bash
 # Requires: sequencer + Waku node running, Docker available
-./test-two-agents-docker.sh   # runs all 14 tests
+./test-two-agents-docker.sh   # prints "Results: N passed, M failed", exits non-zero on any failure
 ```
 
-Tests cover:
+Checks cover:
 - Both agents create unique identities on the sequencer
 - Each agent is opened for hire, then asserted to be listening on the inbox its own
   Agent Card advertises (the check that catches an unhireable agent)
-- Agent A publishes its Agent Card. **Agent B does not discover it** — broadcast
-  discovery does not work today (see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) §7).
-  A peer becomes usable by importing its card out-of-band: `pilot peer add <card.json>`
+- Agent A publishes its Agent Card and **Agent B discovers it** over the broadcast
+  discovery topic (broken until 2026-07-28, see
+  [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) §7 for what was wrong). A peer can
+  also be imported out-of-band: `pilot peer add <card.json>`
 - Bidirectional encrypted messaging (A→B and B→A)
 - Storage upload + encrypted file key sharing
 - Full A2A task lifecycle (send task, subscribe, cancel)
-- Cross-agent wallet transfer
+- Cross-agent wallet transfer, and a **paid task** whose settlement is asserted on the
+  chain: the payer's balance must drop by exactly the declared price within four blocks
 
-Not everything here passes. The suite reports its failures rather than skipping them —
-`test-two-agents-docker.sh` exits non-zero with a count, and the discovery and paid-task
-phases are currently among the failures. See §7 for exactly what does and does not work.
+The suite reports failures rather than skipping them. Last full run on the development
+box: 2026-08-28, 30 of 30 passed (direct transfer 100 → 99, paid task 99 → 94, both
+read back from the chain). It runs against a local dev-mode sequencer, not in CI.
 
 Docker setup (no installation required):
 - Agent B runs in `ubuntu:22.04` container with `/nix/store` mounted read-only

@@ -20,7 +20,7 @@ git clone <repo> && cd logos-pilot
 from the Cachix cache), boots the standalone **LEZ devnet sequencer via Docker
 (:8080)**, loads the agent in the real logoscore daemon, and runs:
 - **Reproducible core** (the same flow CI's e2e job asserts): load pilot + deps →
-  21 skills → echo round-trip.
+  23 skills → echo round-trip.
 - **Demo 1 (funding):** agent self-funds against the sequencer → balance.
 - **Demo 2 (spending threshold):** small payment auto-executes, big one is held for
   owner approval, then approved.

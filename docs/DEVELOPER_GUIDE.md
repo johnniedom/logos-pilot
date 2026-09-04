@@ -115,7 +115,7 @@ Modules run in separate `logos_host_qt` processes. They communicate via Qt Remot
 #include <thread>
 #include <chrono>
 
-auto* wallet = logosAPI_->getClient("lez_wallet_module");
+auto* wallet = logosAPI_->getClient("lez_core");
 if (!wallet) return false;
 
 // Wait for replica connection (max 5s)
@@ -128,7 +128,7 @@ if (!wallet->isConnected()) {
 }
 
 // Now safe to call
-QVariant result = wallet->invokeRemoteMethod("lez_wallet_module", "open", configPath, storagePath);
+QVariant result = wallet->invokeRemoteMethod("lez_core", "open", configPath, storagePath);
 ```
 
 ### Available `LogosAPIClient` methods
@@ -202,7 +202,7 @@ sleep 2
 
 ### Module crash on cold start
 
-Modules sometimes crash on the first startup after a clean data wipe. This is a transient race condition in the Logos runtime — different modules crash each attempt (capability_module, chat_module, lez_wallet_module).
+Modules sometimes crash on the first startup after a clean data wipe. This is a transient race condition in the Logos runtime — different modules crash each attempt (capability_module, chat_module, lez_core).
 
 **Fix:** Run `./setup-modules.sh` to do a clean reinstall with smoke test, then deploy:
 
@@ -215,7 +215,7 @@ If deploy still fails, retry — the second or third attempt typically succeeds.
 
 ### Wallet storage persistence
 
-The `lez_wallet_module` stores wallet state in `$PILOT_DATA_DIR/wallet_storage/`. If this directory is deleted but `pilot.db` still has the old account ID, the wallet module reports "Null wallet handle" and balance calls fail.
+The `lez_core` stores wallet state in `$PILOT_DATA_DIR/wallet_storage/`. If this directory is deleted but `pilot.db` still has the old account ID, the wallet module reports "Null wallet handle" and balance calls fail.
 
 **Fix:** Delete both together — never delete `wallet_storage/` without also deleting `pilot.db`:
 
@@ -370,7 +370,7 @@ Agent A runs on the host. Agent B runs in a Docker container with its own networ
 # Prepare modules for Agent B (no storage_module)
 MODULES_B=/tmp/pilot-logoscore/modules-b
 mkdir -p $MODULES_B
-for m in capability_module lez_wallet_module delivery_module chat_module pilot; do
+for m in capability_module lez_core delivery_module chat_module pilot; do
   cp -r /tmp/pilot-logoscore/modules/$m $MODULES_B/$m
 done
 
@@ -390,7 +390,7 @@ docker run --rm -d \
 
 # Load modules
 LOGOSCORE=$(find /nix/store -maxdepth 3 -name logoscore -path "*logoscore-cli-bin*" -type f | head -1)
-for m in capability_module lez_wallet_module delivery_module pilot; do
+for m in capability_module lez_core delivery_module pilot; do
   docker exec pilot-agent-b $LOGOSCORE --config-dir /data/.logoscore load-module $m
 done
 
@@ -410,9 +410,9 @@ Key points:
 #### Updated for LEZ v0.1.2 (2026-06-03)
 
 The snippet above is the original shape; on the current stack apply these deltas (all baked into
-`test-two-agents-docker.sh`, verified 13/14):
+`test-two-agents-docker.sh`, last full run 2026-08-28: 30 of 30 checks):
 
-- Module renamed: `lez_wallet_module` → **`logos_execution_zone`** (in both the copy loop and load loop).
+- Module renamed: `lez_core` → **`logos_execution_zone`** (in both the copy loop and load loop).
 - Sequencer port is **3040**, not 8080: `PILOT_SEQUENCER_ADDR=http://host.docker.internal:3040`.
 - **The container MUST get the RISC0 environment** or Agent B's wallet/identity init dies and *every*
   B call returns an empty response (which then shows up on A's side as
@@ -449,7 +449,7 @@ Prerequisites: sequencer running (`./run-sequencer.sh`), Waku node running (`doc
 # Full automated test
 ./test-two-agents-docker.sh
 
-# Expected: 14/14 pass
+# Expected: "Results: 30 passed, 0 failed"
 ```
 
 ## Running Tests
@@ -457,14 +457,14 @@ Prerequisites: sequencer running (`./run-sequencer.sh`), Waku node running (`doc
 ### Test suites
 
 ```bash
-# Unit tests (44 tests, no runtime needed)
+# Unit tests (188 tests, no runtime needed)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Single-agent integration (28 tests, needs sequencer)
 ./run-sequencer.sh  # in another terminal
 ./test-phases.sh
 
-# Two-agent integration (14 tests, needs sequencer + Docker)
+# Two-agent integration (30 checks, needs sequencer + Docker)
 ./test-two-agents-docker.sh
 ```
 
@@ -636,7 +636,7 @@ The `--user-dir` flag isolates the instance with its own `modules/`, `plugins/`,
 
 | Level | What works | What doesn't |
 |-------|-----------|-------------|
-| Unit tests (`nix build .#unit-tests`) | All 44 tests, crypto, skills, LLM, core | No inter-module calls |
+| Unit tests (`nix build .#unit-tests`) | All 188 tests: crypto, skills, LLM, spending FSM, A2A, storage config | No inter-module calls |
 | logoscore inline (`-c ... --quit-on-finish`) | Load module, call methods, scripting | No dependency modules unless also loaded with `-l` |
 | logoscore daemon (`-D`) | Persistent runtime, load/unload, events, auth | No GUI |
 | Basecamp (`--user-dir`) | Everything — LogosAPI, inter-module, QML UI | Needs display or `QT_QPA_PLATFORM=offscreen` |
@@ -754,8 +754,8 @@ ls ~/.local/share/Logos/LogosBasecamp/modules/
 ```
 
 Use those exact names. Common mismatches:
-- `lez_wallet_module` (in spec) vs `liblogos_execution_zone_wallet_module` (installed name)
-- `wallet_module` vs `lez_wallet_module` — different modules entirely
+- `lez_core` (in spec) vs `liblogos_execution_zone_wallet_module` (installed name)
+- `wallet_module` vs `lez_core` — different modules entirely
 
 ### Installing dependency modules from nix store
 

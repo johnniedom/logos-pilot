@@ -150,13 +150,13 @@ Restarting `pilot chat` alone does not help if the sequencer is still down.
 **Cause:** the sequencer stopped answering on `:3040` while the transfer was
 being built. Upstream wallet code unwraps that connect error
 (`wallet/src/privacy_preserving_tx.rs:223`) and the panic **aborts the
-logos_execution_zone process** — so the agent no longer has a wallet module to
+lez_core process** — so the agent no longer has a wallet module to
 answer any call. The log shows it plainly:
 
 ```
 [wallet-ffi] Failed to get block height: Connection refused (os error 111)
 panicked at wallet/src/privacy_preserving_tx.rs:223: unwrap() on an Err value: client error (Connect)
-[critical] Module process crashed: logos_execution_zone
+[critical] Module process crashed: lez_core
 ```
 
 **No tokens moved.** The spending FSM records the failure correctly; the

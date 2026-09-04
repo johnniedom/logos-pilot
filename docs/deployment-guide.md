@@ -31,7 +31,7 @@ cd pilot-module
 git init && git add -A
 nix build --extra-experimental-features 'nix-command flakes'
 
-# Run unit tests (44/44)
+# Run unit tests (188)
 nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Build LGX package
@@ -56,6 +56,15 @@ This installs pilot + all dependency modules (wallet, delivery, storage, chat, c
 
 ```bash
 ./pilot-cli/result/bin/pilot deploy
+```
+
+Headless (no terminal: CI, a remote box, a systemd unit) — the two arrow selectors are skipped when
+`PILOT_LLM_PROVIDER` (and optionally `PILOT_LLM_MODEL`) are set; the API key comes from the provider's
+env var and the owner key from `PILOT_OWNER_NPK`, so the whole deploy needs no keystrokes:
+
+```bash
+PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-sonnet-4-6-20250514 \
+  PILOT_OWNER_NPK=<npk> ./pilot-cli/result/bin/pilot deploy
 ```
 
 The wizard walks you through:
@@ -106,7 +115,7 @@ Pilot Chat
 
 > what can you do?
   pilot │ I can manage your wallet, encrypt and store files, send messages,
-        │ discover other agents, and execute on-chain transactions. 21 skills total.
+        │ discover other agents, and execute on-chain transactions. 23 skills total.
 ```
 
 ### Slash Commands
@@ -121,7 +130,7 @@ Pilot Chat
 | `/upload <path> <label>` | Upload encrypted file |
 | `/download <cid-or-label> <path>` | Download and decrypt file |
 | `/files` | List stored files |
-| `/skills` | List all 21 skills |
+| `/skills` | List all 23 skills |
 | `/status` | Agent status |
 | `/discover` | Discover peer agents |
 | `/help` | Show commands |
@@ -130,31 +139,33 @@ Pilot Chat
 ## Step 6: Run Tests
 
 ```bash
-# Unit tests (44)
+# Unit tests (188)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Single-agent integration (28) — needs sequencer
 cd .. && ./test-phases.sh
 
-# Two-agent Docker (14) — needs sequencer + Docker
+# Two-agent Docker (30 checks) — needs sequencer + Docker
 pkill -9 -f logos_host_qt; pkill -9 -f logoscore
 rm -f ~/.cache/storage/dht/providers/LOCK
 ./test-two-agents-docker.sh
 ```
 
-Expected: 86/86 pass.
+Expected: "Results: 30 passed, 0 failed" (last full run 2026-08-28).
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PILOT_DATA_DIR` | `/tmp/pilot-data` | Agent data directory (SQLite, wallet, logs) |
-| `PILOT_SEQUENCER_ADDR` | `http://127.0.0.1:3040` | LEZ sequencer endpoint |
+| `PILOT_SEQUENCER_ADDR` | `http://127.0.0.1:3040` | LEZ sequencer endpoint; `pilot deploy --testnet` sets it to `https://testnet.lez.logos.co` (and `PILOT_CHAIN_WAIT_SECS=600`) unless already set |
 | `PILOT_WAKU_ADDR` | `/ip4/127.0.0.1/tcp/30303` | Waku static peer |
 | `PILOT_TCP_PORT` | `60000` | Waku relay TCP port |
 | `PILOT_WAKU_MODE` | `Core` | `Core` (full relay) or `Edge` (lightweight) |
 | `PILOT_NAT` | (auto) | NAT config: `extip:127.0.0.1` for WSL |
 | `ANTHROPIC_API_KEY` | — | Anthropic Claude API key |
+| `PILOT_LLM_PROVIDER` | — | Headless `pilot deploy`: `anthropic`, `openai`, `deepseek`, `google`, `openrouter`, `groq` or `none` — skips the provider selector (which needs a terminal) |
+| `PILOT_LLM_MODEL` | — | Headless `pilot deploy`: model id — skips the model selector |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `DEEPSEEK_API_KEY` | — | DeepSeek API key |
 | `GOOGLE_API_KEY` | — | Google Gemini API key (from aistudio.google.com) |

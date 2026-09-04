@@ -65,14 +65,14 @@ pilot-module/src/
 All module calls go through Qt Remote Objects via LogosAPI (Decision D11):
 
 ```cpp
-auto* wallet = logosAPI_->getClient("lez_wallet_module");
+auto* wallet = logosAPI_->getClient("lez_core");
 QVariant result = wallet->invokeRemoteMethod(
-    "lez_wallet_module", "getBalance",
+    "lez_core", "getBalance",
     QString::fromStdString(accountId), QVariant(false));
 ```
 
 Dependencies (declared in `metadata.json`):
-- `lez_wallet_module` — shielded accounts, transfers, program calls
+- `lez_core` — shielded accounts, transfers, program calls
 - `delivery_module` — Waku message delivery (owner channel, A2A, messaging skills)
 - `storage_module` — chunked file upload/download (Codex)
 - `chat_module` — listed but bypassed (see [Owner Channel](owner-channel.md))
@@ -106,7 +106,7 @@ Providers: `AnthropicProvider` (Claude API), `OpenAIProvider` (OpenAI, Gemini, O
 
 ## Skill Interface
 
-All 21 skills registered through `SkillRegistry` at construction. Third parties implement `PilotSkill` abstract class and drop `.so` into plugins directory.
+All 23 skills registered through `SkillRegistry` at construction. Third parties implement `PilotSkill` abstract class and drop `.so` into plugins directory.
 
 See [Skill Interface Documentation](skill-interface.md).
 

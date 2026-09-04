@@ -10,7 +10,7 @@ See the implementation plan at `plans/pilot-implementation.md`, and the design d
 
 ```bash
 cd pilot-module && git init && git add -A && nix build
-nix build .#unit-tests -L   # 44 tests — crypto, skills, LLM, core
+nix build .#unit-tests -L   # 188 tests — crypto, skills, LLM, spending, A2A, storage config
 ```
 
 ### logoscore CLI (headless runtime)
@@ -60,7 +60,7 @@ See `docs/DEVELOPER_GUIDE.md` for the full testing matrix.
 ## Rules
 
 - **Universal C++ module.** Pure C++ only (std::string, int64_t, std::vector<T>). No Qt types in pilot_impl.h. Qt glue is auto-generated.
-- **Dependencies (metadata.json):** `["lez_wallet_module", "delivery_module", "storage_module", "waku_module", "chat_module"]` — short-form names, verified from source.
+- **Dependencies (metadata.json):** `["lez_core", "delivery_module", "storage_module"]` — short-form names, verified from source.
 - **Nix schema:** `"nix": { "packages": { "build": [], "runtime": [] }, "cmake": { "find_packages": ["SQLite3"] } }` — NOT "buildInputs".
 - **Inter-module calls:** `logosAPI->callModule("module_name", "method", {args})` — Qt Remote Objects, not FFI (D11).
 - **Identity:** `KeyChain::new_os_random()` via wallet-ffi. Do NOT use Python identity or custom key generation (prior submission rejected for this).
