@@ -68,7 +68,7 @@ jobs:
           echo "$R0" >> "$GITHUB_PATH"
           "$R0/r0vm" --version || (echo "r0vm not runnable" && exit 1)
 
-      - name: Run ./demo.sh with real proofs (strict: the shielded leg must land on chain)
+      - name: "Run ./demo.sh with real proofs (strict: the shielded leg must land on chain)"
         env:
           LOGOSCORE_BIN: ${{ github.workspace }}/result-logoscore/bin/logoscore
           LGPM_BIN: ${{ github.workspace }}/result-lgpm/bin/lgpm
