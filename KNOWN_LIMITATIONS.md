@@ -125,7 +125,7 @@ trusted code, not a defense against untrusted code.**
 
 ---
 
-## 4. Build & test — unit suite green; the end-to-end CI job was rewritten on 2026-09-04 and awaits its first run
+## 4. Build & test — unit suite green; the end-to-end CI job settles a real spend on the public testnet
 
 **What it is.** The module **builds** and the full **unit suite (188 tests) passes**.
 The end-to-end CI job used to boot a Docker devnet sequencer on port 8080 that the
@@ -136,9 +136,12 @@ On 2026-09-04 it was replaced by a job that runs the same `./demo.sh` a reviewer
 from a clean clone, against the **public testnet**, with every step asserted: load,
 23 skills, echo, self-funding from the faucet verified on chain, a spend through the
 spending FSM verified by `getTransaction` and the recipient's balance, and the vault
-round-trip. That job has **not run yet** at the time of writing; its status is
-whatever the Actions tab shows. What remains outside automation is the **shielded
-leg** (a real RISC0 proof, ~16 GB of RAM) and the **live two-agent A2A round trip**.
+round-trip. First green run 2026-09-04 (run 33880060967, 21 minutes on a hosted runner
+that had never seen the chain): faucet claim into `6U4d…` verified at 150, spend
+tx `1398d754…c273` mined in block 37450, sender 150 → 149, recipient 170 → 171, all
+read back with `getAccount` / `getTransaction`. What remains outside this job is the
+**shielded leg** (a real RISC0 proof, ~16 GB of RAM — `real-proof.yml` runs it by
+hand on a 16 GB runner) and the **live two-agent A2A round trip**.
 
 **Why CI rather than local.** A local build is infeasible on the development box:
 building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RISC0
