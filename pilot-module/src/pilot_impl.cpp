@@ -460,9 +460,10 @@ void PilotImpl::handleInboundMessage(const std::string& topic, const std::string
         ECIESCiphertext ct = eciesDeserialize(payload);
         std::vector<uint8_t> plain = eciesDecrypt(agentEciesPriv_, ct);
         std::string message(plain.begin(), plain.end());
-        // M1: authenticate the owner payload FAIL-OPEN. Raw/legacy text is accepted (owner
-        // never locked out); a SIGNED envelope must pass signature + TOFU pin + replay nonce,
-        // else it is dropped silently (no LLM processing / no cost).
+        // M1: authenticate the owner payload. A SIGNED envelope must pass signature + TOFU pin
+        // + replay nonce. Unsigned text is accepted only while no owner is bound (setup
+        // window); once bound, or once a signed owner is pinned, it is dropped silently (no
+        // LLM processing, no cost, no spend). See verifyOwnerMessage.
         std::string inner;
         if (verifyOwnerMessage(message, inner)) {
             std::string response = processOwnerMessage(inner);
@@ -740,8 +741,25 @@ bool PilotImpl::verifyOwnerMessage(const std::string& raw, std::string& innerOut
         }
     }
 
-    // FAIL-OPEN: raw text, a non-object, or an object without a _logos.signature is a legacy
-    // unsigned owner message and is accepted unchanged so the owner is never locked out.
+    // Unsigned text (raw text, a non-object, or an object without a _logos.signature) is
+    // accepted ONLY while no owner is bound — the setup window, so a first owner is never
+    // locked out. Once an owner key is bound (owner.npk) or a signed owner has been pinned
+    // (owner.signing_key), unsigned text is dropped. The channel is encrypted to a key the
+    // Agent Card publishes, so anyone who has read the card can put plaintext on it, and with
+    // an LLM configured that text reached the model — whose tool use can spend within the
+    // autonomous limit. It was fail-open until 2026-09-04; test_owner_channel.cpp pins the rule.
+    if (!ownerNpk_.empty()) return false;
+    if (db_) {
+        std::string pinned;
+        sqlite3_stmt* sel = nullptr;
+        if (sqlite3_prepare_v2(db_, "SELECT value FROM config WHERE key='owner.signing_key';",
+                               -1, &sel, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(sel) == SQLITE_ROW && sqlite3_column_text(sel, 0))
+                pinned = reinterpret_cast<const char*>(sqlite3_column_text(sel, 0));
+        }
+        sqlite3_finalize(sel);
+        if (!pinned.empty()) return false;
+    }
     innerOut = raw;
     return true;
 }

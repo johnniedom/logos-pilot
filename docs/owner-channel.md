@@ -190,6 +190,18 @@ Step 5: ECIES decrypt with agent's private key
    c. AES-256-GCM decrypt: ciphertext + aes_key + IV + tag = plaintext
    d. If tag verification fails, message was tampered with — discard
 
+Step 5b: Authenticate the sender (verifyOwnerMessage)
+   Decrypting proves nothing about WHO sent it: the channel is encrypted to the key the
+   Agent Card publishes, so anyone who has read the card can put plaintext on it.
+   → Signed envelope {"message": "...", "_logos": {"signing_key", "signature", "nonce"}}:
+     the signature must verify over the envelope (signature field removed), the signing key
+     must equal the one pinned on first signed contact (config owner.signing_key, TOFU), and
+     the nonce must exceed the last one seen (config owner.last_nonce). Any failure — drop.
+   → Unsigned text: accepted only while NO owner is bound (the setup window, so a first
+     owner is never locked out). Once owner.npk is set, or a signed owner has been pinned,
+     unsigned text is dropped without reaching the LLM or any skill (fail-open until
+     2026-09-04; pinned by tests/test_owner_channel.cpp).
+
 Step 6: Route to processOwnerMessage(plaintext)
    → Starts with "/"? Slash command, route to dispatchSkill()
    → Freetext + LLM configured? Send to llmProvider_->chat(), parse response, dispatchSkill()

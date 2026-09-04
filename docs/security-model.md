@@ -20,7 +20,7 @@ autonomous execution is the narrow, explicitly-gated exception.
 The agent holds **two** distinct cryptographic identities, by design:
 
 1. **A shielded LEZ account (payment identity).** Created via the wallet module
-   (`logos_execution_zone`) `create_account_private` / `get_private_account_keys`.
+   (`lez_core`) `create_account_private` / `get_private_account_keys`.
    This yields the agent's `npk` (nullifier public key) and viewing key. The `npk`
    is the agent's on-chain payment identity — it is what an A2A peer pays, and what
    appears as `_logos.payout` and `_logos.npk` on the agent's Agent Card. The
@@ -60,6 +60,19 @@ It carries spend-approval prompts, status, and owner commands (`/approve`, `/rej
   third-party chat client cannot open or read the owner channel. This is a
   deliberate confidentiality property, not a limitation we hide: there is no
   plaintext owner channel.
+- **Authentication: confidentiality is not authority.** The channel is encrypted to
+  the ECIES key the agent's own Agent Card publishes, so anyone who has read the
+  card can put a message on it. Who the agent *obeys* is decided by
+  `verifyOwnerMessage`: a signed envelope (`{"message", "_logos": {"signing_key",
+  "signature", "nonce"}}`) must verify, its signing key must match the one pinned on
+  the owner's first signed contact (TOFU, `config.owner.signing_key`), and its nonce
+  must strictly increase (`config.owner.last_nonce`). Unsigned text is accepted only
+  while **no owner is bound** — the setup window, so a first owner is never locked
+  out. Once `owner.npk` is set, or a signed owner has been pinned, unsigned text is
+  dropped before it reaches the LLM or any skill. (Fail-open until 2026-09-04; the
+  rule is pinned by `tests/test_owner_channel.cpp`.) Before an owner is bound the
+  agent's own replies go out unencrypted, which is why binding the owner is part of
+  `pilot deploy`.
 
 If the owner cannot be reached, above-threshold actions are **not** executed (see §3).
 

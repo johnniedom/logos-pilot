@@ -37,6 +37,7 @@ logos_test(
         test_skills.cpp
         test_llm.cpp
         test_spending.cpp
+        test_owner_channel.cpp
         test_a2a_inbox.cpp
         test_a2a_outbound.cpp
         test_agent_card.cpp
