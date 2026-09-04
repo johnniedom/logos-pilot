@@ -346,6 +346,10 @@ void PilotImpl::resetStaleIdentity() {
     if (db_) {
         sqlite3_exec(db_, "DELETE FROM agent_identity WHERE id=1;", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "DELETE FROM config WHERE key='funded';", nullptr, nullptr, nullptr);
+        // The persisted funding account's keys lived in the wallet that diverged; forget it
+        // too, or the next funding would try to spend from an account this wallet cannot sign for.
+        sqlite3_exec(db_, "DELETE FROM config WHERE key='funding.public_account';",
+                     nullptr, nullptr, nullptr);
     }
     agentAccountId_.clear();
     agentNpk_.clear();
@@ -418,6 +422,15 @@ bool PilotImpl::initWallet() {
             walletCfg["seq_tx_poll_max_blocks"] = 60;
             walletCfg["seq_poll_max_retries"] = 60;
             walletCfg["seq_block_poll_max_amount"] = 100;
+            // The wallet calibrates every sequencer it has no statistics for with
+            // `calibration_limit` sequential latency probes BEFORE open/create returns —
+            // 100 by default. Against a local sequencer that is milliseconds; against the
+            // public testnet it is 100 internet round-trips (minutes on a slow link) spent
+            // measuring the latency of the only sequencer we have. Ten samples are plenty.
+            QJsonObject multi;
+            multi["distribution_limit"] = 1;
+            multi["calibration_limit"] = 10;
+            walletCfg["multi_sequencer_client_config"] = multi;
             walletCfg["initial_accounts"] = QJsonArray();
             cf << QJsonDocument(walletCfg).toJson(QJsonDocument::Indented).toStdString();
             cf.close();
@@ -426,9 +439,15 @@ bool PilotImpl::initWallet() {
 
     std::string backupPath = storagePath + ".bak";
 
+    // open/create_new are instant against a local sequencer but not against a remote one:
+    // measured 2026-08-29 on the public testnet, create_new was still running when its
+    // 15 s typed-call budget expired ("create_new result: """ at exactly +15 s), so
+    // initialize() returned false on a wallet that was in fact being created. Give both
+    // the same budget as a chain sync — the fast path returns the moment the wallet
+    // answers, so a local run is not slowed.
     auto tryOpen = [&](const std::string& path) -> bool {
         logos::CallError err;
-        int64_t rc = modules().lez_core.open(configPath, path, statsPath, &err, 15000);
+        int64_t rc = modules().lez_core.open(configPath, path, statsPath, &err, kWalletSyncTimeoutMs);
         return err.code.empty() && rc == 0;
     };
     auto copyFile = [](const std::string& from, const std::string& to) {
@@ -466,8 +485,12 @@ bool PilotImpl::initWallet() {
         std::hash<std::string>{}(dataDir_) & 0xFFFFFFFF);
     logos::CallError cerr;
     std::string createResult = modules().lez_core.create_new(
-        configPath, storagePath, statsPath, walletName, &cerr, 15000);
-    qWarning() << "[pilot] initWallet: create_new result:" << QString::fromStdString(createResult);
+        configPath, storagePath, statsPath, walletName, &cerr, kWalletSyncTimeoutMs);
+    // NEVER log the body: on success it is the wallet's recovery MNEMONIC (seen verbatim in
+    // journald 2026-08-29). Log only whether the call answered and how long the body is.
+    qWarning() << "[pilot] initWallet: create_new answered"
+               << (cerr.code.empty() ? "ok" : cerr.code.c_str())
+               << "body_len=" << createResult.size();
     // Same acceptance as the old QVariant::toInt()==0 check: any non-numeric or "0" body
     // counts as success (atoll of both is 0), an error reply does not.
     if (cerr.code.empty() && std::atoll(createResult.c_str()) == 0) { walletOpened_ = true; return true; }
@@ -643,53 +666,134 @@ bool PilotImpl::fundAgentIfNeeded() {
         return d.isObject() && d.object().value("success").toBool();
     };
 
-    // 1. Fresh public account + initialise it on-chain.
-    std::string pubId = modules().lez_core.create_account_public();
-    if (pubId.empty()) return fundFail("create_account_public failed");
-    if (!ok(modules().lez_core.register_public_account(pubId, nullptr, 30000))) {
-        return fundFail("register_public_account failed");
-    }
-    // Wait for the register tx to be mined — claim_pinata requires an initialised
-    // recipient on-chain, else the claim is accepted but never credits.
+    // Chain-wait budget for the three "is it mined yet" loops below. They used to be 60
+    // fixed iterations (~18-30 s of wall clock), sized for a local dev sequencer that seals
+    // a block every 1-15 s. The public testnet seals one every ~60 s (measured 2026-08-29:
+    // 59 / 58 / 63 s between blocks), so a register tx needs two minutes to be two blocks
+    // deep and a claim a minute to credit — the fixed count gave up long before either and
+    // reported "pinata claim never credited" against a chain that was simply slower. Wait
+    // on a wall-clock deadline instead; every loop still exits the moment its condition
+    // holds, so a fast local chain is not slowed by a generous budget.
+    //   PILOT_CHAIN_WAIT_SECS  budget per wait (default 120 s; the testnet run uses 600)
+    //   PILOT_TX_TIMEOUT_MS    RPC timeout of the shielded transfer (default 120 s; with
+    //                          RISC0_DEV_MODE=0 the proof is generated inside this call
+    //                          and takes far longer — walletSend already allows an hour)
+    auto envInt = [](const char* name, int fallback) {
+        const char* e = std::getenv(name);
+        int v = (e && *e) ? std::atoi(e) : 0;
+        return v > 0 ? v : fallback;
+    };
+    const int waitSecs = envInt("PILOT_CHAIN_WAIT_SECS", 120);
+    const int txTimeoutMs = envInt("PILOT_TX_TIMEOUT_MS", 120000);
+    auto deadline = [&]() {
+        return std::chrono::steady_clock::now() + std::chrono::seconds(waitSecs);
+    };
+
+    // 0. Bring a cold wallet to the chain head BEFORE any of the waits below start their
+    // clocks. A fresh wallet on the public testnet replays the whole chain inside its
+    // first sync (measured 2026-08-29: ~1,000 blocks/min, 29k blocks ≈ 30 min) and every
+    // other wallet call queues behind that sync — so the register wait used to burn its
+    // entire budget syncing, then the pinata calls timed out one after another. Sync first,
+    // on its own budget (PILOT_SYNC_WAIT_SECS, default 1 h), and only then start funding.
+    // A synced wallet (local chain, or a second boot) passes through here in one round trip.
     {
-        int64_t start = modules().lez_core.get_current_block_height();
-        for (int i = 0; i < 60; ++i) {
-            syncToHead();
+        auto until = std::chrono::steady_clock::now()
+                   + std::chrono::seconds(envInt("PILOT_SYNC_WAIT_SECS", 3600));
+        while (std::chrono::steady_clock::now() < until) {
             logos::CallError herr;
-            int64_t h = modules().lez_core.get_current_block_height(&herr);
-            if (herr.code.empty() && h >= start + 2) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            int64_t head = modules().lez_core.get_current_block_height(&herr);
+            if (herr.code.empty()) {
+                modules().lez_core.sync_to_block(head, nullptr, kWalletSyncTimeoutMs);
+                logos::CallError serr;
+                int64_t synced = modules().lez_core.get_last_synced_block(&serr);
+                if (serr.code.empty() && synced + 1 >= head) break;   // within a block of head
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(2));
         }
     }
 
-    // 2. Resolve the pinata id, fetch its data, solve the PoW.
-    std::string pinataHex = modules().lez_core.account_id_from_base58(kPinataBase58, nullptr, 15000);
-    if (pinataHex.empty()) return fundFail("pinata id resolve failed");
-
-    std::string accJson = modules().lez_core.get_account_public(pinataHex, nullptr, 15000);
-    QJsonDocument accDoc = QJsonDocument::fromJson(QString::fromStdString(accJson).toUtf8());
-    std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
-    std::string solHex = computePinataSolution(dataHex);
-    if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
-
-    // 3. Claim the pinata into the public account.
-    if (!ok(modules().lez_core.claim_pinata(pinataHex, pubId, solHex, nullptr, 60000))) {
-        return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
-    }
-
-    // Wait for the claim tx to be mined and credited before spending it.
-    bool credited = false;
-    for (int i = 0; i < 60 && !credited; ++i) {
-        syncToHead();
+    // 1. The public account the faucet pays into. Reuse the one an earlier boot claimed while
+    // it still holds the funding amount: every retry used to mint + register + claim a fresh
+    // account whenever the shielded step below failed, leaving a trail of funded accounts in
+    // the wallet (eight on the public testnet by 2026-09-03, 150 LEZ each). The id is persisted
+    // the moment the claim credits — BEFORE the shielded step — so that step failing cannot
+    // lose it.
+    std::string pubId = fundingPublicAccount();
+    bool reused = false;
+    if (!pubId.empty()) {
         std::string bal = modules().lez_core.get_balance(pubId, true);
-        if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) credited = true;
-        else std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        reused = !bal.empty() && std::atoll(bal.c_str()) >= fundAmount;
+        if (reused) {
+            qWarning() << "[pilot] fund: reusing funded public account"
+                       << QString::fromStdString(pubId) << "balance" << QString::fromStdString(bal);
+        } else {
+            qWarning() << "[pilot] fund: persisted public account" << QString::fromStdString(pubId)
+                       << "holds" << QString::fromStdString(bal) << "- claiming a fresh one";
+            pubId.clear();
+        }
     }
-    if (!credited) return fundFail("pinata claim never credited the public account");
+    if (!reused) {
+        // Fresh public account + initialise it on-chain.
+        pubId = modules().lez_core.create_account_public();
+        if (pubId.empty()) return fundFail("create_account_public failed");
+        if (!ok(modules().lez_core.register_public_account(pubId, nullptr, 30000))) {
+            return fundFail("register_public_account failed");
+        }
+        // Wait for the register tx to be mined — claim_pinata requires an initialised
+        // recipient on-chain, else the claim is accepted but never credits.
+        {
+            int64_t start = modules().lez_core.get_current_block_height();
+            for (auto until = deadline(); std::chrono::steady_clock::now() < until;) {
+                syncToHead();
+                logos::CallError herr;
+                int64_t h = modules().lez_core.get_current_block_height(&herr);
+                if (herr.code.empty() && h >= start + 2) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+        }
+
+        // 2. Resolve the pinata id, fetch its data, solve the PoW.
+        std::string pinataHex = modules().lez_core.account_id_from_base58(kPinataBase58, nullptr, 15000);
+        if (pinataHex.empty()) return fundFail("pinata id resolve failed");
+
+        std::string accJson = modules().lez_core.get_account_public(pinataHex, nullptr, 15000);
+        QJsonDocument accDoc = QJsonDocument::fromJson(QString::fromStdString(accJson).toUtf8());
+        std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
+        std::string solHex = computePinataSolution(dataHex);
+        if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
+
+        // 3. Claim the pinata into the public account.
+        if (!ok(modules().lez_core.claim_pinata(pinataHex, pubId, solHex, nullptr, 60000))) {
+            return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
+        }
+
+        // Wait for the claim tx to be mined and credited before spending it.
+        bool credited = false;
+        for (auto until = deadline(); !credited && std::chrono::steady_clock::now() < until;) {
+            syncToHead();
+            std::string bal = modules().lez_core.get_balance(pubId, true);
+            if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) credited = true;
+            else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
+        if (!credited) return fundFail("pinata claim never credited the public account");
+
+        // The claim credited: remember this account NOW, before the shielded step, and save
+        // the wallet so its keys outlive a crash during the proof. From here on this is the
+        // account the public spend rail (wallet.send to public:<id>) pays from.
+        sqlite3_stmt* ps = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('funding.public_account', ?);",
+                -1, &ps, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(ps, 1, pubId.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(ps);
+            sqlite3_finalize(ps);
+        }
+        backupWallet();
+    }
 
     // 4. Shielded transfer public -> agent's private account (generates a ZK proof).
     if (!ok(modules().lez_core.transfer_shielded_owned(
-                pubId, agentAccountId_, u128LeHex(fundAmount), nullptr, 120000))) {
+                pubId, agentAccountId_, u128LeHex(fundAmount), nullptr, txTimeoutMs))) {
         return fundFail("transfer_shielded_owned failed");
     }
     syncToHead();
@@ -701,11 +805,11 @@ bool PilotImpl::fundAgentIfNeeded() {
     // wrote funded=1 regardless. That is how an agent ends up reporting funded=1 with nothing
     // spendable, which is unfalsifiable from the outside and wasted a diagnosis cycle.
     bool landed = false;
-    for (int i = 0; i < 60 && !landed; ++i) {
+    for (auto until = deadline(); !landed && std::chrono::steady_clock::now() < until;) {
         syncToHead();
         std::string bal = modules().lez_core.get_balance(agentAccountId_, false);
         if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) landed = true;
-        else std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
     if (!landed) {
         // Do NOT mark funded. Leaving the flag clear means the next boot retries funding
@@ -728,6 +832,19 @@ bool PilotImpl::fundAgentIfNeeded() {
     qWarning() << "[pilot] fund: agent private account funded with" << fundAmount;
     backupWallet();   // persist + keep a recovery copy of the now-funded wallet
     return true;
+}
+
+std::string PilotImpl::fundingPublicAccount() {
+    if (!db_) return std::string();
+    std::string id;
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT value FROM config WHERE key='funding.public_account';",
+                           -1, &s, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_text(s, 0))
+            id = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+        sqlite3_finalize(s);
+    }
+    return id;
 }
 
 std::string PilotImpl::getAgentNpk() {
@@ -762,6 +879,17 @@ std::string PilotImpl::walletBalance() {
     QJsonObject obj;
     obj["balance"] = QString::fromStdString(result);
     obj["account"] = QString::fromStdString(agentAccountId_);
+    // The public account funding claimed the faucet into, once one is persisted: the balance
+    // the public spend rail (wallet.send to public:<id>) pays from. On the public testnet this
+    // is where the agent's money actually is until a real shielded proof moves it private.
+    std::string pub = fundingPublicAccount();
+    if (!pub.empty()) {
+        obj["public_account"] = QString::fromStdString(pub);
+        logos::CallError perr;
+        std::string pbal = modules().lez_core.get_balance(pub, true, &perr);
+        obj["public_balance"] = perr.code.empty() ? QString::fromStdString(pbal)
+                                                  : QString("unavailable");
+    }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
 }
 
@@ -771,7 +899,7 @@ std::string PilotImpl::walletHistory() {
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_,
-        "SELECT id, recipient, amount, state, created_at FROM spend_requests "
+        "SELECT id, recipient, amount, state, created_at, tx_hash, error FROM spend_requests "
         "ORDER BY created_at DESC LIMIT 50;",
         -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return "{\"error\": \"query failed\"}";
@@ -784,6 +912,11 @@ std::string PilotImpl::walletHistory() {
         tx["amount"] = static_cast<double>(sqlite3_column_int64(stmt, 2));
         tx["state"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)));
         tx["created_at"] = QString(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
+        // Settlement evidence and, for a failed spend, why (both '' when not applicable).
+        if (const unsigned char* h = sqlite3_column_text(stmt, 5))
+            tx["tx_hash"] = QString(reinterpret_cast<const char*>(h));
+        if (const unsigned char* e = sqlite3_column_text(stmt, 6))
+            tx["error"] = QString(reinterpret_cast<const char*>(e));
         arr.append(tx);
     }
     sqlite3_finalize(stmt);

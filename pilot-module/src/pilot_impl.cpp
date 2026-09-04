@@ -85,7 +85,8 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            tx_hash TEXT NOT NULL DEFAULT ''
+            tx_hash TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS stored_files (
@@ -215,6 +216,11 @@ void PilotImpl::initDatabase(const std::string& dataDir) {
     // deliberately ignored, exactly like every other ADD COLUMN migration above.
     sqlite3_exec(db_,
         "ALTER TABLE spend_requests ADD COLUMN tx_hash TEXT NOT NULL DEFAULT '';",
+        nullptr, nullptr, nullptr);
+    // Why a spend failed, persisted with the row (see executeSpend): per request and
+    // restart-proof, unlike a member. Same ignored-duplicate-column idiom as tx_hash above.
+    sqlite3_exec(db_,
+        "ALTER TABLE spend_requests ADD COLUMN error TEXT NOT NULL DEFAULT '';",
         nullptr, nullptr, nullptr);
 
     // Migrate DBs created before pinned_identities (first-contact identity pinning, TOFU).

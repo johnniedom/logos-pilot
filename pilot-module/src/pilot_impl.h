@@ -336,6 +336,15 @@ private:
     // decrypts; false (out untouched) when neither key works or both are empty.
     bool a2aTryDecrypt(const std::string& payload, std::string& out) const;
     bool fundAgentIfNeeded();
+    // The public account funding claimed the faucet into (config key funding.public_account).
+    // Persisted the moment the claim credits, BEFORE the shielded step, so that step failing
+    // cannot lose it and the next boot reuses it instead of claiming another. Empty until a
+    // claim has credited. Read by the public spend rail (executeSpend) and walletBalance.
+    // Impl in pilot_identity.cpp.
+    std::string fundingPublicAccount();
+    // Why a spend request failed: its persisted error column, empty when it did not fail
+    // (impl in pilot_spending.cpp).
+    std::string spendRequestError(const std::string& requestId);
     void resetStaleIdentity();   // clear pilot.db identity + funded flag on wallet divergence
     void backupWallet();         // save wallet + keep a recovery copy of its storage file
     void recoverPendingTransactions();
@@ -370,7 +379,7 @@ private:
     // Outbound A2A (requester side, impl in pilot_a2a.cpp): the ECIES/transport wrapper
     // that consumes a peer server's reply on "/pilot/1/reply-<id>/proto", decrypts it
     // with agentEciesPriv_ (the doer encrypted to our sender_ecies per the A2A contract),
-    // and hands the (taskId, state) to settleOutboundReply for the pay-on-acceptance FSM.
+    // and hands the (taskId, state) to settleOutboundReply for the pay-on-completion FSM.
     void handleA2AReply(const std::string& topic, const std::string& payload);
     // Declared price for a skill from a discovered Agent Card (_logos.pricing), matched
     // on ONE canonical identity field (the encryption/routing key agentTask uses); 0 when

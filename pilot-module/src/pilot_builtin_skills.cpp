@@ -17,7 +17,10 @@ void registerBuiltinSkills(SkillRegistry& registry, PilotImpl* impl) {
         [impl](const std::string&) { return impl->walletBalance(); });
 
     reg(registry, "wallet.send", "wallet",
-        "Sends LEZ tokens to a recipient, subject to spending threshold", 0,
+        "Sends LEZ tokens to a recipient, subject to spending threshold. Recipient forms: a "
+        "payee's keys JSON or a private account id (paid from the agent's shielded account, "
+        "needs a proof), or public:<64-hex account id> (paid from the agent's funded public "
+        "account, no client proof)", 0,
         [impl](const std::string& args) {
             QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(args));
             QJsonObject obj = doc.object();

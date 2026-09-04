@@ -1,4 +1,5 @@
 #include "pilot_impl.h"
+#include "pilot_spend_rail.h"
 // Generated per-build; typed client for lez_core (see pilot_impl.h).
 #include "logos_sdk.h"
 #include <sqlite3.h>
@@ -6,9 +7,12 @@
 #include <chrono>
 #include <random>
 #include <cstring>
+#include <cstdlib>
+#include <cctype>
 #include <vector>
 #include <QString>
 #include <QVariant>
+#include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -34,25 +38,70 @@ static std::string amountToHexLE(int64_t amount) {
     return std::string(hex);
 }
 
-// Execute a private (shielded) transfer, choosing the right wallet method by recipient form:
-//   - recipient is a keys JSON ({nullifier_public_key, viewing_public_key}) -> transfer_private
-//     (external payee whose public keys we were given, e.g. from an Agent Card)
-//   - recipient is a plain 32-byte account id hex -> transfer_private_owned
-//     (a private account this wallet owns)
-// A bare account id cannot be shielded-paid without the payee's keys, so id form is
-// only valid for owned recipients.
-static std::string doPrivateTransfer(LezCore& wallet, const std::string& fromId,
-                                     const std::string& recipient, int64_t amount) {
-    const bool hasKeys = recipient.find("nullifier_public_key") != std::string::npos
-                      || recipient.find("viewing_public_key") != std::string::npos;
-    // A shielded transfer generates a real RISC0 proof when RISC0_DEV_MODE=0: ~44 min wall on a
-    // dev box (dev mode returns in seconds). The old 120s cap made every real-proof transfer
-    // report TX_FAILED at the 2-min mark while proving was still in flight. 60 min covers the
-    // documented ~44 min with margin; it is only a ceiling, so dev-mode transfers are unaffected.
+// See pilot_spend_rail.h for the contract. The keys-JSON check comes first so a payee's keys
+// blob can never be mistaken for an id; the "public:" prefix is matched exactly, and only the
+// hex after it is case-folded (the wallet compares ids as lower-case hex).
+SpendTarget parseSpendRecipient(const std::string& recipient) {
+    if (recipient.find("nullifier_public_key") != std::string::npos
+        || recipient.find("viewing_public_key") != std::string::npos)
+        return {SpendRail::PrivateKeys, recipient};
+
+    static const std::string kPublicPrefix = "public:";
+    if (recipient.compare(0, kPublicPrefix.size(), kPublicPrefix) == 0) {
+        std::string id = recipient.substr(kPublicPrefix.size());
+        if (id.size() != 64) return {SpendRail::Invalid, std::string()};
+        for (char& c : id) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return {SpendRail::Invalid, std::string()};
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return {SpendRail::Public, id};
+    }
+
+    return {SpendRail::PrivateOwned, recipient};
+}
+
+// Run the on-chain transfer for a spend on the rail the recipient's form selects
+// (parseSpendRecipient, pilot_spend_rail.h):
+//   PrivateKeys  -> transfer_private        from the agent's private account (payee keys JSON,
+//                                           e.g. from an Agent Card)
+//   PrivateOwned -> transfer_private_owned  from the agent's private account (an id this
+//                                           wallet owns; a bare id cannot be shielded-paid
+//                                           without the payee's keys)
+//   Public       -> transfer_public         from the funded public account (fundingPublicAccount)
+// Both private rails generate a real RISC0 proof inside the call when RISC0_DEV_MODE=0. The
+// documented ~44 min assumes the prover fits in RAM; on a swap-bound 5 GB box it runs well
+// past an hour (measured 2026-09-02: the old 60-min cap expired at +64 min while the prover
+// was still working — and it kept working after the caller gave up, so the "failure" was the
+// wait, not the proof). PILOT_TX_TIMEOUT_MS overrides; default 4 h. Only a ceiling: dev-mode
+// transfers and fast boxes still return in seconds.
+// The public rail only signs and submits — the sequencer proves the block — so it clears in
+// seconds (measured 2026-09-02 on the public testnet: mined in the next block) and gets a
+// fixed 2-minute ceiling. Without a funded public account it cannot run at all, and says so in
+// the wallet's own reply shape ({"success","error"}) so callers need one parser, not two.
+static std::string doTransfer(LezCore& wallet, const std::string& fromPrivate,
+                              const std::string& fromPublic, const std::string& recipient,
+                              int64_t amount) {
+    const SpendTarget target = parseSpendRecipient(recipient);
+    const int txTimeoutMs = [] {
+        const char* e = std::getenv("PILOT_TX_TIMEOUT_MS");
+        int v = (e && *e) ? std::atoi(e) : 0;
+        return v > 0 ? v : 14400000;
+    }();
     const std::string amountHex = amountToHexLE(amount);
-    return hasKeys
-        ? wallet.transfer_private(fromId, recipient, amountHex, nullptr, 3600000)
-        : wallet.transfer_private_owned(fromId, recipient, amountHex, nullptr, 3600000);
+    switch (target.rail) {
+    case SpendRail::PrivateKeys:
+        return wallet.transfer_private(fromPrivate, target.target, amountHex, nullptr, txTimeoutMs);
+    case SpendRail::PrivateOwned:
+        return wallet.transfer_private_owned(fromPrivate, target.target, amountHex, nullptr, txTimeoutMs);
+    case SpendRail::Public:
+        if (fromPublic.empty())
+            return "{\"success\":false,\"error\":\"no funded public account: funding has not "
+                   "claimed one on this chain yet\"}";
+        return wallet.transfer_public(fromPublic, target.target, amountHex, nullptr, 120000);
+    case SpendRail::Invalid:
+        break;   // executeSpend rejects this form before reaching here; kept as a backstop
+    }
+    return "{\"success\":false,\"error\":\"malformed public recipient: expected public:<64 hex chars>\"}";
 }
 
 // A transfer result is JSON: {"error":"...","success":bool,"tx_hash":"..."} in a string
@@ -69,6 +118,18 @@ static bool transferSucceeded(const std::string& result) {
 static std::string transferTxHash(const std::string& result) {
     QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(result).toUtf8());
     return d.isObject() ? d.object().value("tx_hash").toString().toStdString() : std::string();
+}
+
+// The reason a failed transfer result carries, for the spend row and the caller. An empty
+// result means the call never came back (transport failure, or the timeout above expiring
+// while a proof was still running); success:false with no text is named as such rather than
+// reported as nothing.
+static std::string transferError(const std::string& result) {
+    if (result.empty()) return "wallet returned no reply (transport failure or timeout)";
+    QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(result).toUtf8());
+    if (!d.isObject()) return "unparseable wallet reply: " + result.substr(0, 200);
+    std::string err = d.object().value("error").toString().toStdString();
+    return err.empty() ? "wallet reported failure without a reason" : err;
 }
 
 static std::string generateId() {
@@ -192,9 +253,38 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
         sqlite3_finalize(s);
     };
 
+    // Terminal write: state, tx hash and the reason (empty on success) land in ONE update, so
+    // no crash can leave a TX_FAILED row that does not say why. The reason lives on the row —
+    // per request and restart-proof — and walletSend / walletHistory read it back from there.
+    auto finish = [&](bool ok, const std::string& txHash, const std::string& error) {
+        std::string now = currentTimestamp();
+        sqlite3_stmt* term = nullptr;
+        sqlite3_prepare_v2(db_,
+            "UPDATE spend_requests SET state=?, tx_hash=?, error=?, updated_at=? WHERE id=?;",
+            -1, &term, nullptr);
+        sqlite3_bind_text(term, 1, ok ? "COMPLETED" : "TX_FAILED", -1, SQLITE_STATIC);
+        sqlite3_bind_text(term, 2, txHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(term, 3, error.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(term, 4, now.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(term, 5, requestId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(term);
+        sqlite3_finalize(term);
+        if (!ok)
+            qWarning() << "[pilot] spend" << QString::fromStdString(requestId)
+                       << "failed:" << QString::fromStdString(error);
+        return ok;
+    };
+
     setSpendState("EXECUTING");
 
-    if (!isContextReady()) { setSpendState("TX_FAILED"); return false; }
+    // A malformed public recipient is rejected on its FORM, before the wallet is consulted:
+    // the same request fails identically with or without a wallet, and no transfer_public is
+    // ever attempted with a bad target.
+    if (parseSpendRecipient(recipient).rail == SpendRail::Invalid)
+        return finish(false, std::string(),
+                      "malformed public recipient: expected public:<64 hex chars>");
+
+    if (!isContextReady()) return finish(false, std::string(), "wallet module unavailable");
 
     // transfer_private returns once the SEQUENCER ACCEPTS THE TX INTO ITS MEMPOOL — not once it
     // executes. wallet-ffi sets success:true on send_transaction() alone (wallet/src/lib.rs,
@@ -226,20 +316,12 @@ bool PilotImpl::executeSpend(const std::string& requestId) {
             modules().lez_core.sync_to_block(head, nullptr, kWalletSyncTimeoutMs);
     }
 
-    std::string result = doPrivateTransfer(modules().lez_core, agentAccountId_, recipient, amount);
+    // The public rail spends from the account funding claimed the faucet into; empty until a
+    // claim has credited on this chain, which doTransfer turns into an honest failure.
+    std::string result = doTransfer(modules().lez_core, agentAccountId_, fundingPublicAccount(),
+                                    recipient, amount);
     bool ok = transferSucceeded(result);
-    std::string txHash = transferTxHash(result);
-    std::string now = currentTimestamp();
-    sqlite3_stmt* term = nullptr;
-    sqlite3_prepare_v2(db_,
-        "UPDATE spend_requests SET state=?, tx_hash=?, updated_at=? WHERE id=?;", -1, &term, nullptr);
-    sqlite3_bind_text(term, 1, ok ? "COMPLETED" : "TX_FAILED", -1, SQLITE_STATIC);
-    sqlite3_bind_text(term, 2, txHash.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(term, 3, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(term, 4, requestId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(term);
-    sqlite3_finalize(term);
-    return ok;
+    return finish(ok, transferTxHash(result), ok ? std::string() : transferError(result));
 }
 
 bool PilotImpl::approveSpend(const std::string& requestId) {
@@ -523,7 +605,23 @@ std::string PilotImpl::walletSend(const std::string& recipient, int64_t amount, 
     QJsonObject res;
     res["status"] = ok ? QString("completed") : QString("failed");
     res["request_id"] = QString::fromStdString(reqId);
+    // Say WHY, not just that it failed: the reason executeSpend persisted on the row.
+    if (!ok) res["error"] = QString::fromStdString(spendRequestError(reqId));
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+}
+
+std::string PilotImpl::spendRequestError(const std::string& requestId) {
+    if (!db_) return std::string();
+    std::string err;
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT error FROM spend_requests WHERE id = ?;",
+                           -1, &s, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, requestId.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_text(s, 0))
+            err = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+        sqlite3_finalize(s);
+    }
+    return err;
 }
 
 // L7 — a clean run always drives EXECUTING->terminal synchronously, so any spend still EXECUTING
