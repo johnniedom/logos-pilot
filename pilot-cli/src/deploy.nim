@@ -82,7 +82,21 @@ proc runDeploy*(cfg: Config, network: string) =
   kv("Account", truncStr(accountId, 32))
 
   blankLine()
-  let providerIdx = arrowSelect("Select LLM provider:", LLM_PROVIDERS)
+  # Headless deploy (no TTY — CI, a remote box, a systemd unit): PILOT_LLM_PROVIDER names the
+  # provider (anthropic / openai / deepseek / google / openrouter / groq, or none) and skips the
+  # arrow selector, which reads keystrokes and cannot run without a terminal. The API key comes
+  # from the provider's own env var as before, and PILOT_LLM_MODEL (below) skips the model
+  # selector. An unrecognised name is treated as none, and says so, rather than guessing.
+  var providerIdx = -1
+  let envProvider = getEnv("PILOT_LLM_PROVIDER").strip().toLowerAscii()
+  if envProvider != "":
+    providerIdx = LLM_PROVIDERS.len - 1
+    for i, pair in LLM_PROVIDER_KEYS:
+      if pair[0] != "" and pair[0] == envProvider: providerIdx = i
+    if providerIdx == LLM_PROVIDERS.len - 1 and envProvider != "none" and envProvider != "skip":
+      warn("PILOT_LLM_PROVIDER=" & envProvider & " is not anthropic/openai/deepseek/google/openrouter/groq — command-only mode")
+  else:
+    providerIdx = arrowSelect("Select LLM provider:", LLM_PROVIDERS)
   if providerIdx < 0:
     warn("Skipped LLM configuration")
   elif providerIdx < LLM_PROVIDERS.len - 1:
@@ -112,7 +126,11 @@ proc runDeploy*(cfg: Config, network: string) =
       discard daemonCall(cfg, "metaConfigure", @["llm.api_key", apiKey])
 
       let models = LLM_MODELS[providerIdx]
-      if models.len > 0:
+      let envModel = getEnv("PILOT_LLM_MODEL").strip()
+      if envModel != "":
+        discard daemonCall(cfg, "metaConfigure", @["llm.model", envModel])
+        ok("LLM → " & providerName & " / " & envModel)
+      elif models.len > 0:
         let modelIdx = arrowSelect("Select model:", models)
         if modelIdx >= 0 and modelIdx < models.len:
           var modelId = models[modelIdx]

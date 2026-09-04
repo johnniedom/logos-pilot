@@ -23,7 +23,7 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
   help                         Show this help
 
 """ & DIM & "FLAGS" & RESET & """
-  --testnet, --mainnet         Network for deploy
+  --testnet                    Deploy against the public LEZ testnet (sets PILOT_SEQUENCER_ADDR)
   --data-dir <dir>             Data directory for chat
   --json, --json-only          Machine-readable output
   --version, -v                Show version
@@ -159,10 +159,22 @@ proc main() =
 
   case subcmd
   of "deploy":
-    var network = "testnet"
+    # --testnet used to change only this label while the wallet kept dialling the local
+    # sequencer (the module's default, http://127.0.0.1:3040). It now points the wallet at the
+    # public testnet for real, by setting the env the module reads — the daemon `deploy` starts
+    # inherits this process's environment. An explicit PILOT_SEQUENCER_ADDR always wins, and the
+    # label reports what will actually be dialled rather than a network name.
+    const TESTNET_RPC = "https://testnet.lez.logos.co"
     for a in rest:
-      if a == "--mainnet": network = "mainnet"
-      elif a == "--testnet": network = "testnet"
+      if a == "--testnet":
+        if getEnv("PILOT_SEQUENCER_ADDR") == "": putEnv("PILOT_SEQUENCER_ADDR", TESTNET_RPC)
+        if getEnv("PILOT_CHAIN_WAIT_SECS") == "": putEnv("PILOT_CHAIN_WAIT_SECS", "600")   # ~60 s blocks
+      elif a == "--mainnet":
+        echo "There is no LEZ mainnet to deploy to; use --testnet or set PILOT_SEQUENCER_ADDR."
+        quit(1)
+    let network = if getEnv("PILOT_SEQUENCER_ADDR") == "": "local sequencer (http://127.0.0.1:3040)"
+                  elif getEnv("PILOT_SEQUENCER_ADDR") == TESTNET_RPC: "public testnet (" & TESTNET_RPC & ")"
+                  else: getEnv("PILOT_SEQUENCER_ADDR")
     runDeploy(cfg, network)
 
   of "chat":

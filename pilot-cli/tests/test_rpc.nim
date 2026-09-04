@@ -156,10 +156,13 @@ removeFile(cardTmp)
 const RPC_FAIL = """{"code":"RPC_FAILED","message":"callModuleMethod('pilot', 'walletSend') RPC call failed.","status":"error"}"""
 
 let walletDead = explainRpcFailure(RPC_FAIL,
-  "[critical] Module process crashed: logos_execution_zone")
+  "[critical] Module process crashed: lez_core")
 doAssert "wallet module" in walletDead
 doAssert "nothing was sent" in walletDead.toLowerAscii
 doAssert "3040" in walletDead            # points at the usual cause
+# The module was renamed lez_core in 2026-08; a daemon log from before the rename must
+# still read as the wallet story (the CLI matched only the old name until 2026-09-04).
+doAssert "wallet module" in explainRpcFailure(RPC_FAIL, "[critical] Module process crashed: logos_execution_zone")
 
 # A crash of some other module gets the generic restart advice, not a wallet story.
 let otherDead = explainRpcFailure(RPC_FAIL, "[critical] Module process crashed: storage_module")
@@ -179,8 +182,8 @@ doAssert explainRpcFailure("", "") == ""
 # a 3.1 GB chain (2026-07-26). Silence during that is indistinguishable from a
 # hang, which is most of why one diagnosis took six hours.
 doAssert syncHint(
-  "[logos_execution_zone] Syncing to block 3269. Blocks to sync: 51").contains("51")
-doAssert syncHint("[logos_execution_zone] Synced to block 3269 in 1.8s") == ""
+  "[lez_core] Syncing to block 3269. Blocks to sync: 51").contains("51")
+doAssert syncHint("[lez_core] Synced to block 3269 in 1.8s") == ""
 doAssert syncHint("") == ""
 doAssert syncHint("nothing interesting in this log") == ""
 
@@ -199,7 +202,7 @@ doAssert syncHint("Blocks to sync:") != ""
 doAssert daemonLogTail(cfg) == ""                    # no log yet -> no guesses
 var manyLines: seq[string]
 for i in 1 .. 60: manyLines.add("line " & $i)
-manyLines.add("[logos_execution_zone] Syncing to block 3269. Blocks to sync: 51")
+manyLines.add("[lez_core] Syncing to block 3269. Blocks to sync: 51")
 writeFile(tmp / "daemon.log", manyLines.join("\n"))
 
 doAssert daemonLogTail(cfg, 5).splitLines().len == 5

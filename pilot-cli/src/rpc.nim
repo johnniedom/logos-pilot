@@ -8,7 +8,7 @@ const
   FALLBACK_DATA_DIR* = "/tmp/pilot-data"
   FALLBACK_MODULE_PATH* = "/tmp/pilot-logoscore/modules"
   DEFAULT_WAKU_ADDR* = "/ip4/127.0.0.1/tcp/30303"
-  MODULES* = "capability_module,logos_execution_zone,delivery_module,storage_module,chat_module,pilot"
+  MODULES* = "capability_module,lez_core,delivery_module,storage_module,chat_module,pilot"
 
 type
   Config* = object
@@ -252,7 +252,9 @@ proc explainRpcFailure*(resp, logTail: string): string =
     if idx >= 0: crashed = line[idx + 23 .. ^1].strip()
   if crashed == "":
     return "the agent is not answering — the daemon may be down or busy (try /status)"
-  if crashed.contains("logos_execution_zone"):
+  # The wallet module was renamed lez_core in 2026-08; a daemon log written before the
+  # rename still carries the old name, so both must read as the wallet story.
+  if crashed.contains("lez_core") or crashed.contains("logos_execution_zone"):
     return "the wallet module crashed, so nothing was sent — no tokens moved.\n" &
            "  Usual cause: the sequencer stopped answering on :3040 mid-transfer.\n" &
            "  Fix: check the sequencer is up, then /quit and start pilot chat again."
