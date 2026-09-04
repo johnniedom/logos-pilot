@@ -204,7 +204,10 @@ not a module log line):
   `transfer_shielded_owned` into the agent's private account was mined. The
   testnet does not mine dev-mode receipts (2026-08-29: accepted into the mempool,
   never mined), so this is a real STARK accepted on chain. Funding end to end
-  (cold sync, claim, proof) took about 50 minutes on that runner.
+  (cold sync, claim, proof) took about 50 minutes on that runner. The clean re-run
+  33886791765 the same day is green end to end: `3bwh…` claimed at 150, shielded
+  100 out with a real proof (50, nonce 2), a public spend mined in block 37539, the
+  vault round-tripped — 56 minutes, logs kept as the run's artifact.
 
 **What is not proven, and why.**
 
