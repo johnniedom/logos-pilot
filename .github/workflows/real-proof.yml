@@ -80,12 +80,15 @@ jobs:
           PILOT_TX_TIMEOUT_MS: "14400000"  # 4 h ceiling on the wallet call that carries the proof
           SHIELDED_TIMEOUT_SECS: "16200"
           DEMO_AMOUNT: "1"
+        shell: bash   # bash -eo pipefail: a failing demo must fail the job even through tee
         run: ./demo.sh 2>&1 | tee real-proof-demo.log
 
-      - name: Keep the log as evidence (r0vm output = RISC0_DEV_MODE=0 proof)
+      - name: Keep the logs as evidence (demo output + daemon log with the prover's output)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-proof-demo-log
-          path: real-proof-demo.log
+          name: real-proof-logs
+          path: |
+            real-proof-demo.log
+            demo-daemon.log
           if-no-files-found: ignore

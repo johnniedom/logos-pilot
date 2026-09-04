@@ -197,21 +197,23 @@ not a module log line):
   this rail as the `public:<64-hex account id>` recipient form, spending from the
   public account the faucet credited.
 
+- 2026-09-04: the **shielded step with a real proof** (`RISC0_DEV_MODE=0`, r0vm
+  3.0.5) landed on the public testnet from `.github/workflows/real-proof.yml` on a
+  GitHub-hosted 4 vCPU / 16 GB runner (run 33880084026): the account the agent
+  claimed, `F1MB…`, went 150 → **50, nonce 2** — the module's 100-LEZ
+  `transfer_shielded_owned` into the agent's private account was mined. The
+  testnet does not mine dev-mode receipts (2026-08-29: accepted into the mempool,
+  never mined), so this is a real STARK accepted on chain. Funding end to end
+  (cold sync, claim, proof) took about 50 minutes on that runner.
+
 **What is not proven, and why.**
 
-- The **shielded step** (public → the agent's private account, and every private
-  spend after it) requires a real proof: with `RISC0_DEV_MODE=1` the testnet
-  accepts the transaction into its mempool and never mines it (2026-08-29:
-  balances unchanged after the wait). With `RISC0_DEV_MODE=0` the prover holds
-  ~4.5 GB inside the 5 GB WSL VM of the 8 GB development laptop, runs swap-bound
-  for hours, and has not completed there (six attempts, 2026-08-29 to 2026-09-04;
-  the last one proved for four hours of VM time, swap-bound throughout, before the
-  module's own four-hour ceiling on the wallet call expired). It is a memory
-  problem, not a protocol one: the same proof is
-  documented at ~44 min on this box against a local sequencer when the box is
-  otherwise idle, and at minutes on a 16 GB machine. Until it completes, the
-  agent's private balance on the public testnet is 0 and all its spending goes
-  over the public rail.
+- The shielded proof does **not** complete on the 8 GB development laptop: the
+  prover holds ~4.5 GB inside a 5 GB WSL VM and runs swap-bound for hours (six
+  attempts, 2026-08-29 to 2026-09-04; the last proved for four hours of VM time
+  before the module's own four-hour ceiling on the wallet call expired). It is a
+  memory problem, not a protocol one — the same code path succeeded on 16 GB in
+  under an hour. Private spends (`transfer_private*`) carry the same proof cost.
 - The `RISC0_DEV_MODE=0` real-proof scripts **are** committed
   (`run-sequencer-realproof.sh`, `demo-realproof.sh`, both with a `REHEARSE=1`
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /

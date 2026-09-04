@@ -144,14 +144,17 @@ jobs:
           LEZ_RPC: https://testnet.lez.logos.co
           RISC0_DEV_MODE: "1"     # the public rail needs no client proof; the shielded leg is reported, not asserted
           DEMO_AMOUNT: "1"
+        shell: bash   # bash -eo pipefail: a failing demo must fail the job even through tee
         run: ./demo.sh 2>&1 | tee demo.log
 
       - name: Keep the demo log as evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-demo-log
-          path: demo.log
+          name: e2e-demo-logs
+          path: |
+            demo.log
+            demo-daemon.log
           if-no-files-found: ignore
 
       - name: Re-verify the committed testnet evidence against the chain

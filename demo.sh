@@ -58,6 +58,9 @@ T_START=$(date +%s)
 cleanup() {
   if [ -n "$LC" ]; then "$LC" $LCCFG stop >/dev/null 2>&1 || true; fi
   pkill -f "logoscore --config-dir $LCDIR" >/dev/null 2>&1 || true
+  # Keep the daemon log next to the repo: it carries the wallet host's output (sync progress, and
+  # with RISC0_DEV_MODE=0 the prover's own lines), which is the evidence a reviewer wants to see.
+  [ -f "$WORK/daemon.log" ] && cp "$WORK/daemon.log" "$ROOT/demo-daemon.log" 2>/dev/null
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -171,13 +174,19 @@ while [ "$i" -lt "$POLLS" ]; do
 done
 [ ${#PUB} -eq 64 ] || fail fund "no funded public account after $POLLS polls (last status: $(echo "$ST" | head -c 300))"
 read -r PBAL PNONCE <<<"$(acct "$PUB")"
-[ -n "$PBAL" ] && [ "${PNONCE:-0}" -ge 1 ] && [ "$PBAL" -ge 100 ] \
+# The claim credits 150. With real proofs the module finishes the shielded leg (100 out) INSIDE
+# initialize, before metaStatus ever answers, so the first reading may already be 50 (measured on
+# a 16 GB runner 2026-09-04, run 33880084026): the account is funded either way, and a balance
+# of 50 with funding.funded set is the proof having landed, not a shortfall.
+FUNDED=$(echo "$ST" | field funding.funded); LASTERR=$(echo "$ST" | field funding.last_error)
+[ -n "$PBAL" ] && [ "${PNONCE:-0}" -ge 1 ] && [ "$PBAL" -ge 50 ] \
   || fail fund "chain does not show the claimed account funded: $(b58 "$PUB") balance='$PBAL' nonce='$PNONCE'"
 echo "      agent private account: $(echo "$ST" | field account)"
 echo "      funded public account: $(b58 "$PUB") = $PBAL LEZ on chain (nonce $PNONCE)  [$(elapsed)]"
-FUNDED=$(echo "$ST" | field funding.funded); LASTERR=$(echo "$ST" | field funding.last_error)
 if [ "$FUNDED" = "True" ] || [ "$FUNDED" = "true" ]; then
-  echo "      shielded leg: LANDED — the agent's private account is funded (real proof accepted)"
+  [ "$PBAL" -le 50 ] && [ "${PNONCE:-0}" -ge 2 ] \
+    || fail shielded "funding says funded but the chain shows the public account at $PBAL (nonce $PNONCE); 100 should have left it"
+  echo "      shielded leg: LANDED ON CHAIN — 100 left the public account in its second transaction; private account funded (real proof accepted)"
 elif [ "${REQUIRE_SHIELDED:-0}" = "1" ]; then
   # Strict mode (the real-proof CI job): the shielded leg — a real RISC0 proof, RISC0_DEV_MODE=0 —
   # must land too. The module keeps proving inside initialize; poll until funding.funded flips,
