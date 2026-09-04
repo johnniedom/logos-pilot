@@ -87,7 +87,7 @@ jobs:
         shell: bash   # bash -eo pipefail: a failing script must fail the job even through tee
         run: |
           mkdir -p agents/out/${{ matrix.role }}
-          agents/deploy-agent.sh --role ${{ matrix.role }} 2>&1 | tee agents/out/${{ matrix.role }}/run.log
+          bash agents/deploy-agent.sh --role ${{ matrix.role }} 2>&1 | tee agents/out/${{ matrix.role }}/run.log
 
       - name: Keep the evidence (run log, daemon + storage logs, inbox dumps, the file and its fetched copy)
         if: always() && steps.want.outputs.run == '1'
