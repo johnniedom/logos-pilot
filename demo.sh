@@ -25,6 +25,9 @@
 # (KNOWN_LIMITATIONS.md §5). That leg's outcome is printed honestly and is NOT a pass/fail condition here;
 # run with RISC0_DEV_MODE=0 on a big enough machine to see it land too.
 #
+# The build / install / boot / fund steps and the JSON + chain-read helpers live in agents/lib.sh, shared
+# with agents/deploy-agent.sh (the per-category testnet agents) so there is one copy of each.
+#
 # Env overrides:
 #   LOGOSCORE_BIN, LGPM_BIN   pre-built binaries (CI passes pinned store paths; a clean clone builds them)
 #   LEZ_RPC                   sequencer / testnet JSON-RPC endpoint (default https://testnet.lez.logos.co)
@@ -36,28 +39,20 @@
 #                             whole chain first, ~1,000-3,000 blocks/min)
 
 set -uo pipefail
-export NIX_CONFIG="experimental-features = nix-command flakes"
-export RISC0_DEV_MODE="${RISC0_DEV_MODE:-1}"
-LEZ_RPC="${LEZ_RPC:-https://testnet.lez.logos.co}"
-export PILOT_SEQUENCER_ADDR="$LEZ_RPC"
-export PILOT_CHAIN_WAIT_SECS="${PILOT_CHAIN_WAIT_SECS:-600}"     # public testnet seals a block every ~60 s
-export PILOT_SYNC_WAIT_SECS="${PILOT_SYNC_WAIT_SECS:-3600}"
-export PILOT_TX_TIMEOUT_MS="${PILOT_TX_TIMEOUT_MS:-300000}"     # shielded leg ceiling; raise for real proofs
-export PILOT_NAT="${PILOT_NAT:-extip:127.0.0.1}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FAIL_PREFIX="DEMO FAIL"
+# shellcheck source=agents/lib.sh
+. "$ROOT/agents/lib.sh"
 DEMO_RECIPIENT_HEX="${DEMO_RECIPIENT_HEX:-f8fc394c0e5440c4188236d1693076b0cfad04984cf67ca64e0e43a173144f63}"
 DEMO_AMOUNT="${DEMO_AMOUNT:-1}"
-FUND_TIMEOUT_SECS="${FUND_TIMEOUT_SECS:-4500}"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d)"
 MODS="$WORK/modules"; DATA="$WORK/data"; LCDIR="$WORK/logoscore"
 mkdir -p "$MODS" "$DATA" "$LCDIR"
-LC=""; LCCFG=""
-T_START=$(date +%s)
+FAIL_LOGS="$WORK/daemon.log"
 
 cleanup() {
-  if [ -n "$LC" ]; then "$LC" $LCCFG stop >/dev/null 2>&1 || true; fi
-  pkill -f "logoscore --config-dir $LCDIR" >/dev/null 2>&1 || true
+  stop_daemon "$LCDIR"
   # Keep the daemon log next to the repo: it carries the wallet host's output (sync progress, and
   # with RISC0_DEV_MODE=0 the prover's own lines), which is the evidence a reviewer wants to see.
   [ -f "$WORK/daemon.log" ] && cp "$WORK/daemon.log" "$ROOT/demo-daemon.log" 2>/dev/null
@@ -65,124 +60,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() {                                   # every assertion goes through here: say what, show the log, exit 1
-  echo; echo "DEMO FAIL [$1]: $2"
-  echo "--- daemon log tail ---"; tail -25 "$WORK/daemon.log" 2>/dev/null; echo "-----------------------"
-  exit 1
-}
-need() { command -v "$1" >/dev/null 2>&1 || fail prereq "missing tool: $1"; }
 need nix; need python3; need curl
 
-# The daemon wraps every module reply as {"result":"<module JSON as a STRING>"} — quote-escaped, so a naive
-# grep for "key":"value" never matches. Unwrap it once, here, and read fields with python.
-res()  { python3 -c 'import sys,json
-try:
-    d=json.load(sys.stdin); r=d.get("result","")
-    print(r if isinstance(r,str) else json.dumps(r))
-except Exception: print("")' 2>/dev/null; }
-field(){ python3 -c 'import sys,json
-try: o=json.loads(sys.stdin.read() or "{}")
-except Exception: o={}
-for k in sys.argv[1].split("."):
-    o=o.get(k,"") if isinstance(o,dict) else ""
-print(o if not isinstance(o,(dict,list)) else json.dumps(o))' "$1" 2>/dev/null; }
-rpc()  { curl -s -m 30 -X POST "$LEZ_RPC" -H 'content-type: application/json' \
-           -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}"; }
-b58()  { python3 -c 'import sys
-A="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; b=bytes.fromhex(sys.argv[1]); n=int.from_bytes(b,"big"); s=""
-while n: n,r=divmod(n,58); s=A[r]+s
-print("1"*(len(b)-len(b.lstrip(b"\x00")))+s)' "$1"; }
-acct() {  # hex id -> "balance nonce" read from the chain ("" if unknown)
-  rpc getAccount "[\"$(b58 "$1")\"]" | python3 -c 'import sys,json
-r=(json.load(sys.stdin).get("result") or {}); print(r.get("balance",""), r.get("nonce",""))' 2>/dev/null; }
-tx_block() {  # tx hash -> block height, or "" when the chain does not know the hash
-  rpc getTransaction "[\"$1\"]" | python3 -c 'import sys,json
-r=json.load(sys.stdin).get("result"); print(r[1] if isinstance(r,list) and len(r)>1 else ("found" if r else ""))' 2>/dev/null; }
-elapsed() { echo "$(( ($(date +%s) - T_START) / 60 ))m"; }
-
 echo "=== LP-0008 Pilot — end-to-end demo  (endpoint $LEZ_RPC, RISC0_DEV_MODE=$RISC0_DEV_MODE) ==="
-H=$(rpc checkHealth '[]'); echo "$H" | grep -q '"jsonrpc"' || fail chain "no JSON-RPC answer from $LEZ_RPC"
-echo "      chain answers: $(echo "$H" | head -c 80)"
+chain_check
 
 # Optional RISC0 toolchain (needed only for real proofs on the shielded leg); discover if present.
 R0VM_DIR="$(find "$HOME/.risc0/extensions" -maxdepth 1 -type d -name '*cargo-risczero*' 2>/dev/null | head -1)"
 [ -n "$R0VM_DIR" ] && export PATH="$R0VM_DIR:$PATH"
 
 echo "[1/6] Building runtime + module + dependency modules (nix; pinned revisions)..."
-if [ -n "${LOGOSCORE_BIN:-}" ] && [ -n "${LGPM_BIN:-}" ]; then
-  LC="$LOGOSCORE_BIN"; LGPM="$LGPM_BIN"; echo "      using pre-built logoscore + lgpm from the environment"
-else
-  nix build 'github:logos-co/logos-logoscore-cli' -o "$WORK/r-logoscore" || fail build "logoscore runtime"
-  nix build 'github:logos-co/logos-package-manager' -o "$WORK/r-lgpm"     || fail build "lgpm installer"
-  LC="$WORK/r-logoscore/bin/logoscore"; LGPM="$WORK/r-lgpm/bin/lgpm"
-fi
-( cd "$ROOT/pilot-module" && nix build .#lgx -o "$WORK/r-pilot" ) || fail build "pilot module"
-# Same revisions as pilot-module/flake.lock and .github/workflows/ci.yml. 549cf115 = execution-zone v0.2.2,
-# the wallet generation whose program IDs match the public testnet (verified byte-for-byte 2026-08-29).
-nix build 'github:logos-blockchain/logos-execution-zone-module/549cf1159f20fa0c3fe8e88a5ab71de68a5aa34b#lgx' -o "$WORK/r-ez"       || fail build "lez_core module"
-nix build 'github:logos-co/logos-delivery-module/3258cdb0132e37228aa2519e0c01c0e7429a20dd#lgx'               -o "$WORK/r-delivery" || fail build "delivery_module"
-nix build 'github:logos-co/logos-storage-module/7307910f0e5728e08c77820e21698e903c73d987#lgx'                -o "$WORK/r-storage"  || fail build "storage_module"
-export LOGOS_HOST_PATH="$(find /nix/store -maxdepth 1 -name '*-logos-liblogos' -type d 2>/dev/null | head -1)/bin/logos_host"
-[ -x "$LOGOS_HOST_PATH" ] || fail build "logos_host not found in the nix store (LOGOS_HOST_PATH)"
-CIRCUITS="$(find /nix/store -maxdepth 1 -type d -name '*logos-blockchain-circuits*' 2>/dev/null | head -1)"
-[ -n "$CIRCUITS" ] && export LOGOS_BLOCKCHAIN_CIRCUITS="$CIRCUITS"
-echo "      built ($(elapsed))"
+build_all "$WORK" "$ROOT"
 
 echo "[2/6] Installing pilot + 3 dependency modules via lgpm, starting the logoscore daemon, loading pilot..."
-for f in "$WORK"/r-pilot/*.lgx "$WORK"/r-ez/*.lgx "$WORK"/r-delivery/*.lgx "$WORK"/r-storage/*.lgx; do
-  "$LGPM" install --file "$f" --modules-dir "$MODS" --allow-unsigned >/dev/null 2>&1 || fail install "$f"
-done
-echo "      installed: $(ls "$MODS" | tr '\n' ' ')"
-LCCFG="--config-dir $LCDIR"
-setsid "$LC" $LCCFG -D -m "$MODS" </dev/null >"$WORK/daemon.log" 2>&1 & disown
-for i in $(seq 1 30); do grep -q '"pid"' "$LCDIR/daemon/state.json" 2>/dev/null && break; sleep 2; done
-LOAD=$("$LC" $LCCFG load-module pilot 2>&1)
-echo "$LOAD" | grep -q '"status":"ok"' || fail load "pilot did not load: $LOAD"
-for dep in lez_core delivery_module storage_module pilot; do   # the daemon's own record, not pilot's reply
-  grep -q "Module loaded: $dep" "$WORK/daemon.log" || fail load "$dep never came up"
-done
+install_modules "$WORK" "$MODS"
+start_daemon "$LCDIR" "$MODS" "$WORK/daemon.log"
+load_pilot "$LCDIR" "$WORK/daemon.log"
 echo "      daemon up; pilot + lez_core + delivery_module + storage_module loaded"
 
 echo "[3/6] Skills + echo round-trip..."
-COUNT=$("$LC" $LCCFG call pilot metaSkills 2>/dev/null | res | field count)
+COUNT=$(call "$LCDIR" metaSkills | field count)
 [ "$COUNT" = "23" ] || fail skills "expected 23 registered skills, got '$COUNT'"
-ECHO=$("$LC" $LCCFG call pilot echo "clean-clone-demo" 2>/dev/null | res)
+ECHO=$(call "$LCDIR" echo "clean-clone-demo")
 [ "$ECHO" = "echo: clean-clone-demo" ] || fail echo "echo round-trip returned '$ECHO'"
 echo "      23 skills registered; echo round-trip ok"
 
 echo "[4/6] Identity + self-funding from the faucet (initialize; the daemon call times out at ~20 s while the"
 echo "      module keeps working — a cold wallet replays the chain first, then registers, claims, persists)..."
-"$LC" $LCCFG call pilot initialize "$DATA" >/dev/null 2>&1 || true
-# The wait is counted in POLLS, not wall-clock seconds: a laptop that sleeps mid-demo freezes the
-# daemon with it, and a wall-clock deadline would expire the moment it resumes (2026-09-04).
-PUB=""; ST=""; POLLS=$(( FUND_TIMEOUT_SECS / 20 )); i=0
-while [ "$i" -lt "$POLLS" ]; do
-  i=$(( i + 1 ))
-  ST=$("$LC" $LCCFG call pilot metaStatus 2>/dev/null | res)
-  PUB=$(echo "$ST" | field balance.public_account)
-  if [ ${#PUB} -eq 64 ]; then break; fi
-  ERR=$(echo "$ST" | field funding.last_error)
-  case "$ERR" in *"never credited"*|*"claim_pinata failed"*|*"register_public_account failed"*|*"create_account_public failed"*|*"unsolvable"*)
-    fail fund "funding stopped before a public account was credited: $ERR";; esac
-  # A status reply means initialize has returned; none means the module thread is still inside
-  # the wallet sync / funding (the daemon abandons the call at ~20 s). Say so every ~5 minutes.
-  if [ $(( i % 15 )) -eq 0 ]; then
-    if [ -n "$ST" ]; then echo "      … poll $i/$POLLS ($(elapsed)): funded=$(echo "$ST" | field funding.funded) last_error=$(echo "$ST" | field funding.last_error | head -c 80)"
-    else echo "      … poll $i/$POLLS ($(elapsed)): module busy (syncing / funding), no status yet"; fi
-  fi
-  sleep 20
-done
-[ ${#PUB} -eq 64 ] || fail fund "no funded public account after $POLLS polls (last status: $(echo "$ST" | head -c 300))"
-read -r PBAL PNONCE <<<"$(acct "$PUB")"
-# The claim credits 150. With real proofs the module finishes the shielded leg (100 out) INSIDE
-# initialize, before metaStatus ever answers, so the first reading may already be 50 (measured on
-# a 16 GB runner 2026-09-04, run 33880084026): the account is funded either way, and a balance
-# of 50 with funding.funded set is the proof having landed, not a shortfall.
+# Polls, not wall-clock seconds; the chain, not the agent's say-so. Sets PUB, ST, PBAL, PNONCE.
+wait_funded "$LCDIR" "$DATA"
 FUNDED=$(echo "$ST" | field funding.funded); LASTERR=$(echo "$ST" | field funding.last_error)
-[ -n "$PBAL" ] && [ "${PNONCE:-0}" -ge 1 ] && [ "$PBAL" -ge 50 ] \
-  || fail fund "chain does not show the claimed account funded: $(b58 "$PUB") balance='$PBAL' nonce='$PNONCE'"
-echo "      agent private account: $(echo "$ST" | field account)"
-echo "      funded public account: $(b58 "$PUB") = $PBAL LEZ on chain (nonce $PNONCE)  [$(elapsed)]"
 if [ "$FUNDED" = "True" ] || [ "$FUNDED" = "true" ]; then
   [ "$PBAL" -le 50 ] && [ "${PNONCE:-0}" -ge 2 ] \
     || fail shielded "funding says funded but the chain shows the public account at $PBAL (nonce $PNONCE); 100 should have left it"
@@ -195,7 +102,7 @@ elif [ "${REQUIRE_SHIELDED:-0}" = "1" ]; then
   SP=$(( ${SHIELDED_TIMEOUT_SECS:-16200} / 30 )); j=0
   while [ "$j" -lt "$SP" ]; do
     j=$(( j + 1 ))
-    ST=$("$LC" $LCCFG call pilot metaStatus 2>/dev/null | res)
+    ST=$(call "$LCDIR" metaStatus)
     FUNDED=$(echo "$ST" | field funding.funded); LASTERR=$(echo "$ST" | field funding.last_error)
     if [ "$FUNDED" = "True" ] || [ "$FUNDED" = "true" ]; then break; fi
     case "$LASTERR" in *"transfer_shielded_owned failed"*|*"never appeared"*) fail shielded "the module gave up on the shielded transfer: $LASTERR";; esac
@@ -215,10 +122,10 @@ fi
 echo "[5/6] Spend through the agent's own spending FSM: pilot.walletSend public:<recipient> $DEMO_AMOUNT ..."
 read -r RB0 RN0 <<<"$(acct "$DEMO_RECIPIENT_HEX")"
 [ -n "$RB0" ] || fail spend "recipient $(b58 "$DEMO_RECIPIENT_HEX") is not a registered account on this chain (set DEMO_RECIPIENT_HEX)"
-SEND=$("$LC" $LCCFG call pilot walletSend "public:$DEMO_RECIPIENT_HEX" "$DEMO_AMOUNT" "demo: public transfer through the spending FSM" 2>/dev/null | res)
+SEND=$(call "$LCDIR" walletSend "public:$DEMO_RECIPIENT_HEX" "$DEMO_AMOUNT" "demo: public transfer through the spending FSM")
 STATUS=$(echo "$SEND" | field status); REQ=$(echo "$SEND" | field request_id)
 [ "$STATUS" = "completed" ] || fail spend "walletSend answered '$SEND'"
-TX=$("$LC" $LCCFG call pilot walletHistory 2>/dev/null | res | python3 -c 'import sys,json
+TX=$(call "$LCDIR" walletHistory | python3 -c 'import sys,json
 req=sys.argv[1]
 for t in json.loads(sys.stdin.read() or "{}").get("transactions",[]):
     if t.get("id")==req: print(t.get("tx_hash",""), t.get("state",""))' "$REQ")
@@ -235,9 +142,9 @@ echo "      ON CHAIN: tx $TXH in block $BLK; recipient $RB0 -> $RB1; sender $PBA
 
 echo "[6/6] Encrypted file vault: storage.upload -> storage.download -> byte compare..."
 echo "notarized secret $(date +%s)" > "$WORK/vault.txt"
-CID=$("$LC" $LCCFG call pilot storageUpload "$WORK/vault.txt" demo-doc 2>/dev/null | res | field cid)
+CID=$(call "$LCDIR" storageUpload "$WORK/vault.txt" demo-doc | field cid)
 [ -n "$CID" ] || fail vault "storage.upload returned no CID"
-"$LC" $LCCFG call pilot storageDownload "$CID" "$WORK/vault.out" >/dev/null 2>&1
+call "$LCDIR" storageDownload "$CID" "$WORK/vault.out" >/dev/null
 cmp -s "$WORK/vault.txt" "$WORK/vault.out" || fail vault "downloaded file differs from the upload (cid $CID)"
 echo "      cid $CID uploaded encrypted and downloaded back byte-identical"
 

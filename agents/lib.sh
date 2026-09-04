@@ -28,7 +28,7 @@ T_START="${T_START:-$(date +%s)}"
 LC="${LC:-}"; LGPM="${LGPM:-}"
 
 fail() {                                   # every assertion goes through here: say what, show the logs, exit 1
-  echo; echo "FAIL [$1]: $2"
+  echo; echo "${FAIL_PREFIX:-FAIL} [$1]: $2"
   for l in $FAIL_LOGS; do
     echo "--- $(basename "$(dirname "$l")")/$(basename "$l") tail ---"; tail -25 "$l" 2>/dev/null
   done
@@ -140,7 +140,8 @@ call() { local LCDIR="$1"; shift; "$LC" --config-dir "$LCDIR" call pilot "$@" 2>
 # PUB_B58, PBAL, PNONCE, ST (last status JSON), ACCOUNT (private account). Counted in POLLS, not
 # wall-clock seconds (a machine that sleeps mid-run must not expire the budget on resume).
 wait_funded() {
-  local LCDIR="$1" DATA="$2" NAME="$3"
+  local LCDIR="$1" DATA="$2" NAME="${3:-}" TAG=""
+  [ -n "$NAME" ] && TAG="[$NAME] "
   mkdir -p "$DATA"
   "$LC" --config-dir "$LCDIR" call pilot initialize "$DATA" >/dev/null 2>&1 || true
   PUB=""; ST=""; local POLLS=$(( FUND_TIMEOUT_SECS / 20 )) i=0 ERR
@@ -151,22 +152,26 @@ wait_funded() {
     if [ ${#PUB} -eq 64 ]; then break; fi
     ERR=$(echo "$ST" | field funding.last_error)
     case "$ERR" in *"never credited"*|*"claim_pinata failed"*|*"register_public_account failed"*|*"create_account_public failed"*|*"unsolvable"*)
-      fail fund "[$NAME] funding stopped before a public account was credited: $ERR";; esac
+      fail fund "${TAG}funding stopped before a public account was credited: $ERR";; esac
+    # A status reply means initialize has returned; none means the module thread is still inside
+    # the wallet sync / funding (the daemon abandons the call at ~20 s). Say so every ~5 minutes.
     if [ $(( i % 15 )) -eq 0 ]; then
-      if [ -n "$ST" ]; then echo "      … [$NAME] poll $i/$POLLS ($(elapsed)): funded=$(echo "$ST" | field funding.funded) last_error=$(echo "$ST" | field funding.last_error | head -c 80)"
-      else echo "      … [$NAME] poll $i/$POLLS ($(elapsed)): module busy (syncing / funding), no status yet"; fi
+      if [ -n "$ST" ]; then echo "      … ${TAG}poll $i/$POLLS ($(elapsed)): funded=$(echo "$ST" | field funding.funded) last_error=$(echo "$ST" | field funding.last_error | head -c 80)"
+      else echo "      … ${TAG}poll $i/$POLLS ($(elapsed)): module busy (syncing / funding), no status yet"; fi
     fi
     sleep 20
   done
-  [ ${#PUB} -eq 64 ] || fail fund "[$NAME] no funded public account after $POLLS polls (last status: $(echo "$ST" | head -c 300))"
+  [ ${#PUB} -eq 64 ] || fail fund "${TAG}no funded public account after $POLLS polls (last status: $(echo "$ST" | head -c 300))"
   read -r PBAL PNONCE <<<"$(acct "$PUB")"
-  # The claim credits 150; with real proofs the shielded leg (100 out) can already have landed.
+  # The claim credits 150. With real proofs the module finishes the shielded leg (100 out) INSIDE
+  # initialize, before metaStatus ever answers, so the first reading may already be 50 (measured on
+  # a 16 GB runner 2026-09-04, run 33880084026): funded either way.
   [ -n "$PBAL" ] && [ "${PNONCE:-0}" -ge 1 ] && [ "$PBAL" -ge 50 ] \
-    || fail fund "[$NAME] chain does not show the claimed account funded: $(b58 "$PUB") balance='$PBAL' nonce='$PNONCE'"
+    || fail fund "${TAG}chain does not show the claimed account funded: $(b58 "$PUB") balance='$PBAL' nonce='$PNONCE'"
   PUB_B58=$(b58 "$PUB")
   ACCOUNT=$(echo "$ST" | field account)
-  echo "      [$NAME] private account: $ACCOUNT"
-  echo "      [$NAME] funded public account: $PUB_B58 = $PBAL LEZ on chain (nonce $PNONCE)  [$(elapsed)]"
+  echo "      ${TAG}agent private account: $ACCOUNT"
+  echo "      ${TAG}funded public account: $PUB_B58 = $PBAL LEZ on chain (nonce $PNONCE)  [$(elapsed)]"
 }
 
 # wait_quiet <config-dir> <name>: the module keeps working after initialize returns (funding,
