@@ -81,7 +81,7 @@ echo ""
 
 # Load modules
 echo "── Loading modules ──"
-for m in capability_module lez_wallet_module delivery_module storage_module pilot; do
+for m in capability_module lez_core delivery_module storage_module pilot; do
   timeout 15 $LOGOSCORE $CFG load-module $m > /dev/null 2>&1
   echo "  OK    $m"
 done

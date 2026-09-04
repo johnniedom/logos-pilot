@@ -20,7 +20,7 @@ CONTAINER="pilot-agent-b"
 docker rm -f $CONTAINER >/dev/null 2>&1
 docker run --rm -v /tmp:/tmp ubuntu:22.04 rm -rf /tmp/agent-b /tmp/agent-b-modules /tmp/pilot-logoscore >/dev/null 2>&1
 mkdir -p $MODULES_B $AGENT_B
-for m in capability_module logos_execution_zone delivery_module chat_module pilot; do
+for m in capability_module lez_core delivery_module chat_module pilot; do
   cp -r $MODULES/$m $MODULES_B/$m 2>/dev/null
 done
 # Fail fast if the copy didn't land — an empty /modules mount is exactly the
@@ -52,7 +52,7 @@ if ! docker ps --filter name=$CONTAINER --format "{{.Status}}" | grep -q "Up"; t
   echo "FAIL: Agent B container did not start"; docker logs $CONTAINER 2>&1 | tail -5; exit 1
 fi
 
-for m in capability_module logos_execution_zone delivery_module pilot; do
+for m in capability_module lez_core delivery_module pilot; do
   docker exec $CONTAINER timeout 15 $LOGOSCORE --config-dir /data/.logoscore load-module $m > /dev/null 2>&1
 done
 sleep 3

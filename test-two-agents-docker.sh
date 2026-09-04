@@ -18,8 +18,11 @@ export RISC0_DEV_MODE="${RISC0_DEV_MODE:-1}"
 if [ -z "${LOGOS_BLOCKCHAIN_CIRCUITS:-}" ]; then
   export LOGOS_BLOCKCHAIN_CIRCUITS=$(find /nix/store -maxdepth 1 -name '*logos-blockchain-circuits*' -type d 2>/dev/null | head -1)
 fi
-[ -d "$HOME/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu" ] && \
-  export PATH="$HOME/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:$PATH"
+# RISC0 toolchain: whichever cargo-risczero extension is installed (r0vm lives there). The same
+# directory is mounted into Agent B's container below, so nothing here is tied to one machine.
+RISC0_HOME="${RISC0_HOME:-$HOME/.risc0}"
+R0VM_EXT="$(ls -d "$RISC0_HOME"/extensions/*cargo-risczero* 2>/dev/null | head -1)"
+[ -n "$R0VM_EXT" ] && export PATH="$R0VM_EXT:$PATH"
 MODULES="${PILOT_MODULE_PATH:-$HOME/.pilot/modules}"
 MODULES_B="/tmp/pilot-logoscore/modules-b"   # scratch copy for Agent B (repopulated from $MODULES below)
 
@@ -263,7 +266,7 @@ docker run --rm -d \
   -v /nix/store:/nix/store:ro \
   -v $MODULES_B:/modules:ro \
   -v $AGENT_B:/data \
-  -v /home/johnnie/.risc0:/root/.risc0:ro \
+  -v "$RISC0_HOME":/root/.risc0:ro \
   -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
   -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   -e NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
@@ -272,8 +275,8 @@ docker run --rm -d \
   -e PILOT_WAKU_ADDR=/ip4/$NWAKU_IP/tcp/30303/p2p/$NWAKU_ID \
   -e PILOT_WAKU_REST=http://$NWAKU_IP:8645 \
   -e RISC0_DEV_MODE=1 \
-  -e LOGOS_BLOCKCHAIN_CIRCUITS=/nix/store/y8i3f2qiyhbl9kccvl7z12rnbj6h42g9-logos-blockchain-circuits-0.4.1 \
-  -e PATH=/root/.risc0/extensions/v3.0.5-cargo-risczero-x86_64-unknown-linux-gnu:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  -e LOGOS_BLOCKCHAIN_CIRCUITS="$LOGOS_BLOCKCHAIN_CIRCUITS" \
+  -e PATH=/root/.risc0/extensions/$(basename "${R0VM_EXT:-none}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   --add-host=host.docker.internal:host-gateway \
   $LLM_HOST_PIN \
   ubuntu:22.04 \

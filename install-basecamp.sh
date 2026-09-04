@@ -29,7 +29,7 @@ install_lgx() {
 echo "[1/3] Installing modules..."
 install_lgx "pilot"
 install_lgx "capability_module"
-install_lgx "lez_wallet_module"
+install_lgx "lez_core"
 install_lgx "delivery_module"
 install_lgx "storage_module"
 install_lgx "chat_module"
