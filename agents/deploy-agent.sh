@@ -42,7 +42,11 @@ fi
 . "$ROOT/agents/lib.sh"
 need nix; need python3; need curl; need cmp
 
-OUT="$ROOT/agents/out/$ROLE"; rm -rf "$OUT"; mkdir -p "$OUT"
+# Never rm -rf $OUT here: the caller may already be tee-ing run.log into it (the workflow does),
+# and unlinking that file cost the first CI run its run log. Clear only what this script writes.
+OUT="$ROOT/agents/out/$ROLE"; mkdir -p "$OUT"
+rm -f "$OUT"/agent-*-daemon.log "$OUT"/agent-*-storage.log "$OUT"/agent-*-inbox.json "$OUT"/last-inbox.json \
+      "$OUT"/shared-original.txt "$OUT"/shared-downloaded-by-b.txt
 WORK="$(mktemp -d)"
 MODS="$WORK/modules"; mkdir -p "$MODS"
 A_LC="$WORK/a/lc"; A_DATA="$WORK/a/data"; A_LOG="$OUT/agent-a-daemon.log"
@@ -86,9 +90,10 @@ done
 echo "      both daemons up; pilot + lez_core + delivery_module + storage_module loaded; 23 skills each"
 
 echo "[4/6] Two identities, each funding ITSELF from the faucet (chain replay first; polls counted, not wall-clock)..."
-# Kick both initializes, then wait for each: the two wallets sync in parallel.
-"$LC" --config-dir "$A_LC" call pilot initialize "$A_DATA" >/dev/null 2>&1 || true
-"$LC" --config-dir "$B_LC" call pilot initialize "$B_DATA" >/dev/null 2>&1 || true
+# One after the other, not side by side. The faucet's puzzle data changes with every claim it
+# pays, so two agents claiming in the same minute race each other: the loser's solution is
+# stale, its claim is accepted and never credited (runs 33923468614 / 33925547986). The module
+# now re-reads the faucet and retries; funding A before B removes the race we cause ourselves.
 wait_funded "$A_LC" "$A_DATA" A; A_PUB="$PUB"; A_PUB_B58="$PUB_B58"; A_PBAL="$PBAL"; A_PNONCE="$PNONCE"; A_ACCOUNT="$ACCOUNT"
 wait_funded "$B_LC" "$B_DATA" B; B_PUB="$PUB"; B_PUB_B58="$PUB_B58"; B_PBAL="$PBAL"; B_PNONCE="$PNONCE"; B_ACCOUNT="$ACCOUNT"
 wait_quiet "$A_LC" A; wait_quiet "$B_LC" B
@@ -146,7 +151,8 @@ if [ "$ROLE" = "storage" ]; then
   echo "$INBOX" > "$OUT/agent-b-inbox.json"
   call "$B_LC" storageList | grep -q "$CID" || fail share "B's storage.list does not show the shared CID after receiving the key"
   echo "      B: share received — storage.list on B shows $CID (shared by A)"
-  CONN=$(call "$B_LC" storageConnect "$A_PEER" "[\"$A_STORAGE_ADDR\"]")
+  # A plain multiaddr, not a JSON array: the CLI must not get a chance to re-parse the argument.
+  CONN=$(call "$B_LC" storageConnect "$A_PEER" "$A_STORAGE_ADDR")
   echo "      B: dialing A's storage node $A_PEER at $A_STORAGE_ADDR -> $CONN"
   sleep 5
   # The daemon abandons the call at ~20 s while the module keeps fetching; the FILE is the truth.
@@ -176,7 +182,8 @@ echo "      B received: $(echo "$INBOX" | python3 -c "import sys,json; ms=[m for
 echo "EVIDENCE role=messaging step=direct from=A to=B topic=$(echo "$SEND" | field topic) message=\"$MSG_AB\" received_by=B"
 
 echo "[6/6] messaging: A creates a group and invites B (sealed invite carries the group key); B joins; one message each way..."
-GRP=$(call "$A_LC" messagingCreateGroup "[\"$B_KEY\"]")
+# One member as a plain key (the comma-list form), not a JSON array the CLI could re-parse.
+GRP=$(call "$A_LC" messagingCreateGroup "$B_KEY")
 GID=$(echo "$GRP" | field group_id); GTOPIC=$(echo "$GRP" | field topic)
 [ -n "$GID" ] && [ "$(echo "$GRP" | field invited)" = "1" ] || fail group "messaging.create_group answered: $GRP"
 INBOX=$(poll_inbox_until "$B_LC" "the group invite" "m.get('kind')=='group_invite' and m.get('group_id')=='$GID' for m in ms")

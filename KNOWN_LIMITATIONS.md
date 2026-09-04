@@ -127,7 +127,7 @@ trusted code, not a defense against untrusted code.**
 
 ## 4. Build & test — unit suite green; the end-to-end CI job settles a real spend on the public testnet
 
-**What it is.** The module **builds** and the full **unit suite (188 tests) passes**.
+**What it is.** The module **builds** and the full **unit suite (208 tests) passes**.
 The end-to-end CI job used to boot a Docker devnet sequencer on port 8080 that the
 wallet never talked to (the module defaults to `:3040`, `PILOT_SEQUENCER_ADDR` was
 never set, `initialize` was never called, and the only wallet line was `|| true`) —

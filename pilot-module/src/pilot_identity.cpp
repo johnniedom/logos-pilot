@@ -752,28 +752,46 @@ bool PilotImpl::fundAgentIfNeeded() {
             }
         }
 
-        // 2. Resolve the pinata id, fetch its data, solve the PoW.
+        // 2.+3. Resolve the pinata, read its CURRENT data, solve the PoW, claim — and when the
+        // credit does not land, read it again and claim again. The faucet's data changes with
+        // every claim it pays out, so a solution computed against data that another claimer
+        // consumed in the meantime is stale: claim_pinata still answers success (mempool
+        // accept) and the account is never credited. Two agents funding side by side in one
+        // job lose this race to EACH OTHER — measured 2026-09-04 on the public testnet
+        // (testnet-agents runs 33923468614 / 33925547986: B credited within 3 min, A "never
+        // credited" after the full 10; the single-agent demo, racing nobody, was 5 for 5 the
+        // same day). Each attempt waits up to three testnet blocks for the credit.
         std::string pinataHex = modules().lez_core.account_id_from_base58(kPinataBase58, nullptr, 15000);
         if (pinataHex.empty()) return fundFail("pinata id resolve failed");
 
-        std::string accJson = modules().lez_core.get_account_public(pinataHex, nullptr, 15000);
-        QJsonDocument accDoc = QJsonDocument::fromJson(QString::fromStdString(accJson).toUtf8());
-        std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
-        std::string solHex = computePinataSolution(dataHex);
-        if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
-
-        // 3. Claim the pinata into the public account.
-        if (!ok(modules().lez_core.claim_pinata(pinataHex, pubId, solHex, nullptr, 60000))) {
-            return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
-        }
-
-        // Wait for the claim tx to be mined and credited before spending it.
         bool credited = false;
-        for (auto until = deadline(); !credited && std::chrono::steady_clock::now() < until;) {
-            syncToHead();
-            std::string bal = modules().lez_core.get_balance(pubId, true);
-            if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) credited = true;
-            else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        const int perAttemptSecs = waitSecs < 180 ? waitSecs : 180;
+        for (int attempt = 1; attempt <= 3 && !credited; ++attempt) {
+            std::string accJson = modules().lez_core.get_account_public(pinataHex, nullptr, 15000);
+            QJsonDocument accDoc = QJsonDocument::fromJson(QString::fromStdString(accJson).toUtf8());
+            std::string dataHex = accDoc.isObject() ? accDoc.object().value("data").toString().toStdString() : std::string();
+            std::string solHex = computePinataSolution(dataHex);
+            if (solHex.empty()) return fundFail("pinata data empty or unsolvable — is the faucet present on this chain?");
+
+            if (!ok(modules().lez_core.claim_pinata(pinataHex, pubId, solHex, nullptr, 60000))) {
+                return fundFail("claim_pinata failed — faucet may already be claimed on this chain");
+            }
+
+            // Wait for the claim tx to be mined and credited before spending it.
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(perAttemptSecs);
+            while (!credited && std::chrono::steady_clock::now() < until) {
+                syncToHead();
+                std::string bal = modules().lez_core.get_balance(pubId, true);
+                if (!bal.empty() && std::atoll(bal.c_str()) >= fundAmount) credited = true;
+                else std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+            if (!credited) {
+                qWarning() << "[pilot] fund: claim attempt" << attempt << "not credited within"
+                           << perAttemptSecs << "s; re-reading the faucet and claiming again";
+                // Visible in metaStatus meanwhile; deliberately NOT the final wording, which
+                // the demo and the role script treat as fatal.
+                fundFail("pinata claim not yet credited; retrying with fresh faucet data");
+            }
         }
         if (!credited) return fundFail("pinata claim never credited the public account");
 

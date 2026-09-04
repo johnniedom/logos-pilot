@@ -457,7 +457,7 @@ Prerequisites: sequencer running (`./run-sequencer.sh`), Waku node running (`doc
 ### Test suites
 
 ```bash
-# Unit tests (188 tests, no runtime needed)
+# Unit tests (208 tests, no runtime needed)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Single-agent integration (28 tests, needs sequencer)
@@ -636,7 +636,7 @@ The `--user-dir` flag isolates the instance with its own `modules/`, `plugins/`,
 
 | Level | What works | What doesn't |
 |-------|-----------|-------------|
-| Unit tests (`nix build .#unit-tests`) | All 188 tests: crypto, skills, LLM, spending FSM, A2A, storage config | No inter-module calls |
+| Unit tests (`nix build .#unit-tests`) | All 208 tests: crypto, skills, LLM, spending FSM, A2A, storage config | No inter-module calls |
 | logoscore inline (`-c ... --quit-on-finish`) | Load module, call methods, scripting | No dependency modules unless also loaded with `-l` |
 | logoscore daemon (`-D`) | Persistent runtime, load/unload, events, auth | No GUI |
 | Basecamp (`--user-dir`) | Everything — LogosAPI, inter-module, QML UI | Needs display or `QT_QPA_PLATFORM=offscreen` |

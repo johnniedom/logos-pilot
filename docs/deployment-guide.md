@@ -31,7 +31,7 @@ cd pilot-module
 git init && git add -A
 nix build --extra-experimental-features 'nix-command flakes'
 
-# Run unit tests (188)
+# Run unit tests (208)
 nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Build LGX package
@@ -139,7 +139,7 @@ Pilot Chat
 ## Step 6: Run Tests
 
 ```bash
-# Unit tests (188)
+# Unit tests (208)
 cd pilot-module && nix build .#unit-tests --extra-experimental-features 'nix-command flakes' -L
 
 # Single-agent integration (28) — needs sequencer

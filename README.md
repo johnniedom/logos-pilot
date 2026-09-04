@@ -311,7 +311,7 @@ All commands run from `pilot-module/`. Nix flakes must be enabled.
 nix --extra-experimental-features "nix-command flakes" build          # Module binary (.so)
 nix --extra-experimental-features "nix-command flakes" build .#lgx    # Installable package (.lgx)
 nix --extra-experimental-features "nix-command flakes" build .#install       # Module + manifest for logoscore
-nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (188)
+nix --extra-experimental-features "nix-command flakes" build .#unit-tests -L # Run unit tests (208)
 nix --extra-experimental-features "nix-command flakes" build .#include       # Module headers (for dependents)
 ```
 
@@ -498,7 +498,7 @@ Chat features:
 docker-compose up -d
 ```
 
-### Suite 1: Unit Tests (188 tests)
+### Suite 1: Unit Tests (208 tests)
 
 Tests crypto, skill registry, LLM factory, and core module behavior. No runtime needed.
 

@@ -39,7 +39,7 @@ jobs:
       - name: Build module
         run: cd pilot-module && nix build
 
-      - name: Run unit tests (188 tests)
+      - name: Run unit tests (208 tests)
         run: cd pilot-module && nix build .#unit-tests -L
 
       - name: Build LGX package

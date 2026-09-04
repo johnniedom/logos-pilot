@@ -10,7 +10,7 @@ See the implementation plan at `plans/pilot-implementation.md`, and the design d
 
 ```bash
 cd pilot-module && git init && git add -A && nix build
-nix build .#unit-tests -L   # 188 tests — crypto, skills, LLM, spending, A2A, storage config
+nix build .#unit-tests -L   # 208 tests — crypto, skills, LLM, spending, A2A, storage config
 ```
 
 ### logoscore CLI (headless runtime)
