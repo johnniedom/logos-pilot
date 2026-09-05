@@ -183,9 +183,11 @@ Status of the submission criteria:
   invite carried the AES-256-GCM group key, B joined, one group message each way —
   each item **read back on the receiving side**, not just sent. **Blockchain**: the
   CI demo (`./demo.sh`): identity, faucet claim, a spend through the spending FSM,
-  all read back from the chain on every push. Identities, keys and what each agent
-  did: `evidence/testnet-agents.tsv`; `evidence/verify-testnet.sh` re-reads every
-  account from the chain. Until 2026-09-04 the receiving half of messaging and
+  all read back from the chain on every push. **Acceptance run 33933531544**
+  (2026-09-05): all three roles green in one run, five fresh identities, the
+  blockchain agent's spend `524ab303…` mined in block 38085. Identities, keys and
+  what each agent did: `evidence/testnet-agents.tsv`; `evidence/verify-testnet.sh`
+  re-reads every account from the chain. Until 2026-09-04 the receiving half of messaging and
   file sharing did not exist — a message or shared key was decrypted and dropped
   on arrival, and the two-agent test only ever asserted the send (wire shapes and
   keys: `docs/architecture.md`, "Encryption Model").
