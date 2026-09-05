@@ -16,22 +16,9 @@
         "type": "github"
       }
     },
-    "pilot-module-src": {
-      "flake": false,
-      "locked": {
-        "path": "../pilot-module",
-        "type": "path"
-      },
-      "original": {
-        "path": "../pilot-module",
-        "type": "path"
-      },
-      "parent": []
-    },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "pilot-module-src": "pilot-module-src"
+        "nixpkgs": "nixpkgs"
       }
     }
   },
