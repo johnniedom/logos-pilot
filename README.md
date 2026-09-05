@@ -169,7 +169,7 @@ pilot-module/
 └── CMakeLists.txt             # Build rules
 ```
 
-## Skills (22 total)
+## Skills (23 total)
 
 ### Wallet (3)
 | Skill | Method | Description |
@@ -200,7 +200,7 @@ its encryption key (`_logos.enc_key` in its card) and is listened on only while 
 open for hire. `storagePeerInfo()` / `storageConnect(peerId, addrs)` let one agent's storage
 node dial another's so a shared CID can be fetched over the storage network.
 
-### Agent Coordination — A2A (6)
+### Agent Coordination — A2A (7)
 | Skill | Method | Description |
 |-------|--------|-------------|
 | agent.ask | `agentAsk(prompt)` | Answers a prompt with the agent's LLM (pure compute; price 5) — the only skill served autonomously to paying strangers |
@@ -209,6 +209,7 @@ node dial another's so a shared CID can be fetched over the storage network.
 | agent.task | `agentTask(address, skill, params)` | Sends a task request (JSON-RPC 2.0) |
 | agent.subscribe | `agentSubscribe(address, taskId)` | Streams task status updates |
 | agent.cancel | `agentCancel(address, taskId)` | Cancels a running task |
+| agent.import_card | `agentImportCard(cardJson)` | Learns a peer from a card handed over out of band, with the same signature and first-contact pinning checks as a discovered card |
 
 `agent.ask` is the only skill served autonomously to paying strangers — a pure-compute LLM query (no files, identity, or funds). All other inbound skills are owner-gated.
 

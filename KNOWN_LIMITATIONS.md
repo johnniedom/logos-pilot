@@ -139,9 +139,14 @@ spending FSM verified by `getTransaction` and the recipient's balance, and the v
 round-trip. First green run 2026-09-04 (run 33880060967, 21 minutes on a hosted runner
 that had never seen the chain): faucet claim into `6U4d…` verified at 150, spend
 tx `1398d754…c273` mined in block 37450, sender 150 → 149, recipient 170 → 171, all
-read back with `getAccount` / `getTransaction`. What remains outside this job is the
-**shielded leg** (a real RISC0 proof, ~16 GB of RAM — `real-proof.yml` runs it by
-hand on a 16 GB runner) and the **live two-agent A2A round trip**.
+read back with `getAccount` / `getTransaction`. Outside this job but also on hosted
+runners against the public testnet: the **shielded leg** with a real RISC0 proof
+(`real-proof.yml`, 16 GB runner, green 2026-09-04), the **two-agent runs** of
+`testnet-agents.yml` (storage sharing fetched across nodes, direct and group messages
+read back on the receiver, green 2026-09-05), the **event alerter** use case
+(`testnet-use-cases.yml`) and the **owner channel from a separate app**
+(`owner-channel.yml`). Still not in CI: the paid A2A task settled on chain (the
+`marketplace` job exists and needs a language-model key as a repository secret).
 
 **Why CI rather than local.** A local build is infeasible on the development box:
 building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RISC0
@@ -156,9 +161,10 @@ drop to equal the declared price (measured 2026-08-26: 100 → 99 for the direct
 transfer, then → 94 for the 5-LEZ task payment, both in the next block). It runs
 on the development box, not in CI.
 
-**What would close the remainder.** A run that drives real funding/spending with
-`RISC0_DEV_MODE=0` against a sequencer, and the two-agent settlement above in CI,
-to confirm the on-chain behavior the unit/E2E suites do not assert.
+**What would close the remainder.** The two-agent paid settlement in CI: the
+`marketplace` job of `testnet-use-cases.yml` (real proofs on a 16 GB runner), once the
+seller's language-model key is a repository secret, confirms on chain the one behavior
+the unit and E2E suites do not assert.
 
 ---
 
