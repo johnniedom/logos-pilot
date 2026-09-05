@@ -146,7 +146,7 @@ The Pilot agent is a first-class participant in the Logos ecosystem. It can:
 - **Store and retrieve encrypted files** via Logos Storage
 - **Communicate with its owner** via end-to-end encrypted Logos Messaging
 - **Discover and coordinate with other agents** using the A2A protocol
-- **Spend tokens on-chain** autonomously within owner-set limits (program execution is a verified upstream gap)
+- **Spend tokens on-chain** autonomously within owner-set limits, and reach LEZ programs through the wallet module's transaction methods (query, call with the program's own instruction words, deploy)
 
 The owner deploys the agent with a single CLI command and interacts with it from any Logos app instance — no server configuration, no exposed APIs, no custodian.
 
@@ -216,16 +216,14 @@ node dial another's so a shared CID can be fetched over the storage network.
 ### Blockchain (3)
 | Skill | Method | Description |
 |-------|--------|-------------|
-| program.query | `programQuery(programId, params)` | Reads state from a LEZ program — _verified upstream gap: no program-op method exists on the wallet module / wallet-ffi at the pinned revs; calls the real method and returns an honest `unsupported (verified)` error_ |
-| program.call | `programCall(programId, instruction, params)` | Submits a transaction — _verified upstream gap (same as above); does not transact_ |
-| program.deploy | `programDeploy(binaryPath)` | _Verified upstream gap: deploy on LEZ is a direct `NSSATransaction` the wallet module does not expose. Attempts the real call and returns an honest `unsupported (verified)` error — it does not route through owner approval._ |
+| program.query | `programQuery(programId, params)` | Reads a program's on-chain account through the wallet module (`get_account_public`): balance, nonce, data, owner |
+| program.call | `programCall(programId, instruction, params)` | Submits `send_generic_public_transaction` with the caller's account list, signing flags and the program's own instruction words; malformed input is refused before the wallet is asked. Pilot knows no program's ABI |
+| program.deploy | `programDeploy(binaryPath)` | Submits `send_program_deployment_transaction` for a RISC0 guest ELF (a file, or `builtin:token` / `amm` / `ata` / `authenticated_transfer` from the wallet module) and returns the wallet's reply as it is |
 
-> **Known limitation (verified upstream gap, not a Pilot defect):** the `program.*`
-> skills are wired through the full agent pipeline, but a direct source audit of the
-> pinned dependency revisions found **no program-operation method of any name** on
-> the wallet module or `wallet-ffi`. Each skill calls the real underlying method and
-> returns an honest `unsupported (verified)` error rather than faking success. See
-> [KNOWN_LIMITATIONS.md §1](KNOWN_LIMITATIONS.md).
+> **Since 2026-09-05** these call the wallet module's real program methods. Until then they
+> answered "unsupported (verified)" on the strength of a source audit of an earlier pin that
+> had no such methods; the current pin has them. What has and has not been exercised on the
+> testnet: [KNOWN_LIMITATIONS.md §1](KNOWN_LIMITATIONS.md).
 
 ### Meta (3)
 | Skill | Method | Description |
@@ -273,7 +271,7 @@ Agent-to-agent coordination follows the [A2A specification](https://a2a-protocol
 | Send above threshold | No | Yes |
 | Upload/download files (owner-initiated) | Yes | — |
 | Share files (owner-initiated) | Yes | — |
-| Deploy programs | No | No — unsupported upstream (KNOWN_LIMITATIONS.md §1) |
+| Deploy / call programs (owner-initiated) | Yes — through the wallet module's transaction methods (KNOWN_LIMITATIONS.md §1) | No — never advertised over A2A |
 | Send messages (owner-initiated) | Yes | — |
 | Agent-to-agent tasks (owner-initiated) | Yes | — |
 | Stranger-initiated risky A2A skill (storage/messaging/wallet/program) | No — owner-gated | Yes |
@@ -589,16 +587,16 @@ Suite sizes (results pending CI verification — KNOWN_LIMITATIONS.md §4):
 
 ## Known Limitations
 
-> The full, honest list — upstream program-op gap (with pinned-revision evidence),
-> A2A residual minors, the plugin-loader trust caveats, pending-CI build/test status,
-> and the testnet-evidence + demo-video gaps — is in
+> The full, honest list — program operations (wired to the wallet module at the current pin;
+> what is and is not exercised), A2A residual minors, the plugin-loader trust caveats,
+> CI/testnet status, and the demo-video gap — is in
 > **[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)**. The items below are a summary.
 
 - **Storage download is async** — `downloadChunks` returns a session ID; data arrives via events. Synchronous callers get a "downloading" status.
 - **Two storage modules can't coexist** — global LevelDB cache at `~/.cache/storage/`. Multi-agent needs separate machines or Docker.
 - **NAT detection in WSL** — delivery module spends 12s probing for UPnP/NAT-PMP gateways that don't exist. Set `PILOT_NAT=extip:127.0.0.1` to skip.
 - **Qt RO Timeout doesn't cancel FFI** — `Timeout(15000)` returns null to caller but the remote C call keeps running.
-- `programCall`/`programQuery`/`programDeploy` — verified upstream gap: no program-op method of any name exists on the wallet module / wallet-ffi at the pinned revs; the skills call the real method and return an honest `unsupported (verified)` error (KNOWN_LIMITATIONS.md §1)
+- `programCall` sends exactly the instruction words the caller supplies — Pilot knows no program's ABI, and private program calls are not wired (KNOWN_LIMITATIONS.md §1)
 - RISC0 proof generation requires `RISC0_DEV_MODE=0` only when a SPEL guest binary exists
 
 ## License

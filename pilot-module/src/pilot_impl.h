@@ -544,6 +544,11 @@ std::vector<std::string> pilotParseMembers(const std::string& membersJson);
 // pilotLooksLikeAccountHex: exactly 64 hex chars (a raw LEZ account id) — anything else is
 // taken as base58 by chainAccount.
 bool pilotLooksLikeAccountHex(const std::string& s);
+// Program-call argument parsers (pilot_a2a.cpp): a program's instruction words (unsigned 32-bit)
+// and per-account signing flags, from a JSON array or a comma list. *okOut is false and the
+// result empty on any malformed token — the wallet is never asked with a guessed value.
+std::vector<uint32_t> pilotParseWordList(const std::string& s, bool* okOut);
+std::vector<bool> pilotParseBoolList(const std::string& s, bool* okOut);
 // pilotLeHexToDecimal: a little-endian hex integer of up to 16 bytes (the wallet's u128 wire
 // form for amounts, e.g. "96000000000000000000000000000000" = 150) -> decimal string; "" when the
 // input is not even-length hex or longer than 16 bytes.

@@ -9,6 +9,8 @@
 #include <thread>
 #include <random>
 #include <vector>
+#include <cstdlib>
+#include <cstdint>
 
 #include <QString>
 #include <QVariant>
@@ -1571,17 +1573,125 @@ void PilotImpl::outboundTasksRecover() {
     }
 }
 
+// ---- Program operations (2026-09-05) -----------------------------------------------------------
+// The wallet module at the pinned revision (logos-execution-zone-module 549cf115, LEZ v0.2.2) DOES
+// expose the program entry points an earlier audit (pin 5d42559 / lssa cf3639d) found missing:
+// get_account_public (a program's on-chain account), send_generic_public_transaction (call a
+// program with instruction words), send_program_deployment_transaction (deploy an ELF), and the
+// built-in program ELFs (token_elf, amm_elf, ata_elf, authenticated_transfer_elf). Until this
+// date the three skills answered "unsupported (verified)" on the strength of the old audit. Now
+// they call the real methods and return the wallet's own reply. Pilot knows no program's
+// instruction ABI: program.call sends exactly the words the owner supplies.
+
+namespace {
+
+int programTxTimeoutMs() {
+    if (const char* e = std::getenv("PILOT_TX_TIMEOUT_MS")) {
+        int v = std::atoi(e);
+        if (v > 0) return v;
+    }
+    return 120000;
+}
+
+// The wallet's transfer-style reply {"success":bool,"tx_hash":..,"error":..} -> our result object.
+// An empty or non-JSON reply is reported as such, never as a success.
+QJsonObject walletReplyToResult(const std::string& reply, const char* okKey) {
+    QJsonObject res;
+    QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(reply));
+    if (!d.isObject()) {
+        res[okKey] = false;
+        res["error"] = QString::fromStdString(
+            reply.empty() ? std::string("wallet did not answer") : "wallet reply is not JSON: " + reply.substr(0, 200));
+        return res;
+    }
+    QJsonObject w = d.object();
+    const bool ok = w.value("success").toBool();
+    res[okKey] = ok;
+    if (w.contains("tx_hash")) res["tx_hash"] = w.value("tx_hash");
+    if (!ok) res["error"] = w.contains("error") ? w.value("error") : QJsonValue(QString("wallet reported failure"));
+    res["wallet_reply"] = w;
+    return res;
+}
+
+// A JSON value that may already be an array, or a string holding one / a comma list -> string form.
+std::string listText(const QJsonValue& v) {
+    if (v.isArray()) return QJsonDocument(v.toArray()).toJson(QJsonDocument::Compact).toStdString();
+    return v.toString().toStdString();
+}
+
+}  // namespace
+
+std::vector<uint32_t> pilotParseWordList(const std::string& s, bool* okOut) {
+    std::vector<uint32_t> out;
+    bool ok = true;
+    auto push = [&](const QString& tok) {
+        QString t = tok.trimmed();
+        if (t.isEmpty()) return;
+        bool numOk = false;
+        qulonglong v = t.toULongLong(&numOk, 10);
+        if (!numOk || v > 0xFFFFFFFFULL) { ok = false; return; }
+        out.push_back(static_cast<uint32_t>(v));
+    };
+    QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(s));
+    if (d.isArray()) {
+        for (const QJsonValue& v : d.array()) {
+            if (v.isDouble() && v.toDouble() >= 0 && v.toDouble() <= 4294967295.0 && v.toDouble() == static_cast<double>(static_cast<qulonglong>(v.toDouble())))
+                out.push_back(static_cast<uint32_t>(v.toDouble()));
+            else if (v.isString()) push(v.toString());
+            else ok = false;
+        }
+    } else {
+        QString str = QString::fromStdString(s).trimmed();
+        if (str.startsWith('[')) str.remove(0, 1);
+        if (str.endsWith(']')) str.chop(1);
+        if (str.trimmed().isEmpty()) { if (okOut) *okOut = true; return out; }
+        for (const QString& tok : str.split(',')) push(tok);
+    }
+    if (okOut) *okOut = ok;
+    return ok ? out : std::vector<uint32_t>();
+}
+
+std::vector<bool> pilotParseBoolList(const std::string& s, bool* okOut) {
+    std::vector<bool> out;
+    bool ok = true;
+    auto push = [&](const QString& tok) {
+        QString t = tok.trimmed().toLower();
+        if (t.isEmpty()) return;
+        if (t == "true" || t == "1") out.push_back(true);
+        else if (t == "false" || t == "0") out.push_back(false);
+        else ok = false;
+    };
+    QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(s));
+    if (d.isArray()) {
+        for (const QJsonValue& v : d.array()) {
+            if (v.isBool()) out.push_back(v.toBool());
+            else if (v.isDouble() && (v.toDouble() == 0 || v.toDouble() == 1)) out.push_back(v.toDouble() == 1);
+            else if (v.isString()) push(v.toString());
+            else ok = false;
+        }
+    } else {
+        QString str = QString::fromStdString(s).trimmed();
+        if (str.startsWith('[')) str.remove(0, 1);
+        if (str.endsWith(']')) str.chop(1);
+        if (str.trimmed().isEmpty()) { if (okOut) *okOut = true; return out; }
+        for (const QString& tok : str.split(',')) push(tok);
+    }
+    if (okOut) *okOut = ok;
+    return ok ? out : std::vector<bool>();
+}
+
 std::string PilotImpl::programQuery(const std::string& programId, const std::string& paramsJson) {
     if (!isContextReady()) return "{\"error\": \"not initialized\"}";
     (void)paramsJson;
-
-    // The old code attempted a dynamic "queryProgram" invoke and mapped the null reply to
-    // this error. The typed SDK makes the gap a compile-time fact: LezCore has no
-    // program-query method at the pinned revision, so the honest error is unconditional.
-    QJsonObject err;
-    err["error"] = QString("program.query unsupported: the lez_core module exposes no program-query method at the pinned LEZ revision (verified against upstream source, now enforced by the typed client API). Not a Pilot-side gap.");
-    err["program"] = QString::fromStdString(programId);
-    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    // A program lives in an on-chain account: read it (balance, nonce, data, owner) through the
+    // wallet module, the same read the event alerter uses. A read, never a spend.
+    std::string acct = chainAccount(programId);
+    QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(acct));
+    QJsonObject res = d.isObject() ? d.object() : QJsonObject();
+    res["program_id"] = QString::fromStdString(programId);
+    if (!res.contains("error") && !res.value("exists").toBool())
+        res["error"] = QString("no account on chain for this program id");
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 // M3 — LRU-trim ONLY the heavy discovered_agents card_json cache to kA2ADiscoveredAgentsMax by
@@ -1626,43 +1736,88 @@ std::string PilotImpl::programCall(const std::string& programId, const std::stri
         return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
     }
 
-    (void)paramsJson;
-
-    // Same shape as programQuery: the typed LezCore client has no program-call method at the
-    // pinned revision — the old dynamic invoke always answered null. Honest, unconditional.
-    QJsonObject err;
-    err["error"] = QString("program.call unsupported: the lez_core module exposes no program-call method at the pinned LEZ revision (verified against upstream source, now enforced by the typed client API). Not a Pilot-side gap.");
-    err["program"] = QString::fromStdString(programId);
-    err["instruction"] = QString::fromStdString(instruction);
-    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    // The generic public transaction: the program id, the accounts it touches (hex ids, in the
+    // program's order) with one signing flag each, and the instruction as the program's own
+    // words. Pilot does not know any program's ABI — the caller supplies all three; anything
+    // malformed is refused before the wallet is asked.
+    QJsonDocument pd = QJsonDocument::fromJson(QByteArray::fromStdString(paramsJson));
+    QJsonObject params = pd.isObject() ? pd.object() : QJsonObject();
+    QJsonObject res;
+    res["program"] = QString::fromStdString(programId);
+    if (params.value("private").toBool()) {
+        res["error"] = QString("private program calls (send_generic_private_transaction) need the program ELF, its dependencies and a real proof; not wired — call the program on the public rail");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
+    bool wordsOk = false, flagsOk = false;
+    std::vector<uint32_t> words = pilotParseWordList(instruction, &wordsOk);
+    std::vector<std::string> accounts = pilotParseMembers(listText(params.value("accounts")));
+    std::vector<bool> signing = pilotParseBoolList(listText(params.value("signing")), &flagsOk);
+    if (!wordsOk) {
+        res["error"] = QString("instruction must be the program's instruction words: a JSON array of unsigned 32-bit integers or a comma list");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
+    if (accounts.empty() || !flagsOk || signing.size() != accounts.size()) {
+        res["error"] = QString("params.accounts (hex account ids) and params.signing (one true/false per account) are required and must match in length");
+        return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
+    }
+    std::string reply = modules().lez_core.send_generic_public_transaction(
+        accounts, signing, words, programId, nullptr, programTxTimeoutMs());
+    QJsonObject out = walletReplyToResult(reply, "submitted");
+    out["program"] = QString::fromStdString(programId);
+    out["accounts"] = static_cast<int>(accounts.size());
+    out["instruction_words"] = static_cast<int>(words.size());
+    return QJsonDocument(out).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::programDeploy(const std::string& binaryPath) {
     if (!isContextReady() || agentAccountId_.empty()) return "{\"error\": \"not initialized\"}";
 
-    // Read the compiled program binary. If we can't read it, say so honestly —
-    // do NOT pretend a deploy happened.
-    QFile binFile(QString::fromStdString(binaryPath));
-    if (binaryPath.empty() || !binFile.open(QIODevice::ReadOnly)) {
-        QJsonObject err;
-        err["error"] = QString("cannot read program binary");
-        err["binary"] = QString::fromStdString(binaryPath);
-        return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    // The program: a RISC0 guest ELF from a file, or one of the wallet module's built-in
+    // programs ("builtin:token" | "builtin:amm" | "builtin:ata" | "builtin:authenticated_transfer"),
+    // which is how a deploy can be exercised without a toolchain. If it cannot be read, say so —
+    // never pretend a deploy happened.
+    std::vector<uint8_t> elf;
+    if (binaryPath.rfind("builtin:", 0) == 0) {
+        const std::string name = binaryPath.substr(8);
+        if (name == "token") elf = modules().lez_core.token_elf();
+        else if (name == "amm") elf = modules().lez_core.amm_elf();
+        else if (name == "ata") elf = modules().lez_core.ata_elf();
+        else if (name == "authenticated_transfer") elf = modules().lez_core.authenticated_transfer_elf();
+        else {
+            QJsonObject err;
+            err["error"] = QString("unknown built-in program; one of token, amm, ata, authenticated_transfer");
+            err["binary"] = QString::fromStdString(binaryPath);
+            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        }
+        if (elf.empty()) {
+            QJsonObject err;
+            err["error"] = QString::fromStdString("the wallet module returned no bytes for built-in program " + name);
+            err["binary"] = QString::fromStdString(binaryPath);
+            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        }
+    } else {
+        QFile binFile(QString::fromStdString(binaryPath));
+        if (binaryPath.empty() || !binFile.open(QIODevice::ReadOnly)) {
+            QJsonObject err;
+            err["error"] = QString("cannot read program binary");
+            err["binary"] = QString::fromStdString(binaryPath);
+            return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+        }
+        QByteArray binary = binFile.readAll();
+        binFile.close();
+        elf.assign(binary.begin(), binary.end());
     }
-    QByteArray binary = binFile.readAll();
-    binFile.close();
 
-    QByteArray hashHex =
-        QCryptographicHash::hash(binary, QCryptographicHash::Sha256).toHex();
-    std::string binaryHash = hashHex.toStdString();
+    QByteArray hashHex = QCryptographicHash::hash(
+        QByteArray(reinterpret_cast<const char*>(elf.data()), static_cast<int>(elf.size())),
+        QCryptographicHash::Sha256).toHex();
 
-    // Same shape as programQuery/programCall: no wallet-module deploy method exists at the
-    // pinned revision (LEZ deployment is a direct sequencer NSSATransaction) — the old
-    // dynamic "deployProgram" invoke always answered null. The binary read + hash above stay
-    // so the error still reports exactly WHAT could not be deployed.
-    QJsonObject err;
-    err["error"] = QString("program.deploy unsupported: LEZ program deployment is done via a direct sequencer transaction (NSSATransaction), which the lez_core module does not expose — no wallet-module deploy method exists at the pinned revision (verified against upstream source, now enforced by the typed client API).");
-    err["binary"] = QString::fromStdString(binaryPath);
-    err["binary_hash"] = QString::fromStdString(binaryHash);
-    return QJsonDocument(err).toJson(QJsonDocument::Compact).toStdString();
+    // The deployment transaction, through the wallet module. The wallet's reply is the answer;
+    // "deployed" is true only when it says success and names the transaction.
+    std::string reply = modules().lez_core.send_program_deployment_transaction(elf, nullptr, programTxTimeoutMs());
+    QJsonObject res = walletReplyToResult(reply, "deployed");
+    res["binary"] = QString::fromStdString(binaryPath);
+    res["binary_hash"] = QString::fromLatin1(hashHex);
+    res["size_bytes"] = static_cast<int>(elf.size());
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }

@@ -11,29 +11,43 @@ Nothing here is softened. If a thing is unverified, it says so.
 
 ---
 
-## 1. Program operations (`program.query` / `program.call` / `program.deploy`) — upstream platform gap
+## 1. Program operations (`program.query` / `program.call` / `program.deploy`) — wired to the wallet module; no ABI knowledge
 
-**What it is.** The three `program-*` skills are wired through the full agent
-pipeline — spending-threshold check, owner-approval routing, the A2A trust gate —
-but they cannot actually query, call, or deploy a LEZ program. Each one calls the
-real underlying wallet method and returns an honest `unsupported (verified)` error.
-`program.call`/`program.deploy` are not advertised over A2A at all; `program.query`
-over A2A is owner-gated and likewise unsupported.
+**What it is.** The three `program-*` skills run through the full agent pipeline —
+spending-threshold check, owner-approval routing, the A2A trust gate (`program.call`
+and `program.deploy` are never advertised over A2A; `program.query` over A2A is
+owner-gated) — and, since 2026-09-05, call the wallet module's real program methods:
 
-**Why.** This is a **verified upstream gap, not a Pilot defect**. A direct source
-audit of the two pinned dependency revisions —
-`logos-execution-zone-module @ 5d42559` and `lssa @ cf3639d` — found **no
-program-operation method of any name** on the wallet module or on `wallet-ffi`.
-Program deployment on LEZ is performed by submitting a direct sequencer transaction
-(`NSSATransaction`) that the wallet module does not expose to its callers. Pilot
-cannot invent an API the platform does not provide, so it calls the real method and
-surfaces the platform's absence honestly rather than faking a success.
+- `program.query` reads a program's on-chain account through `get_account_public`
+  (balance, nonce, data, owner — the same read the event alerter uses).
+- `program.call` submits `send_generic_public_transaction(accounts, signing flags,
+  instruction words, program id)`. Pilot knows **no program's instruction ABI**: the
+  caller supplies the account list, one signing flag per account and the instruction
+  as the program's own 32-bit words; anything malformed is refused before the wallet
+  is asked. Private program calls (`send_generic_private_transaction`: the program
+  ELF, its dependencies and a real proof) are not wired.
+- `program.deploy` submits `send_program_deployment_transaction` for a RISC0 guest
+  ELF from a file or for one of the wallet module's built-in programs
+  (`builtin:token` / `amm` / `ata` / `authenticated_transfer`) and returns the wallet's
+  reply as it is: `deployed` is true only when the wallet says success and names the
+  transaction.
 
-**What would close it.** Upstream `logos-execution-zone-module` / `wallet-ffi`
-exposing a program-op entry point (query/call/deploy), or a sanctioned way to
-submit the `NSSATransaction` deploy path through the module boundary. When that
-lands, the skills already in place activate with no Pilot-side redesign — only the
-inner call changes.
+**History, so nobody re-derives it.** Until 2026-09-05 this section (and the module's
+own error text) called program operations a *verified upstream gap*: a source audit
+of the then-pinned `logos-execution-zone-module @ 5d42559` / `lssa @ cf3639d` found
+no program-operation method. That audit was right for that pin. The current pin
+(`549cf115`, LEZ v0.2.2) exposes `send_program_deployment_transaction`,
+`send_generic_public_transaction`, `send_generic_private_transaction` and the built-in
+program ELFs, and nobody re-checked when the pin moved. The skills' inner calls now use
+them.
+
+**What is and is not exercised.** `agents/program-ops.sh`
+(`.github/workflows/program-ops.yml`) runs on the public testnet: `program.query` on a
+program id the chain names (`getProgramIds`), `program.call` refusing to guess, and
+`program.deploy builtin:token` with the wallet's verdict reported verbatim (a mined
+deployment is verified with `getTransaction`; a refusal is printed, not hidden). A
+program *call* with real instruction words has not been run: that needs a program
+whose ABI is documented.
 
 ---
 

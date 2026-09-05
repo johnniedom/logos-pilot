@@ -79,6 +79,43 @@ LOGOS_TEST(little_endian_hex_amounts_decode_to_decimal) {
     LOGOS_ASSERT_EQ(pilotLeHexToDecimal(""), std::string(""));
 }
 
+LOGOS_TEST(program_call_arguments_parse_strictly) {
+    // program.call sends exactly the words the owner supplies; a malformed list is refused,
+    // never rounded or guessed.
+    bool ok = false;
+    std::vector<uint32_t> w = pilotParseWordList("[1, 2, 4294967295]", &ok);
+    LOGOS_ASSERT_TRUE(ok);
+    LOGOS_ASSERT_EQ(w.size(), static_cast<size_t>(3));
+    LOGOS_ASSERT_EQ(w[2], static_cast<uint32_t>(4294967295u));
+    w = pilotParseWordList("7, 8", &ok);
+    LOGOS_ASSERT_TRUE(ok);
+    LOGOS_ASSERT_EQ(w.size(), static_cast<size_t>(2));
+    LOGOS_ASSERT_EQ(w[1], static_cast<uint32_t>(8));
+    w = pilotParseWordList("[]", &ok);
+    LOGOS_ASSERT_TRUE(ok);
+    LOGOS_ASSERT_EQ(w.size(), static_cast<size_t>(0));
+    pilotParseWordList("[-1]", &ok);          LOGOS_ASSERT_FALSE(ok);
+    pilotParseWordList("[4294967296]", &ok);  LOGOS_ASSERT_FALSE(ok);   // one past u32
+    pilotParseWordList("abc", &ok);           LOGOS_ASSERT_FALSE(ok);
+    pilotParseWordList("[1.5]", &ok);         LOGOS_ASSERT_FALSE(ok);
+
+    std::vector<bool> f = pilotParseBoolList("[true, false]", &ok);
+    LOGOS_ASSERT_TRUE(ok);
+    LOGOS_ASSERT_EQ(f.size(), static_cast<size_t>(2));
+    LOGOS_ASSERT_TRUE(f[0]); LOGOS_ASSERT_FALSE(f[1]);
+    f = pilotParseBoolList("1,0,true", &ok);
+    LOGOS_ASSERT_TRUE(ok);
+    LOGOS_ASSERT_EQ(f.size(), static_cast<size_t>(3));
+    pilotParseBoolList("[1, \"maybe\"]", &ok); LOGOS_ASSERT_FALSE(ok);
+}
+
+LOGOS_TEST(program_skills_report_not_initialized_before_init) {
+    PilotImpl impl;
+    LOGOS_ASSERT_CONTAINS(impl.programQuery("HkwBGetZJytPq7fMnDNqUVYUug4fbWQwHTNkJtH4yh7x", "{}"), "not initialized");
+    LOGOS_ASSERT_CONTAINS(impl.programCall("00", "[1]", "{}"), "not initialized");
+    LOGOS_ASSERT_CONTAINS(impl.programDeploy("builtin:token"), "not initialized");
+}
+
 LOGOS_TEST(wallet_send_returns_error_before_init) {
     PilotImpl impl;
     std::string result = impl.walletSend("recipient", 100, "test");
