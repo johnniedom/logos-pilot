@@ -8,11 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 LGPM=$(find /nix/store -maxdepth 3 -name "lgpm" -path "*/bin/*" 2>/dev/null | head -1)
 
-echo "=== Installing Pilot Agent into Logos Basecamp ==="
+echo "=== Installing Pilot Agent + Pilot Remote into Logos Basecamp ==="
 echo "lgpm: $LGPM"
 echo ""
 
-mkdir -p "$MODULES_DIR" "$PLUGINS_DIR/pilot_ui"
+mkdir -p "$MODULES_DIR" "$PLUGINS_DIR/pilot_ui" "$PLUGINS_DIR/pilot_remote"
 
 # Install all modules from nix store LGX files
 install_lgx() {
@@ -26,13 +26,16 @@ install_lgx() {
   fi
 }
 
-echo "[1/3] Installing modules..."
+echo "[1/4] Installing modules..."
 install_lgx "pilot"
 install_lgx "capability_module"
 install_lgx "lez_core"
 install_lgx "delivery_module"
 install_lgx "storage_module"
 install_lgx "chat_module"
+# The owner-side module Pilot Remote talks to (pilot-owner/module): signs, seals and publishes the
+# owner's commands to an agent on ANOTHER machine over Logos Messaging. No agent modules needed.
+install_lgx "pilot_owner"
 echo ""
 
 # Also install pilot from local build if available
@@ -40,6 +43,12 @@ if [ -f "$SCRIPT_DIR/pilot-module/result-lgx/logos-pilot-module-lib.lgx" ] && [ 
     echo "[1b] Installing pilot from local build..."
     $LGPM install --file "$SCRIPT_DIR/pilot-module/result-lgx/logos-pilot-module-lib.lgx" \
         --modules-dir "$MODULES_DIR" --allow-unsigned 2>/dev/null || true
+fi
+# ... and the owner module from a local build (nix build ./pilot-owner/module#lgx -o pilot-owner/module/result-lgx)
+OWNER_LOCAL=$(ls "$SCRIPT_DIR"/pilot-owner/module/result-lgx/*.lgx 2>/dev/null | head -1)
+if [ -n "$OWNER_LOCAL" ] && [ -n "$LGPM" ]; then
+    echo "[1c] Installing pilot_owner from local build: $(basename "$OWNER_LOCAL")"
+    $LGPM install --file "$OWNER_LOCAL" --modules-dir "$MODULES_DIR" --allow-unsigned 2>/dev/null || true
 fi
 
 # Fix variant: nix builds use "linux-amd64-dev" but Basecamp expects "linux-amd64"
@@ -63,19 +72,29 @@ else
     echo "   OK"
 fi
 
-# Install UI plugin
-echo "[4/4] Installing UI plugin..."
+# Install the two UI plugins:
+#   pilot_ui     — "Pilot Agent": the agent runs INSIDE this Basecamp (declares the pilot module)
+#   pilot_remote — "Pilot Remote": the agent runs somewhere else; this plugin only declares
+#                  pilot_owner and talks to the agent over Logos Messaging through a relay
+echo "[4/4] Installing UI plugins..."
 cp "$SCRIPT_DIR/pilot-ui/basecamp-plugin/"*.qml "$PLUGINS_DIR/pilot_ui/"
 cp "$SCRIPT_DIR/pilot-ui/basecamp-plugin/manifest.json" "$PLUGINS_DIR/pilot_ui/"
 cp "$SCRIPT_DIR/pilot-ui/basecamp-plugin/metadata.json" "$PLUGINS_DIR/pilot_ui/"
 cp "$SCRIPT_DIR/pilot-ui/basecamp-plugin/variant" "$PLUGINS_DIR/pilot_ui/"
+cp "$SCRIPT_DIR/pilot-ui/remote-plugin/"*.qml "$PLUGINS_DIR/pilot_remote/"
+cp "$SCRIPT_DIR/pilot-ui/remote-plugin/manifest.json" "$PLUGINS_DIR/pilot_remote/"
+cp "$SCRIPT_DIR/pilot-ui/remote-plugin/metadata.json" "$PLUGINS_DIR/pilot_remote/"
+cp "$SCRIPT_DIR/pilot-ui/remote-plugin/variant" "$PLUGINS_DIR/pilot_remote/"
 
 echo ""
 echo "=== Installed ==="
 echo "Modules:"
 ls "$MODULES_DIR/" 2>/dev/null || echo "  (none)"
 echo ""
-echo "Plugin files:"
-ls "$PLUGINS_DIR/pilot_ui/"*.qml 2>/dev/null | xargs -I{} basename {}
+echo "Plugins:"
+for p in pilot_ui pilot_remote; do
+  echo "  $p: $(ls "$PLUGINS_DIR/$p/"*.qml 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+done
 echo ""
-echo "Done! Restart Basecamp to see the Pilot Agent."
+echo "Done! Restart Basecamp. 'Pilot Agent' runs an agent in this Basecamp; 'Pilot Remote' talks to"
+echo "an agent on another machine (see docs/owner-channel.md and agents/local-owner-demo.sh)."

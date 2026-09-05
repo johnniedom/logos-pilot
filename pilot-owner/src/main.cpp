@@ -1,50 +1,33 @@
 // pilot-owner — the owner's side of a Pilot agent's owner channel, as a separate program.
 //
-// The agent (pilot module inside logoscore) listens on one Logos Messaging content topic,
-// "/pilot/1/owner-<agent account id>/proto". Anything it reads there must be ECIES-sealed to the
-// agent's signing key (the card's _logos.signing_key) and, once an owner is bound, be a SIGNED
-// envelope: {"message": <text>, "_logos": {"signing_key": <owner pub>, "nonce": <n>, "signature":
-// <ECDSA hex over the compact JSON of the envelope without the signature>}}. The agent answers on
-// the same topic, ECIES-sealed to the owner's key (config owner.npk). This tool does exactly that,
-// with the agent's own crypto compiled in (pilot_crypto.cpp) and a Waku relay's REST API as the
-// only transport: publish = POST /relay/v1/auto/messages, read = GET /store/v3/messages. No
-// daemon socket, no local RPC, no server of ours anywhere between the two.
+// A thin console front-end over OwnerClient (owner_client.h), the same library the Basecamp
+// plugin's module (pilot_owner, pilot-owner/module) compiles in. The agent's own crypto
+// (pilot_crypto.cpp) is compiled in too, so what this tool seals and signs is exactly what the
+// agent opens and checks.
 //
-//   pilot-owner init [--import <priv hex>]              make (or import) the owner keypair
-//   pilot-owner pair <card.json> <agent account id>     learn the agent's key + topic
+//   pilot-owner init [--import <priv hex>:<pub hex>] [--force]   make (or import) the owner keypair
+//   pilot-owner pair <card.json or JSON text> <agent account id>  learn the agent's key + topic
 //               [--relay http://127.0.0.1:8645]
-//   pilot-owner send "<text>"                            sign, seal, publish
-//   pilot-owner listen [--since <secs>] [--follow]       poll the store, decrypt what is ours
-//   pilot-owner status                                   what this client knows (no secrets)
-//   pilot-owner selftest                                 envelope + ECIES round trip (no network)
+//   pilot-owner send "<text>"                                      sign, seal, publish
+//   pilot-owner listen [--since <secs>] [--follow]                 poll the store, print what is ours
+//   pilot-owner status                                             what this client knows (no secrets)
+//   pilot-owner selftest                                           the library's pure pieces, no network
 //
-// State: $PILOT_OWNER_HOME (default ~/.pilot-owner)/state.json, mode 0600. Nonces are the wall
-// clock in milliseconds, strictly increasing, so a lost state file never replays an old value.
+// State: $PILOT_OWNER_HOME (default ~/.pilot-owner)/state.json, mode 0600.
 
-#include "pilot_crypto.h"
+#include "owner_client.h"
 
 #include <QCoreApplication>
-#include <QByteArray>
 #include <QDateTime>
 #include <QDir>
-#include <QEventLoop>
-#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
-#include <QStandardPaths>
+#include <QStringList>
 #include <QTextStream>
-#include <QTimer>
-#include <QUrl>
-#include <QUrlQuery>
 
 #include <sys/stat.h>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -53,120 +36,11 @@ namespace {
 
 QTextStream& out() { static QTextStream s(stdout); return s; }
 QTextStream& err() { static QTextStream s(stderr); return s; }
-
-std::string stateDir() {
-    if (const char* h = std::getenv("PILOT_OWNER_HOME"); h && *h) return h;
-    return QDir::homePath().toStdString() + "/.pilot-owner";
-}
-std::string statePath() { return stateDir() + "/state.json"; }
-
-QJsonObject loadState() {
-    QFile f(QString::fromStdString(statePath()));
-    if (!f.open(QIODevice::ReadOnly)) return {};
-    QJsonDocument d = QJsonDocument::fromJson(f.readAll());
-    return d.isObject() ? d.object() : QJsonObject();
-}
-
-bool saveState(const QJsonObject& st) {
-    QDir().mkpath(QString::fromStdString(stateDir()));
-    QFile f(QString::fromStdString(statePath()));
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    f.write(QJsonDocument(st).toJson(QJsonDocument::Indented));
-    f.close();
-    chmod(statePath().c_str(), 0600);   // the owner's private key lives here
-    return true;
-}
-
-std::string compact(const QJsonObject& o) {
-    return QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString();
-}
-
-// Blocking HTTP with a deadline. Returns the body; *status = HTTP code, 0 when nothing came back.
-QByteArray http(const char* verb, const QString& url, const QByteArray& body, int timeoutMs, int* status) {
-    QNetworkAccessManager mgr;
-    QNetworkRequest req{QUrl(url)};
-    QNetworkReply* reply = nullptr;
-    if (std::strcmp(verb, "POST") == 0) {
-        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-        reply = mgr.post(req, body);
-    } else {
-        reply = mgr.get(req);
-    }
-    QEventLoop loop;
-    QTimer deadline; deadline.setSingleShot(true);
-    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    deadline.start(timeoutMs);
-    loop.exec();
-    QByteArray data;
-    int code = 0;
-    if (reply->isFinished()) {
-        code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        data = reply->readAll();
-    } else {
-        reply->abort();
-    }
-    if (status) *status = code;
-    reply->deleteLater();
-    return data;
-}
-
-int64_t nowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-int64_t nowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-// The signed owner envelope, built EXACTLY the way the agent verifies it (verifyOwnerMessage):
-// canonical bytes = compact JSON of the whole envelope with _logos.signature absent and
-// _logos.signing_key present; signature = ECDSA-secp256k1 over SHA-256 of those bytes.
-std::string buildEnvelope(const std::string& text, const ECIESKeypair& owner, int64_t nonce) {
-    QJsonObject env;
-    env["message"] = QString::fromStdString(text);
-    QJsonObject logos;
-    logos["signing_key"] = QString::fromStdString(owner.publicKeyHex);
-    logos["nonce"] = static_cast<double>(nonce);
-    env["_logos"] = logos;
-    std::string canonical = compact(env);
-    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
-    logos["signature"] = QString::fromStdString(signMessage(bytes, owner.privateKeyHex));
-    env["_logos"] = logos;
-    return compact(env);
-}
-
-// The agent's check, reproduced here for selftest: verify the envelope's signature the way
-// verifyOwnerMessage does and hand back the message.
-bool verifyEnvelope(const std::string& raw, std::string& messageOut, std::string& keyOut) {
-    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(raw));
-    if (!doc.isObject()) return false;
-    QJsonObject env = doc.object();
-    QJsonObject logos = env["_logos"].toObject();
-    std::string key = logos["signing_key"].toString().toStdString();
-    std::string sig = logos["signature"].toString().toStdString();
-    if (key.empty() || sig.empty() || !env["message"].isString()) return false;
-    QJsonObject canonLogos = logos; canonLogos.remove("signature");
-    QJsonObject canonEnv = env; canonEnv["_logos"] = canonLogos;
-    std::string canonical = compact(canonEnv);
-    std::vector<uint8_t> bytes(canonical.begin(), canonical.end());
-    if (!verifySignature(bytes, sig, key)) return false;
-    messageOut = env["message"].toString().toStdString();
-    keyOut = key;
-    return true;
-}
-
-ECIESKeypair ownerKeyFrom(const QJsonObject& st) {
-    ECIESKeypair k;
-    k.publicKeyHex = st["owner_pub"].toString().toStdString();
-    k.privateKeyHex = st["owner_priv"].toString().toStdString();
-    return k;
-}
+QString qs(const std::string& s) { return QString::fromStdString(s); }
 
 int usage() {
     err() << "usage:\n"
-             "  pilot-owner init [--import <priv hex>]\n"
+             "  pilot-owner init [--import <priv hex>:<pub hex>] [--force]\n"
              "  pilot-owner pair <card.json> <agent account id> [--relay http://127.0.0.1:8645]\n"
              "  pilot-owner send \"<text>\"\n"
              "  pilot-owner listen [--since <secs>] [--follow]\n"
@@ -177,168 +51,88 @@ int usage() {
 }
 
 int cmdInit(const QStringList& args) {
-    QJsonObject st = loadState();
-    ECIESKeypair kp;
+    OwnerClient c;
+    std::string pub, e;
     int imp = args.indexOf("--import");
-    if (imp >= 0 && imp + 1 < args.size()) {
-        // Import: derive the public key by encrypting-decrypting is not needed; the agent side
-        // only ever sees the public key, so ask the caller for both halves.
-        err() << "--import expects '<priv hex>:<pub hex>' (the pair the agent was bound to)\n";
-        QStringList parts = args[imp + 1].split(':');
-        if (parts.size() != 2) return 2;
-        kp.privateKeyHex = parts[0].toStdString();
-        kp.publicKeyHex = parts[1].toStdString();
-    } else if (st.contains("owner_pub") && !args.contains("--force")) {
-        out() << "owner key already exists: " << st["owner_pub"].toString() << "\n"
-              << "(use --force to replace it — the agent bound to the old key will stop listening to you)\n";
-        out().flush();
-        return 0;
+    if (imp >= 0) {
+        if (imp + 1 >= args.size()) { err() << "--import expects '<priv hex>:<pub hex>'\n"; return 2; }
+        if (!c.importKey(args[imp + 1].toStdString(), pub, e)) { err() << qs(e) << "\n"; return 1; }
     } else {
-        kp = generateECIESKeypair();
+        bool created = false;
+        if (!c.init(args.contains("--force"), pub, created, e)) { err() << qs(e) << "\n"; return 1; }
+        if (!created) {
+            out() << "owner key already exists: " << qs(pub) << "\n"
+                  << "(use --force to replace it — the agent bound to the old key will stop listening to you)\n";
+            out().flush();
+            return 0;
+        }
     }
-    st["owner_pub"] = QString::fromStdString(kp.publicKeyHex);
-    st["owner_priv"] = QString::fromStdString(kp.privateKeyHex);
-    if (!st.contains("last_nonce")) st["last_nonce"] = 0.0;
-    if (!saveState(st)) { err() << "cannot write " << QString::fromStdString(statePath()) << "\n"; return 1; }
-    out() << "owner public key: " << QString::fromStdString(kp.publicKeyHex) << "\n"
+    out() << "owner public key: " << qs(pub) << "\n"
           << "bind it to the agent (one of):\n"
-          << "  logoscore call pilot metaConfigure owner.npk " << QString::fromStdString(kp.publicKeyHex) << "\n"
-          << "  PILOT_OWNER_NPK=" << QString::fromStdString(kp.publicKeyHex) << " pilot deploy\n"
-          << "state: " << QString::fromStdString(statePath()) << " (mode 0600; holds the private key)\n";
+          << "  logoscore call pilot metaConfigure owner.npk " << qs(pub) << "\n"
+          << "  PILOT_OWNER_NPK=" << qs(pub) << " pilot deploy\n"
+          << "state: " << qs(c.statePath()) << " (mode 0600; holds the private key)\n";
     out().flush();
     return 0;
 }
 
 int cmdPair(const QStringList& args) {
     if (args.size() < 2) return usage();
-    QFile f(args[0]);
-    if (!f.open(QIODevice::ReadOnly)) { err() << "cannot read card " << args[0] << "\n"; return 1; }
-    QJsonDocument card = QJsonDocument::fromJson(f.readAll());
-    if (!card.isObject()) { err() << "card is not a JSON object\n"; return 1; }
-    QJsonObject logos = card.object()["_logos"].toObject();
-    QString agentKey = logos["signing_key"].toString();
-    if (agentKey.isEmpty()) { err() << "card has no _logos.signing_key\n"; return 1; }
-    QJsonObject st = loadState();
-    st["agent_key"] = agentKey;
-    st["agent_enc_key"] = logos["enc_key"].toString();
-    st["agent_name"] = card.object()["name"].toString();
-    st["account"] = args[1];
-    st["topic"] = "/pilot/1/owner-" + args[1] + "/proto";
+    OwnerClient c;
     int r = args.indexOf("--relay");
-    st["relay"] = (r >= 0 && r + 1 < args.size()) ? args[r + 1]
-                : (st.contains("relay") ? st["relay"].toString() : QString("http://127.0.0.1:8645"));
-    if (!saveState(st)) { err() << "cannot write state\n"; return 1; }
-    out() << "paired with agent " << st["agent_name"].toString() << "\n"
-          << "  agent signing key: " << agentKey.left(24) << "…\n"
-          << "  owner topic:       " << st["topic"].toString() << "\n"
-          << "  relay:             " << st["relay"].toString() << "\n";
+    std::string relay = (r >= 0 && r + 1 < args.size()) ? args[r + 1].toStdString() : std::string();
+    std::string e;
+    if (!c.pair(args[0].toStdString(), args[1].toStdString(), relay, e)) { err() << qs(e) << "\n"; return 1; }
+    out() << "paired with agent " << qs(c.field("agent_name")) << "\n"
+          << "  agent signing key: " << qs(c.field("agent_key")).left(24) << "…\n"
+          << "  owner topic:       " << qs(c.field("topic")) << "\n"
+          << "  relay:             " << qs(c.field("relay")) << "\n";
     out().flush();
     return 0;
-}
-
-bool ready(const QJsonObject& st, const char* what) {
-    if (st["owner_priv"].toString().isEmpty()) { err() << what << ": run `pilot-owner init` first\n"; return false; }
-    if (st["agent_key"].toString().isEmpty() || st["topic"].toString().isEmpty()) {
-        err() << what << ": run `pilot-owner pair <card.json> <account id>` first\n"; return false;
-    }
-    return true;
 }
 
 int cmdSend(const QStringList& args) {
     if (args.isEmpty()) return usage();
-    QJsonObject st = loadState();
-    if (!ready(st, "send")) return 1;
-    ECIESKeypair owner = ownerKeyFrom(st);
-    int64_t last = static_cast<int64_t>(st["last_nonce"].toDouble());
-    int64_t nonce = std::max<int64_t>(last + 1, nowMs());
-    std::string envelope = buildEnvelope(args.join(' ').toStdString(), owner, nonce);
-    std::vector<uint8_t> plain(envelope.begin(), envelope.end());
-    std::string sealed;
-    try {
-        sealed = eciesSerialize(eciesEncrypt(st["agent_key"].toString().toStdString(), plain));
-    } catch (const std::exception& e) {
-        err() << "encryption to the agent key failed: " << e.what() << "\n"; return 1;
-    }
-    QJsonObject msg;
-    msg["payload"] = QString::fromLatin1(QByteArray::fromStdString(sealed).toBase64());
-    msg["contentTopic"] = st["topic"].toString();
-    msg["timestamp"] = static_cast<double>(nowNs());
-    int status = 0;
-    QByteArray body = http("POST", st["relay"].toString() + "/relay/v1/auto/messages",
-                           QJsonDocument(msg).toJson(QJsonDocument::Compact), 15000, &status);
-    if (status < 200 || status >= 300) {
-        err() << "relay refused the publish (HTTP " << status << "): " << QString::fromUtf8(body.left(200)) << "\n";
-        return 1;
-    }
-    st["last_nonce"] = static_cast<double>(nonce);
-    saveState(st);
-    out() << "sent (nonce " << nonce << ", " << sealed.size() << " bytes sealed) on " << st["topic"].toString() << "\n";
+    OwnerClient c;
+    int64_t nonce = 0; size_t bytes = 0; std::string e;
+    if (!c.send(args.join(' ').toStdString(), nonce, bytes, e)) { err() << qs(e) << "\n"; return 1; }
+    out() << "sent (nonce " << static_cast<qlonglong>(nonce) << ", " << static_cast<qulonglong>(bytes)
+          << " bytes sealed) on " << qs(c.field("topic")) << "\n";
     out().flush();
     return 0;
 }
 
-// One store read: every message on the owner topic since `sinceNs`, oldest first. Payloads the
-// owner key can open are the agent's replies; the rest (our own sends, sealed to the agent) skip.
-int pollOnce(QJsonObject& st, int64_t sinceNs, bool& sawAny) {
-    QUrl url(st["relay"].toString() + "/store/v3/messages");
-    QUrlQuery q;
-    q.addQueryItem("includeData", "true");
-    q.addQueryItem("contentTopics", st["topic"].toString());
-    q.addQueryItem("startTime", QString::number(static_cast<qlonglong>(sinceNs)));
-    q.addQueryItem("pageSize", "100");
-    q.addQueryItem("ascending", "true");
-    url.setQuery(q);
-    int status = 0;
-    QByteArray body = http("GET", url.toString(QUrl::FullyEncoded), {}, 10000, &status);
-    if (status != 200) { err() << "relay store answered HTTP " << status << "\n"; return -1; }
-    QJsonDocument doc = QJsonDocument::fromJson(body);
-    QJsonArray seen = st["seen"].toArray();
-    ECIESKeypair owner = ownerKeyFrom(st);
-    int printed = 0;
-    for (const QJsonValue& v : doc.object().value("messages").toArray()) {
-        QJsonObject m = v.toObject();
-        QString hash = m.value("messageHash").toString();
-        if (hash.isEmpty() || seen.contains(hash)) continue;
-        seen.append(hash);
-        sawAny = true;
-        QJsonObject msg = m.value("message").toObject();
-        std::string payload = QByteArray::fromBase64(msg.value("payload").toString().toLatin1()).toStdString();
-        try {
-            std::vector<uint8_t> plain = eciesDecrypt(owner.privateKeyHex, eciesDeserialize(payload));
-            std::string text(plain.begin(), plain.end());
-            qint64 tsNs = static_cast<qint64>(msg.value("timestamp").toDouble());
-            QString when = tsNs > 0 ? QDateTime::fromMSecsSinceEpoch(tsNs / 1000000, Qt::UTC).toString("HH:mm:ss")
-                                    : QString("--:--:--");
-            out() << "[" << when << "] agent: " << QString::fromStdString(text) << "\n";
-            ++printed;
-        } catch (...) {
-            // Not for us: our own sealed send, or a payload sealed to someone else.
-        }
+// One store read, printed. Returns how many replies were new, -1 when the relay did not answer.
+int printReplies(OwnerClient& c, int64_t sinceNs) {
+    std::vector<OwnerReply> replies; std::string e;
+    if (!c.poll(sinceNs, replies, e)) { err() << qs(e) << "\n"; err().flush(); return -1; }
+    for (const OwnerReply& r : replies) {
+        QString when = r.timestampNs > 0
+            ? QDateTime::fromMSecsSinceEpoch(r.timestampNs / 1000000, Qt::UTC).toString("HH:mm:ss")
+            : QString("--:--:--");
+        out() << "[" << when << "] agent: " << qs(r.text) << "\n";
     }
-    while (seen.size() > 2000) seen.removeFirst();
-    st["seen"] = seen;
-    saveState(st);
     out().flush();
-    return printed;
+    return static_cast<int>(replies.size());
 }
 
 int cmdListen(const QStringList& args) {
-    QJsonObject st = loadState();
-    if (!ready(st, "listen")) return 1;
+    OwnerClient c;
+    std::string why;
+    if (!c.ready(why)) { err() << "listen: " << qs(why) << "\n"; return 1; }
     int sinceSecs = 900;
     int s = args.indexOf("--since");
     if (s >= 0 && s + 1 < args.size()) sinceSecs = args[s + 1].toInt();
     bool follow = args.contains("--follow");
-    int64_t sinceNs = nowNs() - static_cast<int64_t>(sinceSecs) * 1000000000LL;
+    int64_t sinceNs = OwnerClient::nowNs() - static_cast<int64_t>(sinceSecs) * 1000000000LL;
     int total = 0;
     do {
-        bool sawAny = false;
-        int n = pollOnce(st, sinceNs, sawAny);
+        int n = printReplies(c, sinceNs);
         if (n > 0) total += n;
         if (!follow) break;
         // Overlap the next window by a minute so a late-stored message is not skipped; seen
         // hashes keep the overlap idempotent.
-        sinceNs = nowNs() - 60LL * 1000000000LL;
+        sinceNs = OwnerClient::nowNs() - 60LL * 1000000000LL;
         std::this_thread::sleep_for(std::chrono::seconds(5));
     } while (true);
     if (!follow && total == 0) out() << "(no reply from the agent in the last " << sinceSecs << " s)\n";
@@ -347,45 +141,104 @@ int cmdListen(const QStringList& args) {
 }
 
 int cmdStatus() {
-    QJsonObject st = loadState();
-    out() << "state:  " << QString::fromStdString(statePath()) << "\n"
-          << "owner:  " << (st.contains("owner_pub") ? st["owner_pub"].toString() : QString("(not initialised)")) << "\n"
-          << "agent:  " << (st.contains("agent_key") ? st["agent_key"].toString().left(24) + "…" : QString("(not paired)")) << "\n"
-          << "topic:  " << st["topic"].toString() << "\n"
-          << "relay:  " << st["relay"].toString() << "\n"
-          << "nonce:  " << static_cast<qint64>(st["last_nonce"].toDouble()) << "\n";
+    OwnerClient c;
+    std::string pub = c.field("owner_pub"), agent = c.field("agent_key");
+    out() << "state:  " << qs(c.statePath()) << "\n"
+          << "owner:  " << (pub.empty() ? QString("(not initialised)") : qs(pub)) << "\n"
+          << "agent:  " << (agent.empty() ? QString("(not paired)") : qs(agent).left(24) + "…") << "\n"
+          << "topic:  " << qs(c.field("topic")) << "\n"
+          << "relay:  " << qs(c.field("relay")) << "\n"
+          << "nonce:  " << static_cast<qlonglong>(c.lastNonce()) << "\n";
     out().flush();
     return 0;
 }
 
-// No network: prove that what `send` builds is what the agent accepts (signature verifies over
-// the canonical bytes, a tampered message does not, ECIES to the agent key round-trips, the
-// agent's reply sealed to the owner key round-trips).
-int cmdSelftest() {
+// No network. Proves the library's pure pieces: what `send` builds is what the agent accepts
+// (signature over the canonical bytes; a tampered message fails), ECIES both ways, the wrong
+// key is rejected, nonces only go up, a store body yields exactly the replies sealed to the
+// owner (own sends and duplicates skipped), and the state file round-trips at mode 0600.
+int selftest() {
+    auto fail = [](const std::string& what) {
+        err() << "selftest FAIL: " << qs(what) << "\n"; err().flush(); return 1;
+    };
+
     ECIESKeypair owner = generateECIESKeypair();
     ECIESKeypair agent = generateECIESKeypair();
-    std::string env = buildEnvelope("/balance", owner, 1725500000000LL);
+
+    // 1. envelope: verifies, tamper detected
+    std::string env = OwnerClient::buildEnvelope("/balance", owner, 1725500000000LL);
     std::string msg, key;
-    if (!verifyEnvelope(env, msg, key) || msg != "/balance" || key != owner.publicKeyHex) {
-        err() << "selftest FAIL: envelope does not verify\n"; return 1;
-    }
+    if (!OwnerClient::verifyEnvelope(env, msg, key) || msg != "/balance" || key != owner.publicKeyHex)
+        return fail("envelope does not verify");
     std::string tampered = env;
-    size_t p = tampered.find("/balance");
-    tampered.replace(p, 8, "/approve");
-    if (verifyEnvelope(tampered, msg, key)) { err() << "selftest FAIL: tampered envelope verified\n"; return 1; }
-    std::vector<uint8_t> plain(env.begin(), env.end());
-    std::string sealed = eciesSerialize(eciesEncrypt(agent.publicKeyHex, plain));
+    tampered.replace(tampered.find("/balance"), 8, "/approve");
+    if (OwnerClient::verifyEnvelope(tampered, msg, key)) return fail("tampered envelope verified");
+
+    // 2. ECIES to the agent and back; a reply to the owner and back; wrong key rejected
+    std::string sealed = OwnerClient::sealForAgent(env, agent.publicKeyHex);
     std::vector<uint8_t> opened = eciesDecrypt(agent.privateKeyHex, eciesDeserialize(sealed));
-    if (std::string(opened.begin(), opened.end()) != env) { err() << "selftest FAIL: ECIES round trip\n"; return 1; }
+    if (std::string(opened.begin(), opened.end()) != env) return fail("ECIES round trip to the agent");
     std::string reply = "Balance: 150 LEZ";
     std::vector<uint8_t> rb(reply.begin(), reply.end());
     std::string rsealed = eciesSerialize(eciesEncrypt(owner.publicKeyHex, rb));
     std::vector<uint8_t> ropened = eciesDecrypt(owner.privateKeyHex, eciesDeserialize(rsealed));
-    if (std::string(ropened.begin(), ropened.end()) != reply) { err() << "selftest FAIL: reply round trip\n"; return 1; }
+    if (std::string(ropened.begin(), ropened.end()) != reply) return fail("reply round trip");
     bool wrongKey = true;
     try { eciesDecrypt(agent.privateKeyHex, eciesDeserialize(rsealed)); } catch (...) { wrongKey = false; }
-    if (wrongKey) { err() << "selftest FAIL: a reply sealed to the owner opened with the agent key\n"; return 1; }
-    out() << "selftest OK: signed envelope verifies, tamper detected, ECIES both ways, wrong key rejected\n";
+    if (wrongKey) return fail("a reply sealed to the owner opened with the agent key");
+
+    // 3. nonces: strictly increasing, never below the clock; the topic shape
+    if (OwnerClient::nextNonce(5, 3) != 6) return fail("nextNonce did not step past the last nonce");
+    if (OwnerClient::nextNonce(5, 100) != 100) return fail("nextNonce did not follow the clock");
+    if (OwnerClient::topicFor("abc") != "/pilot/1/owner-abc/proto") return fail("topicFor");
+
+    // 4. a store body: one reply to the owner, one of our own sends (sealed to the agent), and
+    //    the owner's reply repeated under the same hash -> exactly one reply, both hashes seen,
+    //    nothing new on a second pass
+    QJsonObject own; own["payload"] = QString::fromLatin1(QByteArray::fromStdString(sealed).toBase64()); own["timestamp"] = 1.0e18;
+    QJsonObject rep; rep["payload"] = QString::fromLatin1(QByteArray::fromStdString(rsealed).toBase64()); rep["timestamp"] = 2.0e18;
+    QJsonObject m1; m1["messageHash"] = "h-reply"; m1["message"] = rep;
+    QJsonObject m2; m2["messageHash"] = "h-own";   m2["message"] = own;
+    QJsonObject m3; m3["messageHash"] = "h-reply"; m3["message"] = rep;
+    QJsonObject body; body["messages"] = QJsonArray{m1, m2, m3};
+    std::string bodyText = QJsonDocument(body).toJson(QJsonDocument::Compact).toStdString();
+    std::vector<std::string> seen;
+    std::vector<OwnerReply> got = OwnerClient::repliesFromStoreBody(bodyText, owner.privateKeyHex, seen);
+    if (got.size() != 1 || got[0].text != reply || got[0].hash != "h-reply")
+        return fail("store body did not yield exactly the owner's reply");
+    if (seen.size() != 2) return fail("seen hashes should hold both messages once");
+    got = OwnerClient::repliesFromStoreBody(bodyText, owner.privateKeyHex, seen);
+    if (!got.empty()) return fail("a second pass over the same body must yield nothing new");
+    std::string url = OwnerClient::storeUrl("http://127.0.0.1:8645", "/pilot/1/owner-abc/proto", 42);
+    if (url.find("/store/v3/messages?") == std::string::npos || url.find("startTime=42") == std::string::npos ||
+        url.find("owner-abc") == std::string::npos) return fail("storeUrl");
+
+    // 5. state file: key, import validation, pairing from JSON text, status without secrets, mode 0600
+    std::string dir = QDir::tempPath().toStdString() + "/pilot-owner-selftest-" + std::to_string(OwnerClient::nowMs());
+    OwnerClient c(dir);
+    std::string pub, e; bool created = false;
+    if (!c.init(false, pub, created, e) || !created || pub.size() < 66) return fail("init did not make a key: " + e);
+    std::string pub2;
+    if (!c.init(false, pub2, created, e) || created || pub2 != pub) return fail("a second init must keep the key");
+    if (c.importKey(agent.privateKeyHex + ":" + owner.publicKeyHex, pub2, e)) return fail("import accepted a mismatched pair");
+    if (!c.importKey(owner.privateKeyHex + ":" + owner.publicKeyHex, pub2, e) || pub2 != owner.publicKeyHex)
+        return fail("import rejected a matching pair: " + e);
+    std::string why;
+    if (c.ready(why)) return fail("ready before pairing");
+    QJsonObject logos; logos["signing_key"] = qs(agent.publicKeyHex); logos["enc_key"] = "enc";
+    QJsonObject card; card["name"] = "Pilot-Test"; card["_logos"] = logos;
+    if (!c.pair(QJsonDocument(card).toJson(QJsonDocument::Compact).toStdString(), " acct1 ", "http://relay:8645/", e))
+        return fail("pair from JSON text: " + e);
+    if (!c.ready(why) || c.field("topic") != "/pilot/1/owner-acct1/proto" || c.field("relay") != "http://relay:8645" ||
+        c.field("agent_name") != "Pilot-Test") return fail("pairing state");
+    struct stat sb {};
+    if (stat(c.statePath().c_str(), &sb) != 0 || (sb.st_mode & 0777) != 0600) return fail("state file is not mode 0600");
+    QJsonObject st = QJsonDocument::fromJson(QByteArray::fromStdString(c.statusJson())).object();
+    if (!st["paired"].toBool() || !st["initialised"].toBool() || st.contains("owner_priv")) return fail("statusJson");
+    QDir(qs(dir)).removeRecursively();
+
+    out() << "selftest OK: signed envelope verifies, tamper detected, ECIES both ways, wrong key rejected, "
+             "nonces monotonic, store body parsed and de-duplicated, state file 0600 with pairing\n";
     out().flush();
     return 0;
 }
@@ -403,6 +256,6 @@ int main(int argc, char** argv) {
     if (cmd == "send") return cmdSend(rest);
     if (cmd == "listen") return cmdListen(rest);
     if (cmd == "status") return cmdStatus();
-    if (cmd == "selftest") return cmdSelftest();
+    if (cmd == "selftest") return selftest();
     return usage();
 }

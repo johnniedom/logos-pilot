@@ -134,6 +134,17 @@ load_pilot() {
 # The daemon abandons a call at ~20 s while the module keeps working; callers that expect a
 # long-running method poll the observable result (a file, a status field) instead.
 call() { local LCDIR="$1"; shift; "$LC" --config-dir "$LCDIR" call pilot "$@" 2>/dev/null | res; }
+# callm <config-dir> <module> <method> [args...]: the same for any module (e.g. pilot_owner).
+callm() { local LCDIR="$1" MOD="$2"; shift 2; "$LC" --config-dir "$LCDIR" call "$MOD" "$@" 2>/dev/null | res; }
+
+# load_only <config-dir> <module> <log>: load one module that has no module dependencies and
+# assert the daemon's own record of it (the owner module runs alone in its daemon).
+load_only() {
+  local LCDIR="$1" MOD="$2" LOG="$3" LOAD
+  LOAD=$("$LC" --config-dir "$LCDIR" load-module "$MOD" 2>&1)
+  echo "$LOAD" | grep -q '"status":"ok"' || fail load "$MOD did not load ($LCDIR): $LOAD"
+  grep -q "Module loaded: $MOD" "$LOG" || fail load "$MOD never came up ($LCDIR)"
+}
 
 # wait_funded <config-dir> <data-dir> <name>: initialize (identity + self-funding from the
 # faucet), then poll metaStatus until a public account is credited ON CHAIN. Sets PUB (hex id),

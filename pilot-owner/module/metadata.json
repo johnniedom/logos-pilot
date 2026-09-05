@@ -1,0 +1,30 @@
+{
+  "name": "pilot_owner",
+  "version": "1.0.0",
+  "description": "The owner side of a Pilot agent's owner channel, as a Logos module: signs, seals and publishes the owner's commands to a remote agent over Logos Messaging and reads the agent's sealed replies. The Basecamp plugin pilot_remote talks to this module; the console client pilot-owner builds the same code.",
+  "author": "Johnnie Dom",
+  "type": "core",
+  "interface": "universal",
+  "category": "general",
+  "main": "pilot_owner_plugin",
+  "codegen": {
+    "impl_header": "src/pilot_owner_impl.h",
+    "impl_class": "PilotOwnerImpl"
+  },
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

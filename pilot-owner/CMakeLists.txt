@@ -12,8 +12,12 @@ set(PILOT_CRYPTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pilot-module/src" CACHE PAT
 find_package(Qt6 REQUIRED COMPONENTS Core Network)
 find_package(OpenSSL REQUIRED)
 
+# src/owner_client.* is the library both owner front-ends build: this console client and the
+# pilot_owner module (module/), which copies the same two files into its own tree at build time.
 add_executable(pilot-owner
     src/main.cpp
+    src/owner_client.h
+    src/owner_client.cpp
     ${PILOT_CRYPTO_DIR}/pilot_crypto.cpp
 )
 target_include_directories(pilot-owner PRIVATE ${PILOT_CRYPTO_DIR})

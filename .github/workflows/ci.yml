@@ -102,6 +102,46 @@ jobs:
           nix build ./pilot-owner -L
           ./result/bin/pilot-owner selftest
 
+  # The owner-side MODULE: the same owner-client library as pilot-owner, built as a Logos module
+  # (pilot-owner/module) so Basecamp's Pilot Remote plugin can sign, seal and publish through it.
+  # Built on every push with the module toolchain from the Cachix cache, and packaged as LGX — the
+  # form agents/owner-channel.sh drives headlessly and install-basecamp.sh installs.
+  build-owner-module:
+    name: Build owner module (pilot_owner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = 2
+            cores = 2
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-pilot-johnniedom
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        continue-on-error: true
+
+      - name: Build module + LGX package
+        run: |
+          nix build ./pilot-owner/module -L
+          ls -la result/lib
+          nix build ./pilot-owner/module#lgx -o result-lgx
+          ls -la result-lgx/
+
   # End-to-end proof on the PUBLIC LEZ testnet (spec line 122): runs the same ./demo.sh a judge
   # runs from a clean clone. Every step is asserted (see demo.sh): pilot + its 3 dependency
   # modules load in the real logoscore daemon, 23 skills, echo round-trip, the agent funds
