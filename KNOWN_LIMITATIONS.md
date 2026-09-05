@@ -270,6 +270,20 @@ not a module log line):
   before the module's own four-hour ceiling on the wallet call expired). It is a
   memory problem, not a protocol one — the same code path succeeded on 16 GB in
   under an hour. Private spends (`transfer_private*`) carry the same proof cost.
+- **The real prover can refuse a transfer outright on risc0 3.0.5, depending on the
+  transaction's cycle count.** Marketplace run 33967282915 (2026-09-05) failed its shielded
+  funding leg with `CircuitProvingError("Failed to read lift_rv32im_v2_13.zkr")` an hour after
+  the same leg had proved fine in run 33963576927 (account `7mXQ…` 150 → 50, nonce 2). The cause
+  is upstream: risc0 3.0.5 sizes the last segment of an execution to the next power of two, down
+  to 2^13 cycles (`MIN_CYCLES_PO2 = 13`, `executor.rs`), but the recursion programs it embeds at
+  build time (`recursion_zkr.zip`, sha256 `744b999f…`) only hold lift programs for 2^14 to 2^24
+  (listed 2026-09-05), so an execution whose final segment has 8192 cycles or fewer cannot be
+  lifted and the wallet reports the transfer as failed before anything is sent. Which
+  transactions hit it depends on their exact cycle count; one of four real proofs of this leg
+  so far did. Pilot records it as `funding.last_error` and does not mark the agent funded; the
+  run is repeated. Nothing on Pilot's side can pad the guest execution — that is the wallet's
+  circuit and risc0's executor. Closing it: a risc0 release whose recursion set carries the
+  2^13 lift, or an executor that pads the final segment to 2^14.
 - The `RISC0_DEV_MODE=0` real-proof scripts **are** committed
   (`run-sequencer-realproof.sh`, `demo-realproof.sh`, both with a `REHEARSE=1`
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
