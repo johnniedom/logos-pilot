@@ -87,6 +87,9 @@ if [ "$ROLE" = "marketplace" ]; then
   [ -n "${DEEPSEEK_API_KEY:-}" ] || fail prereq "DEEPSEEK_API_KEY is not set — the doer needs a language model to sell agent.ask"
   A_ENV+=(RISC0_DEV_MODE=0 RISC0_INFO=1 "RISC0_SEGMENT_PO2=${RISC0_SEGMENT_PO2:-18}" "PILOT_TX_TIMEOUT_MS=${PILOT_TX_TIMEOUT_MS_PROOF:-14400000}")
   B_ENV+=(RISC0_DEV_MODE=1)
+  # A's initialize proves the shielded leg INSIDE the call (~50 min on 4 vCPU) and answers no
+  # status meanwhile; give the funding wait two hours of polls rather than the default 75 min.
+  FUND_TIMEOUT_SECS="${FUND_TIMEOUT_SECS:-7200}"
   R0VM_DIR="$(find "$HOME/.risc0/extensions" -maxdepth 1 -type d -name '*cargo-risczero*' 2>/dev/null | head -1)"
   [ -n "$R0VM_DIR" ] && export PATH="$R0VM_DIR:$PATH"
   command -v r0vm >/dev/null 2>&1 || fail prereq "r0vm (the RISC0 prover) is not on PATH — real proofs need it"
@@ -282,9 +285,18 @@ want=card.get("_logos",{}).get("npk")
 sys.exit(0 if want and any(a.get("_logos",{}).get("npk")==want for a in d.get("agents",[])) else 1)' "$CARD_B" 2>/dev/null; then FOUND=1; break; fi
     sleep 10
   done
-  [ -n "$FOUND" ] || fail discover "A never discovered B's card on the discovery topic (last: $(echo "$DISC" | head -c 200))"
-  echo "      A discovered B's card on the discovery topic  [$(elapsed)]"
-  echo "EVIDENCE role=marketplace step=discover buyer=A seller=B seller_npk=${NPK_B:0:32}… declared_price=${PRICE_B:-see-pay-step}"
+  HOW="discovery topic"
+  if [ -z "$FOUND" ]; then
+    # Discovery did not deliver within two minutes. Do not throw a two-hour proof job away over
+    # the relay store: hand A the card out of band (the same signature + TOFU checks run) and
+    # SAY SO in the evidence — an imported card is not a discovered one.
+    IMP=$(call "$A_LC" agentImportCard "$CARD_B")
+    [ "$(echo "$IMP" | field imported)" = "True" ] || [ "$(echo "$IMP" | field imported)" = "true" ] \
+      || fail discover "A neither discovered B's card on the discovery topic nor could import it: $IMP (last discovery: $(echo "$DISC" | head -c 200))"
+    HOW="out-of-band import (discovery topic did not deliver within 2 min)"
+  fi
+  echo "      A has B's card via $HOW  [$(elapsed)]"
+  echo "EVIDENCE role=marketplace step=discover buyer=A seller=B seller_npk=${NPK_B:0:32}… declared_price=${PRICE_B:-see-pay-step} via=\"$HOW\""
 
   echo "[6/6] marketplace: A buys agent.ask from B, B answers, A pays B's declared price over the private rail (real proof)..."
   BAL_A0=$(private_balance "$A_LC"); BAL_B0=$(private_balance "$B_LC")

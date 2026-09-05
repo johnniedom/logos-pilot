@@ -166,8 +166,16 @@ to confirm the on-chain behavior the unit/E2E suites do not assert.
 
 Status of the submission criteria:
 
-- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** not yet met (the recorded
-  runs below are single operations, not the three use cases).
+- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** two of three run
+  (`docs/use-cases.md`): the **personal file vault** (every CI demo; sharing with a
+  second identity in the storage-agent runs) and the **on-chain event alerter**
+  (`testnet-use-cases.yml` run 33939827003: agent A read agent B's public account
+  through the wallet module, B spent 1 LEZ — tx `772889d0…`, block 38221 — A saw
+  150 → 149 and alerted B over Logos Messaging, B read the alert). The **paid skill
+  marketplace** job exists (`agents/deploy-agent.sh --role marketplace`: two real
+  proofs on a 16 GB runner, the payment over the private rail) and has not yet been
+  run against the public testnet; it needs a language-model API key as a repository
+  secret for the seller's `agent.ask`. Not met until that run is green.
 - **F10 — three agents deployed on the public testnet, one per skill category
   (Storage, Messaging, Blockchain), each with reproducible deployment steps and
   on-chain evidence:** met 2026-09-04/05. `agents/deploy-agent.sh --role <category>`

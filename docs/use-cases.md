@@ -96,5 +96,5 @@ verified by `evidence/verify-testnet.sh`. Run ids and identities: `evidence/test
 | Use case | First green run on the public testnet |
 |----------|----------------------------------------|
 | Personal file vault | every CI demo; cross-identity sharing 2026-09-04, run 33923468614 |
-| On-chain event alerter | pending — the job exists, see the evidence file for the run once it lands |
+| On-chain event alerter | 2026-09-05, run 33939827003: A watched `Eozv…` (150, nonce 1), B's spend `772889d0…` in block 38221 moved it to 149, A alerted B, B read the alert |
 | Paid skill marketplace | pending — the job exists (needs the `DEEPSEEK_API_KEY` secret), see the evidence file for the run once it lands |
