@@ -34,6 +34,20 @@ const LLM_MODELS: seq[seq[string]] = @[
   @[]
 ]
 
+# How long deploy waits for the identity to answer. initialize() does the wallet sync AND the
+# faucet funding inside one call, and the daemon abandons every RPC fired into that window, so
+# the identity "appears" only when initialize returns: a couple of minutes on a local sequencer,
+# 15-20 minutes on the public testnet (~60 s blocks: register two blocks deep, claim, credit,
+# then the shielded attempt's wait). The old fixed ~7 minutes gave up on every testnet deploy
+# and skipped the owner binding and the card. PILOT_DEPLOY_WAIT_SECS overrides.
+proc identityWaitSecs*(network: string, override: string): int =
+  if override.strip() != "":
+    try:
+      let v = parseInt(override.strip())
+      if v > 0: return v
+    except ValueError: discard
+  if network.contains("testnet"): 1800 else: 420
+
 proc runDeploy*(cfg: Config, network: string) =
   header("Deploying Pilot Agent")
   kv("Network", network)
@@ -62,8 +76,10 @@ proc runDeploy*(cfg: Config, network: string) =
   # another one (the identity-churn bug of 2026-07-07).
   var npk = ""
   var accountId = ""
-  for i in 0 ..< 60:
-    spinTick("Creating identity (registration + chain scan can take a couple of minutes)", i)
+  let waitSecs = identityWaitSecs(network, getEnv("PILOT_DEPLOY_WAIT_SECS"))
+  let iters = max(1, waitSecs div 7)          # each turn: a 5 s call window + 2 s pause
+  for i in 0 ..< iters:
+    spinTick("Creating identity (chain sync + faucet funding; up to " & $(waitSecs div 60) & " min on " & network & ")", i)
     npk = daemonCall(cfg, "getAgentNpk", timeoutSec = 5)
     if npk != "" and not npk.contains("error"):
       accountId = daemonCall(cfg, "getAccountId", timeoutSec = 5)
@@ -72,7 +88,7 @@ proc runDeploy*(cfg: Config, network: string) =
   clearLine()
 
   if npk == "" or npk.contains("error"):
-    fail("Agent identity not ready after 2 minutes")
+    fail("Agent identity not ready after " & $(waitSecs div 60) & " minutes")
     info("The module may still be initializing — daemon left running so no work is lost.")
     info("Check again shortly with: pilot status")
     return

@@ -46,6 +46,14 @@ doAssert missingModules(mdir, REQUIRED_MODULES).len == 0
 doAssert missingModules(getTempDir() / "pilot-test-no-such-dir", REQUIRED_MODULES).len == 4
 removeDir(mdir)
 
+# ── identityWaitSecs: deploy must outlast initialize, which funds inside the call ──
+import ../src/deploy
+doAssert identityWaitSecs("public testnet (https://testnet.lez.logos.co)", "") == 1800
+doAssert identityWaitSecs("local sequencer (http://127.0.0.1:3040)", "") == 420
+doAssert identityWaitSecs("public testnet (https://testnet.lez.logos.co)", "900") == 900
+doAssert identityWaitSecs("local sequencer (http://127.0.0.1:3040)", "not-a-number") == 420
+doAssert identityWaitSecs("local sequencer (http://127.0.0.1:3040)", "0") == 420
+
 # ── resolveRecipient: the one seam between "@b" and the wallet ──
 
 let tmp = getTempDir() / "pilot-test-contacts"
