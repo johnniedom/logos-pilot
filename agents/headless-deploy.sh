@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 need nix; need python3; need curl
 
 OUT="$ROOT/agents/out/headless"; mkdir -p "$OUT"
-rm -f "$OUT"/deploy.log "$OUT"/status.log "$OUT"/daemon.log "$OUT"/agent-card.json "$OUT"/owner-transcript.txt
+rm -f "$OUT"/deploy.log "$OUT"/status.log "$OUT"/daemon.log "$OUT"/agent-state.txt "$OUT"/agent-card.json "$OUT"/owner-transcript.txt
 WORK="$(mktemp -d)"
 export PILOT_DATA_DIR="$WORK/data"                 # where deploy puts the agent (pilot.db, wallet, daemon)
 export PILOT_MODULE_PATH="$WORK/modules"           # EMPTY: deploy has to fill it
@@ -25,10 +25,44 @@ export PILOT_OWNER_HOME="$WORK/owner-home"
 LCDIR="$PILOT_DATA_DIR/.logoscore"                 # the CLI's default config dir under the data dir
 A_LOG="$PILOT_DATA_DIR/daemon.log"
 FAIL_LOGS="$A_LOG"
+# The daemon log lands in $OUT from its first byte. The CLI writes it under the data dir and the
+# cleanup below copied it at exit, but a job cancelled at its cap never reaches the cleanup: runs
+# 33944283880 and 33963022638 kept no daemon log at all. The symlink puts it in the artifact
+# whatever happens to the job.
+mkdir -p "$PILOT_DATA_DIR"; ln -sfn "$OUT/daemon.log" "$A_LOG"
+# A module that answers no RPC still leaves time for the cleanup (log + state dump) before the
+# workflow cap of 150 min: an unanswered poll costs ~66 s (20 s sleep + the daemon abandoning the
+# call), so 75 polls is ~83 min on top of the ~45 min of build + deploy.
+FUND_TIMEOUT_SECS="${FUND_TIMEOUT_SECS:-1500}"
+
+# What the module itself recorded, straight from its database: funding.last_error,
+# funding.public_account, funded — readable even when the module answers nothing. Secret-bearing
+# keys are redacted by name.
+dump_agent_state() {
+  local DB="$PILOT_DATA_DIR/pilot.db"
+  {
+    echo "pilot.db: $(ls -la "$DB" 2>&1)"
+    echo "wallet_storage.json: $(stat -c %s "$PILOT_DATA_DIR/wallet_storage.json" 2>/dev/null || echo absent) bytes"
+    [ -f "$DB" ] && python3 - "$DB" <<'PY'
+import sqlite3, sys
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+    for k, v in con.execute("SELECT key, value FROM config ORDER BY key;"):
+        if any(s in k for s in ("priv", "api_key", "secret", "passphrase")): v = "<redacted>"
+        print("config %s = %s" % (k, str(v)[:200]))
+    for row in con.execute("SELECT id, state, amount, tx_hash, error, updated_at FROM spend_requests ORDER BY updated_at DESC LIMIT 5;"):
+        print("spend %s" % (row,))
+except Exception as e:
+    print("dump failed: %s" % e)
+PY
+  } > "$OUT/agent-state.txt" 2>&1
+  echo "      agent state dumped to agents/out/headless/agent-state.txt ($(grep -c "^config" "$OUT/agent-state.txt" 2>/dev/null) config rows)"
+}
 
 cleanup() {
   stop_daemon "$LCDIR"
-  cp "$A_LOG" "$OUT/daemon.log" 2>/dev/null || true
+  [ -L "$A_LOG" ] || cp "$A_LOG" "$OUT/daemon.log" 2>/dev/null || true
+  dump_agent_state
   [ "${KEEP_RELAY:-0}" = "1" ] || stop_relay
   rm -rf "$WORK"
 }
