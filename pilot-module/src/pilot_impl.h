@@ -554,6 +554,11 @@ std::vector<bool> pilotParseBoolList(const std::string& s, bool* okOut);
 // form for amounts, e.g. "96000000000000000000000000000000" = 150) -> decimal string; "" when the
 // input is not even-length hex or longer than 16 bytes.
 std::string pilotLeHexToDecimal(const std::string& leHex);
+// pilotWalletFailureReason: what to record when a transfer-style wallet call fails. The reply
+// is JSON {"success","error","tx_hash"} in a string; its "error" text (the wallet's own words,
+// e.g. the risc0 CircuitProvingError of 2026-09-05) follows "<call> failed: ". An empty reply
+// says the module did not answer; a non-JSON reply is quoted as is (capped at 200 bytes).
+std::string pilotWalletFailureReason(const std::string& call, const std::string& reply);
 // Group message envelope: AES-256-GCM under the 32-byte group key (64 hex), fresh IV per
 // message. Seal returns "" for an unusable key; open returns false for a wrong key or junk.
 std::string pilotSealGroupMessage(const std::string& groupKeyHex, const std::string& from,

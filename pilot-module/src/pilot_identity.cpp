@@ -644,13 +644,13 @@ bool PilotImpl::fundAgentIfNeeded() {
     // step 1 looked exactly like one that died at step 4, and the agent carried on reporting
     // nothing was wrong. Persisting the reason makes a funding failure answerable after the
     // fact, from the agent itself, with no log at all.
-    auto fundFail = [&](const char* reason) -> bool {
-        qWarning() << "[pilot] fund:" << reason;
+    auto fundFail = [&](const std::string& reason) -> bool {
+        qWarning() << "[pilot] fund:" << reason.c_str();
         sqlite3_stmt* st = nullptr;
         if (sqlite3_prepare_v2(db_,
                 "INSERT OR REPLACE INTO config (key, value) VALUES ('funding.last_error', ?);",
                 -1, &st, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, reason, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(st, 1, reason.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_step(st);
             sqlite3_finalize(st);
         }
@@ -820,10 +820,12 @@ bool PilotImpl::fundAgentIfNeeded() {
     }
 
     // 4. Shielded transfer public -> agent's private account (generates a ZK proof).
-    if (!ok(modules().lez_core.transfer_shielded_owned(
-                pubId, agentAccountId_, u128LeHex(fundAmount), nullptr, txTimeoutMs))) {
-        return fundFail("transfer_shielded_owned failed");
-    }
+    // The wallet's own reason travels with the failure (funding.last_error): run 33967282915
+    // recorded only "transfer_shielded_owned failed" while the daemon log alone held the risc0
+    // CircuitProvingError that explained it.
+    std::string shielded = modules().lez_core.transfer_shielded_owned(
+                pubId, agentAccountId_, u128LeHex(fundAmount), nullptr, txTimeoutMs);
+    if (!ok(shielded)) return fundFail(pilotWalletFailureReason("transfer_shielded_owned", shielded));
     syncToHead();
 
     // 4b. VERIFY the money actually landed in the agent's private account before claiming it.
@@ -926,6 +928,17 @@ bool pilotLooksLikeAccountHex(const std::string& s) {
     for (char c : s)
         if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
     return true;
+}
+
+std::string pilotWalletFailureReason(const std::string& call, const std::string& reply) {
+    const std::string base = call + " failed";
+    if (reply.empty()) return base + ": no reply from the wallet module";
+    QJsonDocument d = QJsonDocument::fromJson(QString::fromStdString(reply).toUtf8());
+    if (d.isObject()) {
+        std::string err = d.object().value("error").toString().toStdString();
+        return err.empty() ? base : base + ": " + err;
+    }
+    return base + ": " + reply.substr(0, 200);
 }
 
 std::string pilotLeHexToDecimal(const std::string& leHex) {

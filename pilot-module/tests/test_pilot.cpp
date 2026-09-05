@@ -271,3 +271,19 @@ LOGOS_TEST(identity_at_rest_migrates_plaintext_to_wrapped) {
     LOGOS_ASSERT_EQ(recovered, kp.privateKeyHex);  // the identity key is fully recoverable
     LOGOS_ASSERT_EQ(storedPub, kp.publicKeyHex);   // identity never regenerated (pub untouched)
 }
+
+LOGOS_TEST(wallet_failure_reason_carries_the_wallets_own_words) {
+    // Marketplace run 33967282915 (2026-09-05): the shielded funding leg failed and the agent
+    // recorded only "transfer_shielded_owned failed"; the wallet's reason — a risc0 3.0.5 lift
+    // program missing for a 2^13-cycle final segment — sat in the daemon log alone. The reply's
+    // own "error" text belongs in funding.last_error, where metaStatus and the role scripts read it.
+    LOGOS_ASSERT_EQ(pilotWalletFailureReason("transfer_shielded_owned",
+        "{\"success\":false,\"error\":\"TransactionBuildError(CircuitProvingError(\\\"Failed to read lift_rv32im_v2_13.zkr\\\"))\",\"tx_hash\":\"\"}"),
+        std::string("transfer_shielded_owned failed: TransactionBuildError(CircuitProvingError(\"Failed to read lift_rv32im_v2_13.zkr\"))"));
+    LOGOS_ASSERT_EQ(pilotWalletFailureReason("transfer_shielded_owned", ""),
+        std::string("transfer_shielded_owned failed: no reply from the wallet module"));
+    LOGOS_ASSERT_EQ(pilotWalletFailureReason("claim_pinata", "{\"success\":false}"),
+        std::string("claim_pinata failed"));
+    LOGOS_ASSERT_EQ(pilotWalletFailureReason("claim_pinata", "not json"),
+        std::string("claim_pinata failed: not json"));
+}
