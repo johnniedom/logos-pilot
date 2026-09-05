@@ -64,11 +64,11 @@ proc runDeploy*(cfg: Config, network: string) =
   clearLine()
   recordStartTime(cfg)
 
-  # startDaemon already fires `initialize` inside the module; this one is only a safety
-  # net for the "module not responding yet" startup path. Short client timeout: a fresh
-  # wallet (create + register + fund) legitimately outlives any single RPC window, and a
-  # client-side timeout does NOT stop the module's work.
-  discard daemonCall(cfg, "initialize", @[cfg.dataDir], timeoutSec = 5)
+  # startDaemon already fired `initialize` inside the module. It is NOT repeated here: on the
+  # public testnet the first call is still funding (chain sync, faucet claim, the shielded
+  # attempt) when a second one would arrive, and two funding flows nested in the module's
+  # event loop left the agent answering nothing for the rest of the run (headless-deploy run
+  # 33944283880, 2026-09-05). The module also guards against re-entry now; belt and braces.
 
   # Poll for the identity instead of declaring failure while the module is still working.
   # NEVER stop the daemon on a slow start: the fresh keys only reach disk after a wallet

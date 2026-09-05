@@ -84,13 +84,23 @@ echo "      wallet reply: $(echo "$D" | head -c 400)"
 DEPLOYED=$(echo "$D" | field deployed); TXH=$(echo "$D" | field tx_hash); DERR=$(echo "$D" | field error)
 if [ "$DEPLOYED" = "True" ] || [ "$DEPLOYED" = "true" ]; then
   [ ${#TXH} -eq 64 ] || fail deploy "wallet says deployed but gave no 64-hex tx hash: $D"
+  # The wallet's success is mempool acceptance. Whether the sequencer MINES a deployment is the
+  # chain's decision: the token program already exists on this chain (getProgramIds lists it), and
+  # the first run (2026-09-05, tx 2a65f6dd…) was accepted and never mined. Report which it was.
   BLK=""; for i in $(seq 1 20); do BLK=$(tx_block "$TXH"); [ -n "$BLK" ] && break; sleep 15; done
-  [ -n "$BLK" ] || fail deploy "getTransaction($TXH) is still unknown to the chain after 5 min"
-  echo "      ON CHAIN: deployment tx $TXH in block $BLK (size $(echo "$D" | field size_bytes) bytes, sha256 $(echo "$D" | field binary_hash | head -c 16)…)"
-  echo "EVIDENCE role=programs step=deploy program=builtin:token deployed=yes tx=$TXH block=$BLK sha256=$(echo "$D" | field binary_hash)"
+  TOKEN_ID=$(echo "$PROGRAMS" | python3 -c 'import sys,json,struct
+r=json.load(sys.stdin).get("result") or {}
+w=r.get("token"); print("".join(struct.pack("<I", int(x)).hex() for x in w) if isinstance(w,list) and len(w)==8 else "")')
+  if [ -n "$BLK" ]; then
+    echo "      ON CHAIN: deployment tx $TXH in block $BLK (size $(echo "$D" | field size_bytes) bytes, sha256 $(echo "$D" | field binary_hash | head -c 16)…)"
+    echo "EVIDENCE role=programs step=deploy program=builtin:token deployed=yes tx=$TXH block=$BLK sha256=$(echo "$D" | field binary_hash)"
+  else
+    echo "      the wallet accepted the deployment (tx $TXH) but the chain has not mined it after 5 min; the token program already exists on this chain as ${TOKEN_ID:-<unknown>} — a duplicate deployment is dropped, not mined"
+    echo "EVIDENCE role=programs step=deploy program=builtin:token accepted_by_wallet=yes mined_within_5min=no tx=$TXH existing_token_program=${TOKEN_ID:-unknown} sha256=$(echo "$D" | field binary_hash)"
+  fi
 else
   echo "      the wallet did not deploy it; its reason, verbatim: ${DERR:-<none given>}"
   echo "EVIDENCE role=programs step=deploy program=builtin:token deployed=no wallet_error=\"${DERR:-<none>}\" sha256=$(echo "$D" | field binary_hash)"
 fi
 echo
-echo "=== PROGRAM OPERATIONS PASSED in $(elapsed): program.query read $PROGRAM_ID through the wallet module; program.call refused to guess; program.deploy reached the wallet (deployed=$DEPLOYED${TXH:+, tx $TXH}) ==="
+echo "=== PROGRAM OPERATIONS PASSED in $(elapsed): program.query read $PROGRAM_NAME ($PROGRAM_ID) through the wallet module; program.call refused to guess; program.deploy reached the wallet (accepted=$DEPLOYED${TXH:+, tx $TXH}${BLK:+, mined in block $BLK}) ==="

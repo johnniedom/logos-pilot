@@ -473,6 +473,7 @@ private:
     int64_t spendPeriodSeconds_ = 86400;
     std::string dataDir_;
     bool initialized_ = false;
+    bool initializing_ = false;   // an initialize() is in flight (see its re-entrancy guard)
     bool walletOpened_ = false;
     bool storageInitialized_ = false;
     bool storageNodeStarted_ = false;

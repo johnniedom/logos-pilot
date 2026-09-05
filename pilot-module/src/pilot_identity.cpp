@@ -93,6 +93,15 @@ std::string computePinataSolution(const std::string& dataHex) {
 
 bool PilotImpl::initialize(const std::string& dataDir) {
     if (initialized_) return true;
+    // Re-entrancy guard (2026-09-05). The wallet calls below block on nested event loops that
+    // keep serving RPCs, so a SECOND initialize arriving while the first is still creating the
+    // identity (the CLI used to fire two, 5 s apart; on the public testnet wallet creation and
+    // funding take minutes) re-entered createIdentity() and left the agent with two half-made
+    // identities and no answer to any status call for the rest of the run (headless-deploy run
+    // 33944283880). While one initialize is in flight, another returns false at once and does
+    // nothing; the caller polls getAgentNpk / metaStatus, as it must anyway.
+    if (initializing_) return false;
+    struct InFlight { bool& f; explicit InFlight(bool& x) : f(x) { f = true; } ~InFlight() { f = false; } } inFlight(initializing_);
 
     // Persistent, shared identity: PILOT_DATA_DIR (when set) overrides the caller's
     // data dir, so the CLI and Basecamp can both point at one durable location
