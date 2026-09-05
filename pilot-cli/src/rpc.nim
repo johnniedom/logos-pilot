@@ -100,6 +100,31 @@ proc cardPublishOk*(reply: string): bool =
   except CatchableError:
     false
 
+# A deploy poll into a module that is inside initialize (chain sync, faucet claim, the shielded
+# leg — minutes on the public testnet) is answered "timeout" by the daemon itself, 20 s after it
+# started the call (logoscore Timeout(20000)); the client's own wait is as long again. deploy
+# wrapped those polls in `timeout 5`, so every one of them was killed while the daemon was still
+# running its call — hundreds over a 30-minute wait — and in every headless attempt the daemon
+# stopped answering anything the moment initialize returned (runs 33944283880, 33963022638,
+# 33982705549). A poll now waits the daemon out.
+const DAEMON_ANSWER_SECS* = 45
+
+proc fundedFromBalance*(reply: string): bool =
+  ## walletBalance answers {"balance": <private account>, "public_balance": <public account>}.
+  ## The faucet credits the PUBLIC account; the private one fills only when the shielded leg is
+  ## mined, which the public testnet does not do for dev-mode receipts. Either account with a
+  ## non-zero balance means the agent is funded. An error or no reply is not.
+  try:
+    let j = parseJson(reply.strip())
+    if j.kind != JObject or j.hasKey("error"): return false
+    for k in ["balance", "public_balance"]:
+      if j.hasKey(k):
+        let v = (if j[k].kind == JString: j[k].getStr() else: $j[k]).strip()
+        if v != "" and v != "0" and v.allCharsInSet({'0'..'9'}): return true
+    false
+  except CatchableError:
+    false
+
 # Resolve a send recipient: "@name" -> <dataDir>/contacts/<name>.json, else
 # "@path" -> literal keys file, else pass the string through untouched. File
 # contents are stripped of ALL whitespace (a trailing newline inside the keys

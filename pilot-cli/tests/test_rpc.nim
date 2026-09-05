@@ -253,3 +253,17 @@ doAssert not cardPublishOk("")
 doAssert not cardPublishOk("   ")
 doAssert not cardPublishOk("""{"error":"not initialized"}""")
 doAssert cardPublishOk("""{"name":"pilot","_logos":{"npk":"{\"nullifier_public_key\":\"ab\"}"}}""")
+
+# walletBalance reports both accounts. The faucet credits the PUBLIC one; the private balance
+# stays 0 on the public testnet in dev mode (the shielded receipt is never mined). deploy read
+# only "balance" and said "still 0" on a funded agent (headless run 33982705549: public 150).
+doAssert fundedFromBalance("""{"balance":"0","public_balance":"150"}""")
+doAssert fundedFromBalance("""{"balance":"100"}""")
+doAssert not fundedFromBalance("""{"balance":"0","public_balance":"0"}""")
+doAssert not fundedFromBalance("")
+doAssert not fundedFromBalance("""{"error":"balance query failed"}""")
+
+# A deploy poll must outlive the daemon's own answer: the daemon runs a module call for 20 s
+# before it says "timeout" itself, and the client waits as long again. A wrapper shorter than
+# that kills the client while the daemon is still running its call.
+doAssert DAEMON_ANSWER_SECS >= 45

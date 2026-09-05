@@ -1,4 +1,4 @@
-import strutils, os, rdstdin, terminal, json
+import strutils, os, rdstdin, terminal, times
 import rpc, daemon, selector, format
 
 const LLM_PROVIDERS = @[
@@ -77,12 +77,17 @@ proc runDeploy*(cfg: Config, network: string) =
   var npk = ""
   var accountId = ""
   let waitSecs = identityWaitSecs(network, getEnv("PILOT_DEPLOY_WAIT_SECS"))
-  let iters = max(1, waitSecs div 7)          # each turn: a 5 s call window + 2 s pause
-  for i in 0 ..< iters:
-    spinTick("Creating identity (chain sync + faucet funding; up to " & $(waitSecs div 60) & " min on " & network & ")", i)
-    npk = daemonCall(cfg, "getAgentNpk", timeoutSec = 5)
+  # Wall clock bounds the wait, not a turn count: a poll into a module still inside initialize
+  # is answered "timeout" by the daemon at 20 s and the client waits it out (DAEMON_ANSWER_SECS,
+  # rpc.nim) rather than being killed at 5 s — an unanswered turn is ~45 s, an answered one ~1 s.
+  let identT0 = epochTime()
+  var identTurn = 0
+  while epochTime() - identT0 < waitSecs.float:
+    spinTick("Creating identity (chain sync + faucet funding; up to " & $(waitSecs div 60) & " min on " & network & ")", identTurn)
+    inc identTurn
+    npk = daemonCall(cfg, "getAgentNpk", timeoutSec = DAEMON_ANSWER_SECS)
     if npk != "" and not npk.contains("error"):
-      accountId = daemonCall(cfg, "getAccountId", timeoutSec = 5)
+      accountId = daemonCall(cfg, "getAccountId", timeoutSec = DAEMON_ANSWER_SECS)
       break
     sleep(2000)
   clearLine()
@@ -195,15 +200,18 @@ proc runDeploy*(cfg: Config, network: string) =
   # premature 0 and moving on — interrupted funding is how identities were lost.
   var balance = ""
   var funded = false
-  for i in 0 ..< 90:
-    spinTick("Funding agent (waiting for the on-chain claim to land)", i)
-    balance = daemonCall(cfg, "walletBalance", timeoutSec = 10)
-    try:
-      let bj = parseJson(balance)
-      if bj.hasKey("balance") and bj["balance"].getStr("0") notin ["", "0"]:
-        funded = true
-        break
-    except: discard
+  # Once the identity has answered, initialize has returned and the faucet claim is already
+  # credited (it lands before the shielded leg); this wait covers a wallet still catching up.
+  # Each poll waits the daemon out (DAEMON_ANSWER_SECS) instead of killing its client at 10 s.
+  let fundT0 = epochTime()
+  var fundTurn = 0
+  while epochTime() - fundT0 < 600.0:
+    spinTick("Funding agent (waiting for the on-chain claim to land)", fundTurn)
+    inc fundTurn
+    balance = daemonCall(cfg, "walletBalance", timeoutSec = DAEMON_ANSWER_SECS)
+    if fundedFromBalance(balance):
+      funded = true
+      break
     sleep(2000)
   clearLine()
   info(balance)
