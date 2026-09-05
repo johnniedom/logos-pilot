@@ -33,19 +33,21 @@ trap cleanup EXIT
 
 echo "=== LP-0008 Pilot — program operations through the wallet module  (endpoint $LEZ_RPC) ==="
 chain_check
+# getProgramIds answers {"amm":[8 x u32], "authenticated_transfer":[8 x u32], ...}: RISC0 image
+# ids as eight 32-bit words. Written as little-endian bytes they are the 64-hex account ids the
+# wallet uses — authenticated_transfer's first word 583309054 = 0x22C496FE -> "fe96c422…", the
+# program_owner every funded public account on this chain shows. Read that one (fallback: the
+# first program listed).
 PROGRAMS=$(rpc getProgramIds '[]')
-PROGRAM_ID=$(echo "$PROGRAMS" | python3 -c 'import sys,json
-r=json.load(sys.stdin).get("result")
-ids=[]
-def walk(o):
-    if isinstance(o,str): ids.append(o)
-    elif isinstance(o,dict):
-        for v in o.values(): walk(v)
-    elif isinstance(o,list):
-        for v in o: walk(v)
-walk(r); print(ids[0] if ids else "")')
-[ -n "$PROGRAM_ID" ] || fail chain "getProgramIds returned no program id: $(echo "$PROGRAMS" | head -c 200)"
-echo "      a program the chain knows: $PROGRAM_ID"
+read -r PROGRAM_NAME PROGRAM_ID <<<"$(echo "$PROGRAMS" | python3 -c 'import sys,json,struct
+r=json.load(sys.stdin).get("result") or {}
+if not isinstance(r,dict) or not r: sys.exit(0)
+name="authenticated_transfer" if "authenticated_transfer" in r else sorted(r)[0]
+words=r[name]
+if not (isinstance(words,list) and len(words)==8): sys.exit(0)
+print(name, "".join(struct.pack("<I", int(w)).hex() for w in words))')"
+[ -n "${PROGRAM_ID:-}" ] && [ ${#PROGRAM_ID} -eq 64 ] || fail chain "getProgramIds gave no usable program id: $(echo "$PROGRAMS" | head -c 200)"
+echo "      a program the chain knows: $PROGRAM_NAME = $PROGRAM_ID"
 
 echo "[1/4] Building runtime + module + dependency modules..."
 build_all "$WORK" "$ROOT"
