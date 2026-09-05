@@ -73,6 +73,13 @@ PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-son
   PILOT_OWNER_NPK=<npk> ./pilot-cli/result/bin/pilot deploy
 ```
 
+Proven on a GitHub-hosted runner that had never seen the agent, modules directory empty (run
+33985585954, 2026-09-05, `agents/headless-deploy.sh`): `PILOT_LLM_PROVIDER=none PILOT_OWNER_NPK=<key>
+pilot deploy --testnet` installed the four modules, created the identity, funded it from the faucet and
+published its card in 14 minutes; the separate `pilot-owner` client read its balances over a relay
+22 minutes in. On the public testnet the identity step takes 10–15 minutes (cold chain sync, faucet
+claim, the dev-mode shielded attempt); the deploy waits up to 30 (`PILOT_DEPLOY_WAIT_SECS` overrides).
+
 The wizard walks you through:
 
 1. **Agent Identity** — creates a shielded wallet account on the sequencer, generates NPK/ISK keypair
