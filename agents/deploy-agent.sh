@@ -10,6 +10,16 @@
 #                                               # B joins; a message each way in the group — all READ BACK
 #                                               # on the receiving side (messagingInbox), not just sent
 #
+# Two of the prize's illustrative USE CASES run on the same two-agent scaffold (docs/use-cases.md):
+#   agents/deploy-agent.sh --role alerter       # on-chain event alerter: A watches B's public account through
+#                                               # the wallet module; B spends; A sees the balance change and
+#                                               # alerts B over Logos Messaging; B's inbox shows the alert
+#   agents/deploy-agent.sh --role marketplace   # paid skill marketplace, REAL proofs (RISC0_DEV_MODE=0, ~16 GB):
+#                                               # A's private account is funded by a real shielded proof; B sells
+#                                               # agent.ask (needs DEEPSEEK_API_KEY); A discovers B's card, buys
+#                                               # the task, and pays B's declared price over the private rail —
+#                                               # settled on chain, balances read back
+#
 # storage and messaging run TWO daemons in one job (the role agent A and its counterparty B), each
 # with its own identity, data dir, config dir and ports, both funded from the faucet, plus one local
 # nwaku relay the share / message payloads travel through (the pull path reads its REST store).
@@ -28,7 +38,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1"; exit 2;;
   esac
 done
-case "$ROLE" in storage|messaging|blockchain) ;; *) echo "usage: $0 --role storage|messaging|blockchain"; exit 2;; esac
+case "$ROLE" in storage|messaging|blockchain|alerter|marketplace) ;; *) echo "usage: $0 --role storage|messaging|blockchain|alerter|marketplace"; exit 2;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "$ROLE" = "blockchain" ]; then
@@ -67,6 +77,20 @@ trap cleanup EXIT
 A_ENV=(PILOT_TCP_PORT=60000 PILOT_STORAGE_API_PORT=5988 PILOT_STORAGE_DISC_PORT=8090 PILOT_STORAGE_LISTEN_PORT=8070 PILOT_STORAGE_NAT=extip:127.0.0.1)
 B_ENV=(PILOT_TCP_PORT=60001 PILOT_STORAGE_API_PORT=5989 PILOT_STORAGE_DISC_PORT=8091 PILOT_STORAGE_LISTEN_PORT=8071 PILOT_STORAGE_NAT=extip:127.0.0.1)
 A_STORAGE_ADDR="/ip4/127.0.0.1/tcp/8070"
+DEMO_RECIPIENT_HEX="${DEMO_RECIPIENT_HEX:-f8fc394c0e5440c4188236d1693076b0cfad04984cf67ca64e0e43a173144f63}"   # a registered project account
+if [ "$ROLE" = "marketplace" ]; then
+  # The payer's payment rides the PRIVATE rail (the doer's card pays out to its private keys), and the
+  # public testnet mines only real proofs: A proves for real — its shielded funding leg inside
+  # initialize (~50 min on a 16 GB runner) and then the payment itself. B only RECEIVES, so B proves in
+  # dev mode (its own shielded leg is accepted into the mempool and never mined; B's public account is
+  # still credited, which is all B needs). Two real provers at once would not fit in 16 GB.
+  [ -n "${DEEPSEEK_API_KEY:-}" ] || fail prereq "DEEPSEEK_API_KEY is not set — the doer needs a language model to sell agent.ask"
+  A_ENV+=(RISC0_DEV_MODE=0 RISC0_INFO=1 "RISC0_SEGMENT_PO2=${RISC0_SEGMENT_PO2:-18}" "PILOT_TX_TIMEOUT_MS=${PILOT_TX_TIMEOUT_MS_PROOF:-14400000}")
+  B_ENV+=(RISC0_DEV_MODE=1)
+  R0VM_DIR="$(find "$HOME/.risc0/extensions" -maxdepth 1 -type d -name '*cargo-risczero*' 2>/dev/null | head -1)"
+  [ -n "$R0VM_DIR" ] && export PATH="$R0VM_DIR:$PATH"
+  command -v r0vm >/dev/null 2>&1 || fail prereq "r0vm (the RISC0 prover) is not on PATH — real proofs need it"
+fi
 
 echo "=== LP-0008 Pilot — agent role: $ROLE  (endpoint $LEZ_RPC, RISC0_DEV_MODE=$RISC0_DEV_MODE) ==="
 chain_check
@@ -169,6 +193,146 @@ if [ "$ROLE" = "storage" ]; then
   echo "EVIDENCE role=storage step=download agent=B cid=$CID from_peer=$A_PEER identical=yes bytes=$(wc -c <"$DL_OUT")"
   echo
   echo "=== STORAGE AGENT PASSED in $(elapsed): two funded identities ($A_PUB_B58, $B_PUB_B58); A stored + shared $CID; B fetched it from A's node and decrypted it byte-identical ==="
+  exit 0
+fi
+
+if [ "$ROLE" = "alerter" ]; then
+  echo "[5/6] alerter: A watches B's public account on the chain (through the wallet module); B spends 1 LEZ..."
+  # The account B's faucet claim credited: a fresh account on this chain, so any change is B's doing.
+  R0=$(call "$A_LC" chainAccount "$B_PUB")
+  [ "$(echo "$R0" | field exists)" = "True" ] || [ "$(echo "$R0" | field exists)" = "true" ] || fail watch "A cannot read B's public account $B_PUB_B58: $R0"
+  BAL0=$(echo "$R0" | field balance); N0=$(echo "$R0" | field nonce)
+  echo "      A reads $B_PUB_B58: balance $BAL0, nonce $N0 (chainAccount)"
+  echo "EVIDENCE role=alerter step=watch watcher=A target=$B_PUB_B58 balance=$BAL0 nonce=$N0"
+  # The event: B pays 1 LEZ to the project account through its own spending FSM (public rail).
+  read -r RB0 RN0 <<<"$(acct "$DEMO_RECIPIENT_HEX")"
+  [ -n "$RB0" ] || fail spend "recipient $(b58 "$DEMO_RECIPIENT_HEX") is not a registered account on this chain (set DEMO_RECIPIENT_HEX)"
+  SEND=$(call "$B_LC" walletSend "public:$DEMO_RECIPIENT_HEX" 1 "alerter use case: the event the watcher must catch")
+  [ "$(echo "$SEND" | field status)" = "completed" ] || fail spend "B's walletSend answered '$SEND'"
+  REQ=$(echo "$SEND" | field request_id)
+  TX=$(call "$B_LC" walletHistory | python3 -c 'import sys,json
+req=sys.argv[1]
+for t in json.loads(sys.stdin.read() or "{}").get("transactions",[]):
+    if t.get("id")==req: print(t.get("tx_hash",""), t.get("state",""))' "$REQ")
+  read -r TXH TXS <<<"$TX"
+  [ "$TXS" = "COMPLETED" ] && [ ${#TXH} -eq 64 ] || fail spend "B's spend row $REQ is '$TXS' with hash '$TXH'"
+  echo "      B spent 1 LEZ: request $REQ, tx $TXH (public rail)  [$(elapsed)]"
+  echo "EVIDENCE role=alerter step=event spender=B from=$B_PUB_B58 to=$(b58 "$DEMO_RECIPIENT_HEX") amount=1 tx=$TXH"
+
+  echo "[6/6] alerter: A notices the change, alerts B over Logos Messaging; B reads the alert..."
+  BAL1="$BAL0"; N1="$N0"; DETECTED=0
+  for i in $(seq 1 30); do            # the testnet seals a block every ~60 s; 10 min budget
+    R1=$(call "$A_LC" chainAccount "$B_PUB")
+    BAL1=$(echo "$R1" | field balance); N1=$(echo "$R1" | field nonce)
+    if [ -n "$BAL1" ] && [ "$BAL1" != "$BAL0" ]; then DETECTED=1; break; fi
+    sleep 20
+  done
+  [ "$DETECTED" = "1" ] || fail watch "A never saw $B_PUB_B58 change (still $BAL1 after 10 min; tx $TXH)"
+  BLK=""; for i in $(seq 1 10); do BLK=$(tx_block "$TXH"); [ -n "$BLK" ] && break; sleep 15; done
+  [ -n "$BLK" ] || fail chain "getTransaction($TXH) is still unknown to the chain"
+  ALERT="ALERT: account $B_PUB_B58 balance $BAL0 -> $BAL1 (nonce $N0 -> $N1); tx $TXH in block $BLK"
+  SEND=$(call "$A_LC" messagingSend "$B_KEY" "$ALERT")
+  [ "$(echo "$SEND" | field sent)" = "True" ] || [ "$(echo "$SEND" | field sent)" = "true" ] || fail alert "A's messaging.send answered: $SEND"
+  INBOX=$(poll_inbox_until "$B_LC" "the alert" "m.get('kind')=='direct' and m.get('message','').startswith('ALERT: account $B_PUB_B58') for m in ms")
+  echo "$INBOX" > "$OUT/agent-b-inbox.json"
+  echo "      A detected $BAL0 -> $BAL1 (nonce $N0 -> $N1) and alerted B; B's inbox holds the alert  [$(elapsed)]"
+  echo "EVIDENCE role=alerter step=alert watcher=A detected=\"$BAL0 -> $BAL1\" tx=$TXH block=$BLK alert_received_by=B message=\"$ALERT\""
+  echo
+  echo "=== ALERTER USE CASE PASSED in $(elapsed): A watched $B_PUB_B58, B's spend (tx $TXH, block $BLK) moved it $BAL0 -> $BAL1, A alerted B over Logos Messaging and B read the alert ==="
+  exit 0
+fi
+
+if [ "$ROLE" = "marketplace" ]; then
+  echo "[5/6] marketplace: A's private account funded by a REAL proof; B gets a language model and publishes its card; A discovers it..."
+  wait_shielded "$A_LC" A "$A_PUB"
+  A_PBAL="$PBAL"; A_PNONCE="$PNONCE"
+  echo "EVIDENCE role=marketplace step=fund payer=A public_account=$A_PUB_B58 public_balance=$A_PBAL nonce=$A_PNONCE shielded=landed"
+  call "$B_LC" metaConfigure llm.provider deepseek >/dev/null
+  call "$B_LC" metaConfigure llm.api_key "$DEEPSEEK_API_KEY" >/dev/null
+  call "$B_LC" metaConfigure llm.model "${PILOT_LLM_MODEL:-deepseek-v4-pro}" >/dev/null
+  CARD_B=$(call "$B_LC" agentCard)
+  NPK_B=$(echo "$CARD_B" | field _logos.npk)
+  # The declared price lives in the card's service list (whatever its exact shape): find the
+  # agent-ask entry that carries a price.
+  PRICE_B=$(echo "$CARD_B" | python3 -c 'import sys,json
+def walk(o):
+    if isinstance(o,dict):
+        if isinstance(o.get("agent-ask"),(int,float)): return o["agent-ask"]      # _logos.pricing map
+        if o.get("skill") in ("agent-ask","agent.ask") or o.get("id") in ("agent-ask","agent.ask"):
+            if "price" in o: return o["price"]
+        for v in o.values():
+            r=walk(v)
+            if r is not None: return r
+    elif isinstance(o,list):
+        for v in o:
+            r=walk(v)
+            if r is not None: return r
+    return None
+p=walk(json.load(sys.stdin)); print("" if p is None else p)' 2>/dev/null)
+  [ -n "$NPK_B" ] || fail card "B's card has no _logos.npk: $(echo "$CARD_B" | head -c 200)"
+  echo "      B published its card (payment identity ${NPK_B:0:24}…, agent-ask price ${PRICE_B:-?})"
+  # Discovery over the relay: A reads the discovery topic from the store (agentDiscover polls it)
+  # and must come back with a card whose payment identity is B's.
+  FOUND=""
+  for i in $(seq 1 12); do
+    DISC=$(call "$A_LC" agentDiscover "")
+    if echo "$DISC" | python3 -c 'import sys,json
+d=json.loads(sys.stdin.read() or "{}"); card=json.loads(sys.argv[1])
+want=card.get("_logos",{}).get("npk")
+sys.exit(0 if want and any(a.get("_logos",{}).get("npk")==want for a in d.get("agents",[])) else 1)' "$CARD_B" 2>/dev/null; then FOUND=1; break; fi
+    sleep 10
+  done
+  [ -n "$FOUND" ] || fail discover "A never discovered B's card on the discovery topic (last: $(echo "$DISC" | head -c 200))"
+  echo "      A discovered B's card on the discovery topic  [$(elapsed)]"
+  echo "EVIDENCE role=marketplace step=discover buyer=A seller=B seller_npk=${NPK_B:0:32}… declared_price=${PRICE_B:-see-pay-step}"
+
+  echo "[6/6] marketplace: A buys agent.ask from B, B answers, A pays B's declared price over the private rail (real proof)..."
+  BAL_A0=$(private_balance "$A_LC"); BAL_B0=$(private_balance "$B_LC")
+  echo "      private balances before: A=$BAL_A0 B=$BAL_B0"
+  TASK=$(call "$A_LC" agentTask "$NPK_B" agent-ask '{"prompt":"In one word: what colour is the sky?"}')
+  [ "$(echo "$TASK" | field state)" = "submitted" ] || fail task "agentTask answered: $TASK"
+  TASK_ID=$(echo "$TASK" | field id)
+  echo "      task $TASK_ID submitted; payment $(echo "$TASK" | field payment)"
+  task_col() { python3 - "$A_DATA/pilot.db" "$TASK_ID" "$1" <<'PY' 2>/dev/null
+import sqlite3, sys
+db, task, col = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    row = con.execute("SELECT %s FROM outbound_tasks WHERE id=?;" % col, (task,)).fetchone()
+    print(row[0] if row and row[0] is not None else "")
+except Exception as e:
+    print("")
+PY
+  }
+  STATE=""; SP=$(( ${PAY_TIMEOUT_SECS:-7200} / 30 ))
+  for j in $(seq 1 "$SP"); do
+    call "$B_LC" agentPoll >/dev/null; call "$A_LC" agentPoll >/dev/null
+    STATE=$(task_col state)
+    case "$STATE" in paid|pay-failed|pay-unresolved|failed|canceled|rejected|accepted-nopay|awaiting-approval) break;; esac
+    if [ $(( j % 10 )) -eq 0 ]; then echo "      … task $TASK_ID state '${STATE:-?}' (poll $j/$SP, $(elapsed))"; fi
+    sleep 30
+  done
+  [ "$STATE" = "paid" ] || fail pay "task $TASK_ID ended in state '${STATE:-none}' (B's work or A's payment did not complete)"
+  PRICE=$(task_col price); SPEND_ID=$(task_col spend_request_id)
+  TXH=$(python3 - "$A_DATA/pilot.db" "$SPEND_ID" <<'PY' 2>/dev/null
+import sqlite3, sys
+con = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+row = con.execute("SELECT tx_hash, state FROM spend_requests WHERE id=?;", (sys.argv[2],)).fetchone()
+print(row[0] if row else "")
+PY
+  )
+  [ ${#TXH} -eq 64 ] || fail pay "the payout spend $SPEND_ID has no tx hash"
+  echo "      task paid: price $PRICE LEZ, spend $SPEND_ID, tx $TXH — waiting for the chain to know it..."
+  BLK=""; for i in $(seq 1 40); do BLK=$(tx_block "$TXH"); [ -n "$BLK" ] && break; sleep 15; done
+  [ -n "$BLK" ] || fail pay "getTransaction($TXH) is still unknown to the chain after 10 min"
+  BAL_A1=""; for i in $(seq 1 12); do BAL_A1=$(private_balance "$A_LC"); [ -n "$BAL_A1" ] && [ -n "$BAL_A0" ] && [ "$BAL_A1" -lt "$BAL_A0" ] && break; sleep 10; done
+  BAL_B1=$(private_balance "$B_LC")
+  [ -n "$BAL_A0" ] && [ -n "$BAL_A1" ] && [ "$PRICE" -gt 0 ] && [ $(( BAL_A0 - BAL_A1 )) -eq "$PRICE" ] \
+    || fail pay "A's private balance did not drop by the declared price: $BAL_A0 -> ${BAL_A1:-?} (price ${PRICE:-?})"
+  echo "      ON CHAIN: tx $TXH in block $BLK; A private $BAL_A0 -> $BAL_A1 (price $PRICE); B private $BAL_B0 -> $BAL_B1  [$(elapsed)]"
+  echo "EVIDENCE role=marketplace step=pay buyer=A seller=B task=$TASK_ID price=$PRICE tx=$TXH block=$BLK a_private=\"$BAL_A0 -> $BAL_A1\" b_private=\"$BAL_B0 -> $BAL_B1\" rail=private proof=real"
+  echo
+  echo "=== MARKETPLACE USE CASE PASSED in $(elapsed): A discovered B, bought agent.ask (task $TASK_ID), and paid B's declared $PRICE LEZ over the private rail with a real proof — tx $TXH in block $BLK; A $BAL_A0 -> $BAL_A1 ==="
   exit 0
 fi
 

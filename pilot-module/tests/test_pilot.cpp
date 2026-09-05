@@ -49,6 +49,21 @@ LOGOS_TEST(wallet_history_returns_error_before_init) {
     LOGOS_ASSERT_CONTAINS(result, "not initialized");
 }
 
+LOGOS_TEST(chain_account_returns_error_before_init) {
+    PilotImpl impl;
+    LOGOS_ASSERT_CONTAINS(impl.chainAccount("HkwBGetZJytPq7fMnDNqUVYUug4fbWQwHTNkJtH4yh7x"), "not initialized");
+}
+
+LOGOS_TEST(account_id_form_hex_is_told_apart_from_base58) {
+    // The testnet's own getAccount takes base58; the wallet takes 64 hex. chainAccount converts
+    // base58 through the wallet, so the two forms must be told apart reliably.
+    LOGOS_ASSERT_TRUE(pilotLooksLikeAccountHex("f8fc394c0e5440c4188236d1693076b0cfad04984cf67ca64e0e43a173144f63"));
+    LOGOS_ASSERT_FALSE(pilotLooksLikeAccountHex("HkwBGetZJytPq7fMnDNqUVYUug4fbWQwHTNkJtH4yh7x"));
+    LOGOS_ASSERT_FALSE(pilotLooksLikeAccountHex("f8fc394c"));
+    LOGOS_ASSERT_FALSE(pilotLooksLikeAccountHex(std::string(64, 'g')));
+    LOGOS_ASSERT_FALSE(pilotLooksLikeAccountHex(""));
+}
+
 LOGOS_TEST(wallet_send_returns_error_before_init) {
     PilotImpl impl;
     std::string result = impl.walletSend("recipient", 100, "test");

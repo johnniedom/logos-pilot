@@ -174,6 +174,39 @@ wait_funded() {
   echo "      ${TAG}funded public account: $PUB_B58 = $PBAL LEZ on chain (nonce $PNONCE)  [$(elapsed)]"
 }
 
+# wait_shielded <config-dir> <name> <public-account-hex> [secs]: with real proofs
+# (RISC0_DEV_MODE=0) the module finishes the shielded leg — public -> the agent's private account,
+# a RISC0 STARK — INSIDE initialize. Poll funding.funded until it flips (polls counted, not
+# wall-clock; fail the moment the module gives up), then trust the CHAIN, not the flag: the
+# public account must have dropped by 100. Sets PBAL / PNONCE to the post-proof reading.
+wait_shielded() {
+  local LCDIR="$1" NAME="${2:-}" PUBHEX="$3" SECS="${4:-16200}" TAG="" SP j=0 FUNDED LASTERR B N
+  [ -n "$NAME" ] && TAG="[$NAME] "
+  ST=$(call "$LCDIR" metaStatus); FUNDED=$(echo "$ST" | field funding.funded)
+  if [ "$FUNDED" != "True" ] && [ "$FUNDED" != "true" ]; then
+    echo "      ${TAG}shielded leg: waiting for the real proof (RISC0_DEV_MODE=0; polls counted, not wall-clock)..."
+    SP=$(( SECS / 30 ))
+    while [ "$j" -lt "$SP" ]; do
+      j=$(( j + 1 ))
+      ST=$(call "$LCDIR" metaStatus)
+      FUNDED=$(echo "$ST" | field funding.funded); LASTERR=$(echo "$ST" | field funding.last_error)
+      if [ "$FUNDED" = "True" ] || [ "$FUNDED" = "true" ]; then break; fi
+      case "$LASTERR" in *"transfer_shielded_owned failed"*|*"never appeared"*) fail shielded "${TAG}the module gave up on the shielded transfer: $LASTERR";; esac
+      if [ $(( j % 10 )) -eq 0 ]; then echo "      … ${TAG}proving, poll $j/$SP ($(elapsed))"; fi
+      sleep 30
+    done
+    [ "$FUNDED" = "True" ] || [ "$FUNDED" = "true" ] || fail shielded "${TAG}the shielded transfer did not land within $SP polls"
+  fi
+  read -r B N <<<"$(acct "$PUBHEX")"
+  [ -n "$B" ] && [ "$B" -le 50 ] && [ "${N:-0}" -ge 2 ] \
+    || fail shielded "${TAG}funding says funded but the chain shows the public account at '$B' (nonce '$N'); 100 should have left it"
+  PBAL=$B; PNONCE=$N
+  echo "      ${TAG}shielded leg: LANDED ON CHAIN — public account now $PBAL (nonce $PNONCE); private account funded (real proof accepted)  [$(elapsed)]"
+}
+
+# private_balance <config-dir>: the agent's shielded (private) balance, synced to head first.
+private_balance() { call "$1" walletBalance | field balance; }
+
 # wait_quiet <config-dir> <name>: the module keeps working after initialize returns (funding,
 # first sync); a call fired into that window is abandoned by the daemon. Wait until it answers.
 wait_quiet() {

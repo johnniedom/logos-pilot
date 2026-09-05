@@ -78,6 +78,11 @@ public:
     std::string getAccountId();
     std::string walletBalance();
     std::string walletHistory();
+    // A chain read of ANY public account through the wallet module (2026-09-05) — what the
+    // on-chain event alerter watches. Accepts the 64-hex account id or its base58 form (the form
+    // the testnet's own getAccount takes). {"id":<hex>,"exists":bool,"balance":"<n>","nonce":n,
+    // "account":<the account JSON>}. A read, never a spend.
+    std::string chainAccount(const std::string& account);
 
     // Phase 2: Owner Channel
     bool establishOwnerChannel();
@@ -528,6 +533,9 @@ int pilotStorageApiPort();
 std::string pilotRecipientKey(const std::string& recipient);
 // pilotParseMembers: a JSON array of keys/cards, or the legacy comma list, -> keys.
 std::vector<std::string> pilotParseMembers(const std::string& membersJson);
+// pilotLooksLikeAccountHex: exactly 64 hex chars (a raw LEZ account id) — anything else is
+// taken as base58 by chainAccount.
+bool pilotLooksLikeAccountHex(const std::string& s);
 // Group message envelope: AES-256-GCM under the 32-byte group key (64 hex), fresh IV per
 // message. Seal returns "" for an unusable key; open returns false for a wrong key or junk.
 std::string pilotSealGroupMessage(const std::string& groupKeyHex, const std::string& from,

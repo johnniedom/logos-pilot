@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <cctype>
 #include <openssl/evp.h>
 #include <QString>
 #include <QVariant>
@@ -909,6 +910,46 @@ std::string PilotImpl::walletBalance() {
                                                   : QString("unavailable");
     }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
+}
+
+bool pilotLooksLikeAccountHex(const std::string& s) {
+    if (s.size() != 64) return false;
+    for (char c : s)
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+    return true;
+}
+
+std::string PilotImpl::chainAccount(const std::string& account) {
+    if (!isContextReady()) return "{\"error\": \"not initialized\"}";
+    std::string id = account;
+    if (!pilotLooksLikeAccountHex(account)) {
+        id = modules().lez_core.account_id_from_base58(account, nullptr, 15000);
+        if (id.empty()) return "{\"error\": \"not a valid account id (64 hex or base58)\"}";
+    }
+    // Sync first so the read reflects the latest block — same reason as walletBalance.
+    logos::CallError herr;
+    int64_t head = modules().lez_core.get_current_block_height(&herr);
+    if (herr.code.empty())
+        modules().lez_core.sync_to_block(head, nullptr, kWalletSyncTimeoutMs);
+
+    std::string accJson = modules().lez_core.get_account_public(id, nullptr, 15000);
+    QJsonDocument d = QJsonDocument::fromJson(QByteArray::fromStdString(accJson));
+    QJsonObject res;
+    res["id"] = QString::fromStdString(id);
+    res["exists"] = d.isObject() && !d.object().isEmpty();
+    if (d.isObject()) {
+        QJsonObject a = d.object();
+        // The wallet build decides whether balance is a number or a string; hand out a string
+        // either way, formatted without an exponent.
+        QJsonValue b = a.value("balance");
+        res["balance"] = b.isString() ? b.toString() : QString::number(b.toDouble(), 'f', 0);
+        res["nonce"] = a.value("nonce").toInt();
+        res["account"] = a;
+    } else {
+        res["balance"] = QString("");
+        res["nonce"] = 0;
+    }
+    return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }
 
 std::string PilotImpl::walletHistory() {
