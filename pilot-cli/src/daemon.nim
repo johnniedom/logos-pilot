@@ -34,6 +34,44 @@ proc cleanStaleDaemon*(cfg: Config) =
     "pkill -9 -f logos_host_qt 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
     options = {poUsePath})
 
+# Keys at rest (2026-09-05). The module wraps the agent's private keys (ecies.priv, enc.priv)
+# with AES-256-GCM under a passphrase-derived key whenever PILOT_KEY_PASSPHRASE is set, and
+# migrates plaintext rows in place on the next load — but deploy never set one, so every agent
+# deployed by the CLI kept its keys in clear in pilot.db. Now: an explicit PILOT_KEY_PASSPHRASE
+# wins (the headless path); else the one saved beside the agent's data is reused; else a fresh
+# random one is generated, saved with mode 0600, and its LOCATION (never its value) is printed
+# once. Losing the file loses A2A/owner crypto for that identity — it is part of the agent's
+# backup, like pilot.db. Pure so the precedence is unit-tested.
+proc resolveKeyPassphrase*(envValue, fileValue, fresh: string): tuple[value: string, generated: bool] =
+  if envValue.strip() != "": return (envValue.strip(), false)
+  if fileValue.strip() != "": return (fileValue.strip(), false)
+  (fresh, true)
+
+proc freshPassphrase(): string =
+  ## 32 random bytes from the OS as 64 hex chars.
+  const hexDigits = "0123456789abcdef"
+  var f: File
+  if not open(f, "/dev/urandom", fmRead): return ""
+  var buf: array[32, byte]
+  discard f.readBytes(buf, 0, 32)
+  f.close()
+  for b in buf:
+    result.add hexDigits[int(b shr 4)]
+    result.add hexDigits[int(b and 0x0f)]
+
+proc keyPassphraseFor(cfg: Config): string =
+  let passFile = cfg.dataDir / ".key-passphrase"
+  let fileValue = if fileExists(passFile): readFile(passFile) else: ""
+  let (value, generated) = resolveKeyPassphrase(getEnv("PILOT_KEY_PASSPHRASE"), fileValue, freshPassphrase())
+  if generated and value != "":
+    createDir(cfg.dataDir)
+    writeFile(passFile, value & "\n")
+    setFilePermissions(passFile, {fpUserRead, fpUserWrite})
+    info("Key passphrase generated at " & passFile & " (mode 0600): the agent's private keys are stored encrypted with it — back it up together with pilot.db")
+  elif not generated and getEnv("PILOT_KEY_PASSPHRASE") == "" and fileValue.strip() != "":
+    info("Using the key passphrase saved at " & passFile)
+  value
+
 proc startDaemon*(cfg: Config): bool =
   if cfg.logoscore == "" or cfg.logoscore == "logoscore":
     fail("logoscore binary not found in nix store")
@@ -54,6 +92,7 @@ proc startDaemon*(cfg: Config): bool =
 
   let logFile = cfg.dataDir / "daemon.log"
   let scriptFile = cfg.dataDir / ".start-daemon.sh"
+  let keyPass = keyPassphraseFor(cfg)
 
   # setsid detaches the daemon into its own session so it survives
   # the parent bash exit (required when launched from Nim execProcess).
@@ -68,6 +107,7 @@ proc startDaemon*(cfg: Config): bool =
   writeFile(scriptFile,
     "#!/bin/bash\n" &
     "export RISC0_DEV_MODE=\"${RISC0_DEV_MODE:-1}\"\n" &
+    (if keyPass != "": "export PILOT_KEY_PASSPHRASE=" & quoteShell(keyPass) & "\n" else: "") &
     "if [ -z \"$LOGOS_BLOCKCHAIN_CIRCUITS\" ]; then\n" &
     "  export LOGOS_BLOCKCHAIN_CIRCUITS=$(find /nix/store -maxdepth 1 -name '*logos-blockchain-circuits*' -type d 2>/dev/null | head -1)\n" &
     "fi\n" &

@@ -46,6 +46,13 @@ doAssert missingModules(mdir, REQUIRED_MODULES).len == 0
 doAssert missingModules(getTempDir() / "pilot-test-no-such-dir", REQUIRED_MODULES).len == 4
 removeDir(mdir)
 
+# ── resolveKeyPassphrase: keys at rest by default; the env var stays the headless path ──
+import ../src/daemon
+doAssert resolveKeyPassphrase("from-env", "from-file", "fresh") == ("from-env", false)
+doAssert resolveKeyPassphrase("  ", "from-file\n", "fresh") == ("from-file", false)
+doAssert resolveKeyPassphrase("", "", "fresh") == ("fresh", true)
+doAssert resolveKeyPassphrase("", "\n", "fresh") == ("fresh", true)
+
 # ── identityWaitSecs: deploy must outlast initialize, which funds inside the call ──
 import ../src/deploy
 doAssert identityWaitSecs("public testnet (https://testnet.lez.logos.co)", "") == 1800
