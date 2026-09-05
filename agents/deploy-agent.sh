@@ -202,7 +202,7 @@ if [ "$ROLE" = "alerter" ]; then
   R0=$(call "$A_LC" chainAccount "$B_PUB")
   [ "$(echo "$R0" | field exists)" = "True" ] || [ "$(echo "$R0" | field exists)" = "true" ] || fail watch "A cannot read B's public account $B_PUB_B58: $R0"
   BAL0=$(echo "$R0" | field balance); N0=$(echo "$R0" | field nonce)
-  echo "      A reads $B_PUB_B58: balance $BAL0, nonce $N0 (chainAccount)"
+  echo "      A reads $B_PUB_B58: balance $BAL0, nonce $N0 (chainAccount; raw account record: $(echo "$R0" | field account | head -c 240))"
   echo "EVIDENCE role=alerter step=watch watcher=A target=$B_PUB_B58 balance=$BAL0 nonce=$N0"
   # The event: B pays 1 LEZ to the project account through its own spending FSM (public rail).
   read -r RB0 RN0 <<<"$(acct "$DEMO_RECIPIENT_HEX")"

@@ -919,6 +919,31 @@ bool pilotLooksLikeAccountHex(const std::string& s) {
     return true;
 }
 
+std::string pilotLeHexToDecimal(const std::string& leHex) {
+    if (leHex.empty() || leHex.size() % 2 != 0 || leHex.size() > 32) return "";
+    for (char c : leHex)
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return "";
+    unsigned __int128 v = 0;
+    for (size_t i = leHex.size(); i >= 2; i -= 2) {          // most significant byte is LAST
+        v = (v << 8) | static_cast<unsigned>(std::stoul(leHex.substr(i - 2, 2), nullptr, 16));
+        if (i == 2) break;
+    }
+    if (v == 0) return "0";
+    std::string out;
+    while (v > 0) { out.insert(out.begin(), static_cast<char>('0' + static_cast<int>(v % 10))); v /= 10; }
+    return out;
+}
+
+// A JSON field that may be a number or the wallet's little-endian hex string -> decimal string.
+static QString decimalOf(const QJsonValue& v) {
+    if (v.isDouble()) return QString::number(v.toDouble(), 'f', 0);
+    if (v.isString()) {
+        std::string dec = pilotLeHexToDecimal(v.toString().toStdString());
+        return dec.empty() ? v.toString() : QString::fromStdString(dec);
+    }
+    return QString("");
+}
+
 std::string PilotImpl::chainAccount(const std::string& account) {
     if (!isContextReady()) return "{\"error\": \"not initialized\"}";
     std::string id = account;
@@ -939,15 +964,16 @@ std::string PilotImpl::chainAccount(const std::string& account) {
     res["exists"] = d.isObject() && !d.object().isEmpty();
     if (d.isObject()) {
         QJsonObject a = d.object();
-        // The wallet build decides whether balance is a number or a string; hand out a string
-        // either way, formatted without an exponent.
-        QJsonValue b = a.value("balance");
-        res["balance"] = b.isString() ? b.toString() : QString::number(b.toDouble(), 'f', 0);
-        res["nonce"] = a.value("nonce").toInt();
+        // The wallet hands amounts out as 16-byte little-endian hex ("96000000…" = 150), the
+        // same wire form funding writes with u128LeHex; a plain number is accepted too. Decimal
+        // strings out, so a watcher compares and prints them as numbers (measured 2026-09-05:
+        // the first alerter run printed the raw hex).
+        res["balance"] = decimalOf(a.value("balance"));
+        res["nonce"] = decimalOf(a.value("nonce"));
         res["account"] = a;
     } else {
         res["balance"] = QString("");
-        res["nonce"] = 0;
+        res["nonce"] = QString("");
     }
     return QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString();
 }

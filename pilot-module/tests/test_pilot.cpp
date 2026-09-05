@@ -64,6 +64,21 @@ LOGOS_TEST(account_id_form_hex_is_told_apart_from_base58) {
     LOGOS_ASSERT_FALSE(pilotLooksLikeAccountHex(""));
 }
 
+LOGOS_TEST(little_endian_hex_amounts_decode_to_decimal) {
+    // The wallet's account record carries amounts as 16-byte little-endian hex — the form
+    // funding writes with u128LeHex. 0x96 = 150 (a fresh faucet claim), 0x95 = 149 after a
+    // 1-LEZ spend: the first alerter run (2026-09-05) printed these raw.
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("96000000000000000000000000000000"), std::string("150"));
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("95000000000000000000000000000000"), std::string("149"));
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("00000000000000000000000000000000"), std::string("0"));
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("0100000000000000"), std::string("1"));       // 8-byte nonce form
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("e803000000000000"), std::string("1000"));
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("ffffffffffffffffffffffffffffffff"), std::string("340282366920938463463374607431768211455"));
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("abc"), std::string(""));       // odd length
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal("zz"), std::string(""));        // not hex
+    LOGOS_ASSERT_EQ(pilotLeHexToDecimal(""), std::string(""));
+}
+
 LOGOS_TEST(wallet_send_returns_error_before_init) {
     PilotImpl impl;
     std::string result = impl.walletSend("recipient", 100, "test");

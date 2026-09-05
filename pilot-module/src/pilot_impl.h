@@ -536,6 +536,10 @@ std::vector<std::string> pilotParseMembers(const std::string& membersJson);
 // pilotLooksLikeAccountHex: exactly 64 hex chars (a raw LEZ account id) — anything else is
 // taken as base58 by chainAccount.
 bool pilotLooksLikeAccountHex(const std::string& s);
+// pilotLeHexToDecimal: a little-endian hex integer of up to 16 bytes (the wallet's u128 wire
+// form for amounts, e.g. "96000000000000000000000000000000" = 150) -> decimal string; "" when the
+// input is not even-length hex or longer than 16 bytes.
+std::string pilotLeHexToDecimal(const std::string& leHex);
 // Group message envelope: AES-256-GCM under the 32-byte group key (64 hex), fresh IV per
 // message. Seal returns "" for an unusable key; open returns false for a wrong key or junk.
 std::string pilotSealGroupMessage(const std::string& groupKeyHex, const std::string& from,
