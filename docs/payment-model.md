@@ -77,8 +77,16 @@ A machine with adequate RAM (16 GB+) generates the same proofs in *minutes*, not
 | `callProgram()` / `deployProgram()` | Depends on the guest | not exercised in v1 | No custom RISC0 guest ships in v1; a `deployProgram` would add a one-time guest-proving cost. |
 
 **Getting exact, hardware-independent numbers:** wall-clock varies wildly with RAM. The portable CU
-measure is the **RISC0 zkVM cycle count** — run the prover with `RISC0_INFO=1` (or read
-`session.total_cycles`) to log cycles per segment; sum them for the per-operation cycle cost.
+measure is the **RISC0 zkVM cycle count** — risc0 reports it per segment (`Session::log`, switched
+on by `RISC0_INFO=1`) through the `tracing` crate at INFO level. That path is closed inside this
+stack: the wallet module's process installs no `tracing` subscriber, so the lines are dropped
+before they reach any log. Measured, not assumed — real-proof run 33996348974 (2026-09-05) ran the
+whole funding proof with `RISC0_INFO=1` **and** `RUST_LOG=info,risc0_zkvm=info` in the daemon's
+environment, and its 40,530-line daemon log holds the wallet's own status lines and no prover
+output at all (the earlier runs, RISC0_INFO only, the same). To get the cycle count, run the same
+circuit in a standalone prover with a subscriber installed (e.g. `RUST_LOG=info` with a
+`tracing_subscriber::fmt` init) or read `session.total_cycles` from a host you control; then sum
+the segments for the per-operation cycle cost. Until then the table above carries times, not cycles.
 
 **Takeaway for agent design:** private transfers are the heavy operation, so the pilot batches/holds
 rather than proving speculatively, and the spending FSM only triggers a shielded proof once on an
