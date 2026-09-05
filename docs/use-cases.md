@@ -97,4 +97,4 @@ verified by `evidence/verify-testnet.sh`. Run ids and identities: `evidence/test
 |----------|----------------------------------------|
 | Personal file vault | every CI demo; cross-identity sharing 2026-09-04, run 33923468614 |
 | On-chain event alerter | 2026-09-05, run 33939827003: A watched `Eozv…` (150, nonce 1), B's spend `772889d0…` in block 38221 moved it to 149, A alerted B, B read the alert |
-| Paid skill marketplace | pending — the job exists (needs the `DEEPSEEK_API_KEY` secret), see the evidence file for the run once it lands |
+| Paid skill marketplace | 2026-09-05, run 33982458566: A funded its private account with a real proof (`ENMg…` 150 → 50), discovered B's card on the discovery topic, bought `agent.ask`, and its settlement paid B's declared 5 LEZ over the private rail with a second real proof — tx `d45ae495…` in block 39198, A private 100 → 95; 102 min on a 16 GB runner (runs 33963576927 and 33967282915 before it: a wrong check in the script, then the risc0 3.0.5 lift gap, see KNOWN_LIMITATIONS §5) |

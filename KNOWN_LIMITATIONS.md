@@ -164,8 +164,10 @@ runners against the public testnet: the **shielded leg** with a real RISC0 proof
 `testnet-agents.yml` (storage sharing fetched across nodes, direct and group messages
 read back on the receiver, green 2026-09-05), the **event alerter** use case
 (`testnet-use-cases.yml`) and the **owner channel from a separate app**
-(`owner-channel.yml`). Still not in CI: the paid A2A task settled on chain (the
-`marketplace` job exists and needs a language-model key as a repository secret).
+(`owner-channel.yml`). Since 2026-09-05 also the
+**paid A2A task settled on chain** (`testnet-use-cases.yml`, job `marketplace`, run 33982458566:
+two real proofs on a 16 GB runner, the 5-LEZ payment read back with `getTransaction`, block
+39198). That job runs on demand — two hours of runner time and two faucet claims — not on every push.
 
 **Why CI rather than local.** A local build is infeasible on the development box:
 building `wallet-ffi` + RISC0 OOM-crashes the WSL VM, with no local Cachix / RISC0
@@ -180,10 +182,8 @@ drop to equal the declared price (measured 2026-08-26: 100 → 99 for the direct
 transfer, then → 94 for the 5-LEZ task payment, both in the next block). It runs
 on the development box, not in CI.
 
-**What would close the remainder.** The two-agent paid settlement in CI: the
-`marketplace` job of `testnet-use-cases.yml` (real proofs on a 16 GB runner), once the
-seller's language-model key is a repository secret, confirms on chain the one behavior
-the unit and E2E suites do not assert.
+**What remains.** The unit and E2E suites still do not assert the paid settlement
+themselves; the on-demand `marketplace` job does, and has (run 33982458566).
 
 ---
 
@@ -191,16 +191,20 @@ the unit and E2E suites do not assert.
 
 Status of the submission criteria:
 
-- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** two of three run
+- **F9 — ≥ 3 use cases demoed end-to-end on testnet:** met 2026-09-05
   (`docs/use-cases.md`): the **personal file vault** (every CI demo; sharing with a
-  second identity in the storage-agent runs) and the **on-chain event alerter**
+  second identity in the storage-agent runs), the **on-chain event alerter**
   (`testnet-use-cases.yml` run 33939827003: agent A read agent B's public account
   through the wallet module, B spent 1 LEZ — tx `772889d0…`, block 38221 — A saw
-  150 → 149 and alerted B over Logos Messaging, B read the alert). The **paid skill
-  marketplace** job exists (`agents/deploy-agent.sh --role marketplace`: two real
-  proofs on a 16 GB runner, the payment over the private rail) and has not yet been
-  run against the public testnet; it needs a language-model API key as a repository
-  secret for the seller's `agent.ask`. Not met until that run is green.
+  150 → 149 and alerted B over Logos Messaging, B read the alert), and the **paid
+  skill marketplace** (`testnet-use-cases.yml` run 33982458566, `RISC0_DEV_MODE=0`
+  on a 16 GB runner: A funded its private account with a real proof, `ENMg…`
+  150 → 50; discovered B's card on the discovery topic; bought `agent.ask` at B's
+  declared 5 LEZ; B answered with its language model; A's settlement paid B over the
+  private rail with a second real proof — tx `d45ae495…`, block 39198, A's private
+  balance 100 → 95; 102 minutes. Two attempts before it failed for reasons recorded
+  below and in the commit log: a wrong check in the role script, then the risc0
+  3.0.5 lift gap.)
 - **F10 — three agents deployed on the public testnet, one per skill category
   (Storage, Messaging, Blockchain), each with reproducible deployment steps and
   on-chain evidence:** met 2026-09-04/05. `agents/deploy-agent.sh --role <category>`
@@ -289,9 +293,8 @@ not a module log line):
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
   committed.**
 
-**What would close it.** Run the three use cases against the deployed agents
-(F9); record the narrated video. (The three category agents and the shielded
-funding proof on a 16 GB runner are done — see above and `real-proof.yml`.)
+**What would close it.** Record the narrated video. (The three use cases, the three
+category agents and the shielded funding proofs on a 16 GB runner are done — see above.)
 
 **A faucet race worth knowing about.** The faucet's puzzle data changes with every
 claim it pays, so two agents claiming in the same minute race each other: the
