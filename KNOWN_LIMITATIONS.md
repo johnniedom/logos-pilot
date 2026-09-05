@@ -42,12 +42,17 @@ program ELFs, and nobody re-checked when the pin moved. The skills' inner calls 
 them.
 
 **What is and is not exercised.** `agents/program-ops.sh`
-(`.github/workflows/program-ops.yml`) runs on the public testnet: `program.query` on a
-program id the chain names (`getProgramIds`), `program.call` refusing to guess, and
-`program.deploy builtin:token` with the wallet's verdict reported verbatim (a mined
-deployment is verified with `getTransaction`; a refusal is printed, not hidden). A
-program *call* with real instruction words has not been run: that needs a program
-whose ABI is documented.
+(`.github/workflows/program-ops.yml`, run 33963020447, 2026-09-05, green): `program.query`
+read the `authenticated_transfer` program's account — `fe96c422…`, the id `getProgramIds`
+gives as eight 32-bit words written little-endian, and the `program_owner` of every
+funded account on this chain — through the wallet module (exists, balance 0, nonce 0);
+`program.call` with no instruction words was refused before the wallet was asked;
+`program.deploy builtin:token` was **accepted by the wallet** (tx `2a65f6dd…`, the same
+hash on both runs: the deployment of the same bytes is deterministic) and **not mined**:
+the token program already exists on the chain (`ccc4713e…`) and the sequencer drops the
+duplicate. That is the chain's verdict, reported as it is. A program *call* with real
+instruction words has not been run: that needs a program whose ABI is documented, and a
+deploy of a program the chain does not already have needs a guest ELF of our own.
 
 ---
 
