@@ -160,3 +160,33 @@ LOGOS_TEST(owner_channel_drops_a_signed_envelope_from_a_different_key_once_pinne
     impl.handleInboundMessage(kTopic, sealFor(agent, signedEnvelope("hello", intruder, 5)));
     LOGOS_ASSERT_EQ(calls, 1);
 }
+
+// Over the channel there is no chat CLI to interpret the action object processOwnerMessage
+// returns, so the agent must execute it and answer with text (2026-09-05). Before that a
+// remote owner who sent "/balance" got {"action":"command","params":{"raw":"/balance"}} back.
+LOGOS_TEST(owner_command_executes_slash_commands_and_answers_text) {
+    std::string dir = ownerDir("owner_command");
+    ECIESKeypair agent = generateECIESKeypair();
+    seedAgent(dir, agent);
+    PilotImpl impl; impl.initialize(dir);
+
+    std::string help = impl.ownerCommand(impl.processOwnerMessage("/help"));
+    LOGOS_ASSERT_CONTAINS(help, "/approve");
+    LOGOS_ASSERT_CONTAINS(help, "/balance");
+    LOGOS_ASSERT_TRUE(help.find("\"action\"") == std::string::npos);   // text, not the action object
+
+    // Approving an id nobody holds is refused in words, never silently.
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/approve nosuch")), "could not approve nosuch");
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/reject nosuch")), "could not reject nosuch");
+    // Incomplete commands get usage, not a crash.
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/send")), "usage: /send");
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/approve")), "usage: /approve");
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/frobnicate")), "unknown action");
+    // The wallet is not attached in this harness: the honest error text is what the owner gets.
+    LOGOS_ASSERT_CONTAINS(impl.ownerCommand(impl.processOwnerMessage("/balance")), "not initialized");
+    // A model's plain reply passes through as its text.
+    LOGOS_ASSERT_EQ(impl.ownerCommand("{\"action\":\"reply\",\"params\":{\"text\":\"hi owner\"}}"),
+                    std::string("hi owner"));
+    // Plain text that is not an action object is returned untouched.
+    LOGOS_ASSERT_EQ(impl.ownerCommand("just text"), std::string("just text"));
+}

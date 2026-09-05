@@ -88,6 +88,14 @@ public:
     bool establishOwnerChannel();
     bool sendToOwner(const std::string& message);
     std::string getOwnerChannelId();
+    // Execute an owner action object — what processOwnerMessage returns for a slash command
+    // ({"action":"command","params":{"raw":"/balance"}}) or for the model's decision
+    // ({"action":"balance"|"approve"|"send"|…,"params":{…}} / {"action":"reply","params":{"text"}})
+    // — and hand back the TEXT to send the owner. The local chat CLI interprets these objects
+    // itself; a message that arrives over the owner channel has no CLI on the other end, and until
+    // 2026-09-05 the agent sent the raw action object back to the owner instead of acting on it.
+    // Money moves only through the spending FSM (send -> walletSend; approve -> approveSpend).
+    std::string ownerCommand(const std::string& actionJson);
 
     // Phase 3: Spending FSM
     std::string createSpendRequest(const std::string& recipient, int64_t amount, const std::string& reason);

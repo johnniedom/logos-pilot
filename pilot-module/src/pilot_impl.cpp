@@ -523,8 +523,11 @@ void PilotImpl::handleInboundMessage(const std::string& topic, const std::string
         // LLM processing, no cost, no spend). See verifyOwnerMessage.
         std::string inner;
         if (verifyOwnerMessage(message, inner)) {
-            std::string response = processOwnerMessage(inner);
-            sendToOwner(response);
+            // processOwnerMessage yields an ACTION object (the local chat CLI executes those
+            // itself); over the channel nobody else can, so execute it here and send the
+            // owner the result text. Before 2026-09-05 the raw object went back to the owner.
+            std::string action = processOwnerMessage(inner);
+            sendToOwner(ownerCommand(action));
         }
     } catch (...) {}
 }

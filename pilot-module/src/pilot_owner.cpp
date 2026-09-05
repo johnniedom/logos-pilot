@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 #include <chrono>
 #include <thread>
+#include <vector>
 #include <QString>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -94,4 +95,88 @@ bool PilotImpl::sendToOwner(const std::string& message) {
 
 std::string PilotImpl::getOwnerChannelId() {
     return ownerChannelId_;
+}
+
+namespace {
+const char* kOwnerHelp =
+    "Commands over the owner channel:\n"
+    "  /balance                      wallet balances (private + public account)\n"
+    "  /history                      the agent's spend ledger\n"
+    "  /pending                      spend requests waiting for your approval\n"
+    "  /approve <id> | /reject <id>  decide a held spend\n"
+    "  /send <to> <amount> [reason]  spend through the spending FSM (held above your limits)\n"
+    "  /status | /skills | /files | /inbox | /discover\n"
+    "  /help";
+
+std::vector<std::string> splitWords(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ' ' || c == '\t' || c == '\n') { if (!cur.empty()) { out.push_back(cur); cur.clear(); } }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+}  // namespace
+
+std::string PilotImpl::ownerCommand(const std::string& actionJson) {
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(actionJson));
+    if (!doc.isObject()) return actionJson;          // plain text already
+    QJsonObject obj = doc.object();
+    std::string action = obj["action"].toString().toStdString();
+    QJsonObject params = obj["params"].toObject();
+
+    // A slash command: turn "/approve abc" into action=approve, params.id=abc, and so on.
+    if (action == "command") {
+        std::vector<std::string> w = splitWords(params["raw"].toString().toStdString());
+        if (w.empty() || w[0].empty() || w[0][0] != '/') return "unknown command\n" + std::string(kOwnerHelp);
+        std::string cmd = w[0].substr(1);
+        params = QJsonObject();
+        if (cmd == "approve" || cmd == "reject") {
+            if (w.size() < 2) return "usage: /" + cmd + " <spend request id>";
+            params["id"] = QString::fromStdString(w[1]);
+        } else if (cmd == "send") {
+            if (w.size() < 3) return "usage: /send <to> <amount> [reason]";
+            params["recipient"] = QString::fromStdString(w[1]);
+            params["amount"] = QString::fromStdString(w[2]).toDouble();
+            std::string reason;
+            for (size_t i = 3; i < w.size(); ++i) reason += (i > 3 ? " " : "") + w[i];
+            params["reason"] = QString::fromStdString(reason.empty() ? "owner request" : reason);
+        }
+        action = cmd;
+    }
+
+    if (action == "reply")    return params["text"].toString().toStdString();
+    if (action == "help")     return kOwnerHelp;
+    if (action == "balance")  return walletBalance();
+    if (action == "history")  return walletHistory();
+    if (action == "pending")  return getPendingSpends();
+    if (action == "status")   return metaStatus();
+    if (action == "skills")   return metaSkills();
+    if (action == "files")    return storageList();
+    if (action == "inbox")    return messagingInbox();
+    if (action == "discover") return agentDiscover("");
+    if (action == "approve") {
+        std::string id = params["id"].toString().toStdString();
+        return approveSpend(id) ? "approved " + id
+                                : "could not approve " + id + " (unknown id, not held, or expired)";
+    }
+    if (action == "reject") {
+        std::string id = params["id"].toString().toStdString();
+        return rejectSpend(id) ? "rejected " + id
+                               : "could not reject " + id + " (unknown id, not held, or expired)";
+    }
+    if (action == "send") {
+        std::string to = params["recipient"].toString().toStdString();
+        int64_t amount = static_cast<int64_t>(params["amount"].toDouble());
+        std::string reason = params["reason"].toString().toStdString();
+        if (to.empty() || amount <= 0) return "usage: /send <to> <amount> [reason]";
+        return walletSend(to, amount, reason.empty() ? "owner request" : reason);
+    }
+    if (action == "upload")
+        return storageUpload(params["path"].toString().toStdString(), params["label"].toString().toStdString());
+    if (action == "download")
+        return storageDownload(params["cid"].toString().toStdString(), params["path"].toString().toStdString());
+    return "unknown action '" + action + "'\n" + std::string(kOwnerHelp);
 }

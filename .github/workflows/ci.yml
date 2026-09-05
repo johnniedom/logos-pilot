@@ -83,6 +83,25 @@ jobs:
       - name: Run CLI tests (tests/test_rpc.nim)
         run: cd pilot-cli && nix develop -c nim c -r --hints:off --nimcache:/tmp/nimcache tests/test_rpc.nim
 
+  # The owner client: a separate program that speaks the agent's owner-channel envelope with the
+  # agent's own crypto compiled in. Its checkPhase runs `pilot-owner selftest` (signed envelope
+  # verifies, tamper detected, ECIES both ways, wrong key rejected).
+  build-owner:
+    name: Build owner client (pilot-owner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build + selftest
+        run: |
+          nix build ./pilot-owner -L
+          ./result/bin/pilot-owner selftest
+
   # End-to-end proof on the PUBLIC LEZ testnet (spec line 122): runs the same ./demo.sh a judge
   # runs from a clean clone. Every step is asserted (see demo.sh): pilot + its 3 dependency
   # modules load in the real logoscore daemon, 23 skills, echo round-trip, the agent funds
