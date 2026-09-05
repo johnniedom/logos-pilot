@@ -75,7 +75,8 @@ jobs:
           LEZ_RPC: https://testnet.lez.logos.co
           RISC0_DEV_MODE: "0"
           RISC0_SEGMENT_PO2: ${{ github.event.inputs.segment_po2 }}
-          RISC0_INFO: "1"                 # cycle counts in the log: the hardware-independent CU figure
+          RISC0_INFO: "1"                 # cycle counts: risc0 emits them at tracing INFO (Session::log), never on stdout
+          RUST_LOG: "info,risc0_zkvm=info" # turn the tracing filter on; whether the wallet host has a subscriber at all is what this run answers
           REQUIRE_SHIELDED: "1"
           PILOT_TX_TIMEOUT_MS: "14400000"  # 4 h ceiling on the wallet call that carries the proof
           SHIELDED_TIMEOUT_SECS: "16200"
