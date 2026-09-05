@@ -162,7 +162,7 @@ to confirm the on-chain behavior the unit/E2E suites do not assert.
 
 ---
 
-## 5. Testnet evidence & demo video — public-chain spending works; the evidence set and the video are not yet in the repo
+## 5. Testnet evidence & demo video — the evidence set is in the repo; the video is not yet recorded
 
 Status of the submission criteria:
 
@@ -170,14 +170,32 @@ Status of the submission criteria:
   runs below are single operations, not the three use cases).
 - **F10 — three agents deployed on the public testnet, one per skill category
   (Storage, Messaging, Blockchain), each with reproducible deployment steps and
-  on-chain evidence:** not yet met. The Blockchain agent's spend path is live (see
-  below); the three deployments and their evidence files are not yet committed.
+  on-chain evidence:** met 2026-09-04/05. `agents/deploy-agent.sh --role <category>`
+  deploys the agent from a clean clone and asserts every step; the workflow
+  `.github/workflows/testnet-agents.yml` runs the three roles as three jobs on
+  GitHub-hosted runners against the public testnet and keeps each run's logs and
+  inbox dumps as an artifact. **Storage** (run 33923468614): agent A funded itself,
+  uploaded an encrypted file and sent its key to a second funded identity B over
+  Logos Messaging; B received the key (`messagingInbox`), dialed A's storage node
+  (`storageConnect`), fetched the CID over the storage network and decrypted it
+  byte-identical (B's node log shows its block-exchange stream to A's peer id).
+  **Messaging** (run 33931107418): A → B direct message, then a group whose sealed
+  invite carried the AES-256-GCM group key, B joined, one group message each way —
+  each item **read back on the receiving side**, not just sent. **Blockchain**: the
+  CI demo (`./demo.sh`): identity, faucet claim, a spend through the spending FSM,
+  all read back from the chain on every push. Identities, keys and what each agent
+  did: `evidence/testnet-agents.tsv`; `evidence/verify-testnet.sh` re-reads every
+  account from the chain. Until 2026-09-04 the receiving half of messaging and
+  file sharing did not exist — a message or shared key was decrypted and dropped
+  on arrival, and the two-agent test only ever asserted the send (wire shapes and
+  keys: `docs/architecture.md`, "Encryption Model").
   (An earlier revision of this document quoted the pre-2026-05-25 wording, "≥ 5
   third-party deployments"; the criterion has been the three-agents-on-testnet
   form since then.)
-- **Supportability #1 — public testnet deployment:** partially met — one agent has
-  registered, been funded, and spent on the public testnet from this module; the
-  reproducible steps are not yet written up.
+- **Supportability #1 — public testnet deployment:** met — the agents above
+  registered, funded themselves and acted on the public testnet from this module,
+  from a clean clone, with the steps in `docs/deployment-guide.md` ("Three agents
+  on the public testnet").
 
 **What is proven on the public testnet** (`https://testnet.lez.logos.co`, not
 auth-gated; every item below is a chain read via `getAccount` / `getTransaction`,
@@ -222,11 +240,18 @@ not a module log line):
   dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
   committed.**
 
-**What would close it.** Commit the three category agents' deployment steps and
-their recorded transaction hashes with a re-verification script that reads them
-back from the chain; run the three use cases against those agents; finish one
-shielded funding proof on a ≥ 16 GB machine (a public CI runner qualifies) so the
-private rail is demonstrated too; record the narrated video.
+**What would close it.** Run the three use cases against the deployed agents
+(F9); record the narrated video. (The three category agents and the shielded
+funding proof on a 16 GB runner are done — see above and `real-proof.yml`.)
+
+**A faucet race worth knowing about.** The faucet's puzzle data changes with every
+claim it pays, so two agents claiming in the same minute race each other: the
+loser's solution is stale, `claim_pinata` still answers success (mempool accept)
+and the account is never credited. Measured 2026-09-04 in the two-agent jobs (B
+credited within 3 minutes, A "never credited" after 10, twice). Since 2026-09-05
+the module re-reads the faucet and claims again when a credit does not land within
+three blocks (up to three attempts), and the role script funds its two agents one
+after the other.
 
 ---
 
