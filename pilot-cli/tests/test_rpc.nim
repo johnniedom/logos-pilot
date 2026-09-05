@@ -29,8 +29,24 @@ doAssert extractDaemonResult(
 # Non-envelope text falls through stripped.
 doAssert extractDaemonResult("  plain text  ") == "plain text"
 
-# ── resolveRecipient: the one seam between "@b" and the wallet ──
+# ── missingModules: deploy installs what setup-modules.sh used to be needed for ──
+# A fresh machine has no modules dir; a wiped /tmp has an empty one. Either way deploy
+# must know exactly which required modules are absent, in a stable order.
+import ../src/modules
 import std/[os, strutils, algorithm]
+
+let mdir = getTempDir() / "pilot-test-modules"
+removeDir(mdir)
+createDir(mdir / "pilot")
+createDir(mdir / "lez_core")
+doAssert missingModules(mdir, REQUIRED_MODULES) == @["delivery_module", "storage_module"]
+createDir(mdir / "delivery_module")
+createDir(mdir / "storage_module")
+doAssert missingModules(mdir, REQUIRED_MODULES).len == 0
+doAssert missingModules(getTempDir() / "pilot-test-no-such-dir", REQUIRED_MODULES).len == 4
+removeDir(mdir)
+
+# ── resolveRecipient: the one seam between "@b" and the wallet ──
 
 let tmp = getTempDir() / "pilot-test-contacts"
 removeDir(tmp)

@@ -46,11 +46,17 @@ cd ..
 
 ## Step 3: Install Modules
 
+`pilot deploy` does this itself: any of the four modules the agent needs (`lez_core`,
+`delivery_module`, `storage_module`, `pilot`) that is missing from the modules directory is installed
+from the LGX packages the build left in the nix store before the daemon starts, and the deploy says
+which ones it installed. The script is still there for installing everything by hand (including the
+optional `chat_module` and `capability_module`):
+
 ```bash
 ./setup-modules.sh
 ```
 
-This installs pilot + all dependency modules (wallet, delivery, storage, chat, capability) from the nix cache into `/tmp/pilot-logoscore/modules/`.
+Both install into `$PILOT_MODULE_PATH` (default `~/.pilot/modules`).
 
 ## Step 4: Deploy
 

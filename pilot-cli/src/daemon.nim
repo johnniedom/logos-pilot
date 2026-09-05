@@ -1,5 +1,5 @@
 import os, osproc, strutils, times, json
-import rpc, format
+import rpc, format, modules
 
 proc readPidFromState(cfg: Config): int =
   let stateFile = cfg.configDir / "daemon" / "state.json"
@@ -38,6 +38,16 @@ proc startDaemon*(cfg: Config): bool =
   if cfg.logoscore == "" or cfg.logoscore == "logoscore":
     fail("logoscore binary not found in nix store")
     return false
+  # The daemon loads modules from cfg.modulePath. Install the ones that are not there yet
+  # (fresh machine, wiped /tmp) from the nix store instead of starting over an empty
+  # directory and failing later with "storage_module not found".
+  let missing = missingModules(cfg.modulePath, REQUIRED_MODULES)
+  if missing.len > 0:
+    clearLine()
+    step("Installing modules missing from " & cfg.modulePath & ": " & missing.join(", "))
+    if not installMissingModules(cfg, missing):
+      fail("Module install incomplete — not starting a daemon that would lack " & missing.join(", "))
+      return false
   createDir(cfg.dataDir)
   createDir(cfg.dataDir / "wallet_storage")
   cleanStaleDaemon(cfg)
