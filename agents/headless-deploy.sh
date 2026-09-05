@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 need nix; need python3; need curl
 
 OUT="$ROOT/agents/out/headless"; mkdir -p "$OUT"
-rm -f "$OUT"/deploy.log "$OUT"/status.log "$OUT"/daemon.log "$OUT"/agent-state.txt "$OUT"/agent-card.json "$OUT"/owner-transcript.txt
+rm -f "$OUT"/deploy.log "$OUT"/status.log "$OUT"/daemon.log "$OUT"/agent-state.txt "$OUT"/daemon-watch.txt "$OUT"/agent-card.json "$OUT"/owner-transcript.txt
 WORK="$(mktemp -d)"
 export PILOT_DATA_DIR="$WORK/data"                 # where deploy puts the agent (pilot.db, wallet, daemon)
 export PILOT_MODULE_PATH="$WORK/modules"           # EMPTY: deploy has to fill it
@@ -55,14 +55,19 @@ try:
 except Exception as e:
     print("dump failed: %s" % e)
 PY
+    echo "--- daemon watch (pid seen / gone)"; cat "$OUT/daemon-watch.txt" 2>/dev/null
+    echo "--- logoscore status"; "$LC" --config-dir "$LCDIR" status --json 2>&1 | head -c 2000; echo
+    echo "--- processes"; ps -o pid,etime,rss,cmd -C logoscore -C logos_host_qt 2>&1
+    echo "--- kernel log (segfault / oom / logos)"; sudo dmesg 2>/dev/null | grep -iE "segfault|out of memory|oom|killed process|logos" | tail -20
   } > "$OUT/agent-state.txt" 2>&1
   echo "      agent state dumped to agents/out/headless/agent-state.txt ($(grep -c "^config" "$OUT/agent-state.txt" 2>/dev/null) config rows)"
 }
 
 cleanup() {
+  dump_agent_state                                   # while the daemon (if alive) can still answer
   stop_daemon "$LCDIR"
+  [ -n "${WATCH_PID:-}" ] && kill "$WATCH_PID" 2>/dev/null
   [ -L "$A_LOG" ] || cp "$A_LOG" "$OUT/daemon.log" 2>/dev/null || true
-  dump_agent_state
   [ "${KEEP_RELAY:-0}" = "1" ] || stop_relay
   rm -rf "$WORK"
 }
@@ -92,6 +97,14 @@ INIT=$("$OWNER" init); OWNER_PUB=$(echo "$INIT" | sed -n 's/^owner public key: /
 [ ${#OWNER_PUB} -ge 66 ] || fail owner "pilot-owner init printed no key"
 
 echo "[3/5] ONE command, no keystrokes: pilot deploy --testnet (provider none, owner key from the env)..."
+# Watch the daemon's pid from the moment the CLI writes it: the three earlier attempts all went
+# silent about 14 min in, and a log that simply stops cannot say whether the daemon died or hung.
+( PID=""; for i in $(seq 1 120); do PID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$LCDIR/daemon/state.json" 2>/dev/null) && [ -n "$PID" ] && break; sleep 5; done
+  echo "daemon pid ${PID:-never seen} seen at $(date -u +%FT%TZ)" >> "$OUT/daemon-watch.txt"
+  [ -n "$PID" ] || exit 0
+  while kill -0 "$PID" 2>/dev/null; do sleep 5; done
+  echo "daemon pid $PID gone at $(date -u +%FT%TZ)" >> "$OUT/daemon-watch.txt" ) &
+WATCH_PID=$!
 export PILOT_LLM_PROVIDER=none PILOT_OWNER_NPK="$OWNER_PUB" RISC0_DEV_MODE=1 PILOT_NAT=extip:127.0.0.1
 T0=$(date +%s)
 "$PILOT" deploy --testnet </dev/null > "$OUT/deploy.log" 2>&1
