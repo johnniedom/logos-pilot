@@ -244,3 +244,12 @@ doAssert daemonLogTail(cfg, 500).splitLines().len == 61   # asking for more than
 
 removeDir(tmp)
 echo "test_rpc: all assertions passed"
+
+# pilot deploy printed "✓ Agent Card published" whenever the reply did not contain "error" —
+# including an EMPTY reply, which is what a module still inside its funding call answers
+# (headless-deploy runs 33944283880 and 33963022638 printed the tick with nothing published).
+# No answer is not a publish.
+doAssert not cardPublishOk("")
+doAssert not cardPublishOk("   ")
+doAssert not cardPublishOk("""{"error":"not initialized"}""")
+doAssert cardPublishOk("""{"name":"pilot","_logos":{"npk":"{\"nullifier_public_key\":\"ab\"}"}}""")

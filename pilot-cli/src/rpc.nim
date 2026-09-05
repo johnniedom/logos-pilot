@@ -87,6 +87,19 @@ proc extractDaemonResult*(raw: string): string =
     return raw[idx + 8 .. ^1].strip()
   return raw.strip()
 
+proc cardPublishOk*(reply: string): bool =
+  ## agentCard answers with the card itself (a JSON object). An empty reply is the daemon giving
+  ## up on a call the module could not take — it was inside a wallet call, still funding — and an
+  ## error object is a refusal; neither is a publish. deploy ticked "published" on both (headless
+  ## runs 33944283880 and 33963022638 printed the tick with nothing published).
+  let r = reply.strip()
+  if r == "": return false
+  try:
+    let j = parseJson(r)
+    j.kind == JObject and not j.hasKey("error")
+  except CatchableError:
+    false
+
 # Resolve a send recipient: "@name" -> <dataDir>/contacts/<name>.json, else
 # "@path" -> literal keys file, else pass the string through untouched. File
 # contents are stripped of ALL whitespace (a trailing newline inside the keys

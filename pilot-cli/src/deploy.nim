@@ -214,10 +214,12 @@ proc runDeploy*(cfg: Config, network: string) =
   blankLine()
   step("Publishing Agent Card...")
   let cardResult = daemonCall(cfg, "agentCard")
-  if cardResult.contains("error"):
-    warn("Agent Card publish failed (network may be unavailable)")
-  else:
+  if cardPublishOk(cardResult):
     ok("Agent Card published")
+  elif cardResult.strip() == "":
+    warn("Agent Card not published: no answer from the agent (it may still be funding) — check later with: pilot status")
+  else:
+    warn("Agent Card publish failed: " & truncStr(cardResult, 80))
 
   blankLine()
   hrule()
