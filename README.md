@@ -87,6 +87,8 @@ rm -f ~/.cache/storage/dht/providers/LOCK
 | `setup-modules.sh` | After build | Installs all modules from nix cache to `/tmp/pilot-logoscore/modules` |
 | `demo.sh` | Anytime, from a clean clone | End-to-end against the public testnet: build → load → 23 skills → self-fund from the faucet → spend through the spending FSM (verified on chain) → vault round-trip; every step asserted, exit 1 on failure |
 | `agents/deploy-agent.sh --role storage\|messaging\|blockchain` | Anytime, from a clean clone (needs Docker for the relay) | One agent per skill category on the public testnet: storage = a second identity fetches a shared CID from the first agent's node and decrypts it; messaging = direct + encrypted group messages read back on the receiver; blockchain = `demo.sh`. Runs as three CI jobs in `testnet-agents.yml`; evidence in `evidence/testnet-agents.tsv` |
+| `agents/deploy-agent.sh --role alerter\|marketplace` | Use cases (`docs/use-cases.md`) | alerter = A watches B's account on chain and alerts B over Messaging when B spends; marketplace = A buys `agent.ask` from B and pays over the private rail with a real proof (`testnet-use-cases.yml`) |
+| `agents/owner-channel.sh` | The owner from a separate app | Agent + the `pilot-owner` client sharing only a relay: `/balance` answered, a held spend approved from the client, settled on chain (`owner-channel.yml`; see `docs/owner-guide.md`) |
 | `test-phases.sh` | After setup | 28 single-agent integration tests |
 | `test-two-agents-docker.sh` | After setup | 30 two-agent cross-network checks incl. a paid task settled on chain |
 | `install-basecamp.sh` | For GUI | Installs pilot into Logos Basecamp |

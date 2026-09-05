@@ -47,28 +47,24 @@ bool PilotImpl::establishOwnerChannel() {
     return true;
 }
 
-// Publish an already-prepared payload to the owner channel, retrying transient
-// failures before giving up. Returns true ONLY if the delivery module actually
-// accepted the message. NOTE: "accepted" means "handed to the network" — delivery
-// is fire-and-forget with no read receipts, so this is the most we can honestly
-// assert. We never claim the owner has seen it.
+// Publish an already-prepared payload to the owner channel. ONE send, fire-and-forget, like
+// every other delivery call in this module: the delivery host drops its reply after its first
+// event emission (upstream; see agentPoll), so `send` reports failure for a message that went
+// out. The old three-attempt retry treated that as a transient failure and re-sent — every
+// owner reply reached the client three times, 3-4 s apart (measured 2026-09-05, owner-channel
+// run 33942495146: "/approve bdc69fc1…" ×3, "approved bdc69fc1…" ×3). Returns true when the
+// message was handed to delivery; the only thing a false ever meant was "no context / no
+// channel". Delivery has no read receipts; we never claim the owner has seen it.
 bool PilotImpl::deliverToOwner(const std::string& payload) {
     if (!isContextReady() || ownerChannelId_.empty()) return false;
-
-    const int kAttempts = 3;
-    for (int attempt = 0; attempt < kAttempts; ++attempt) {
-        // Acceptance is the typed result's success flag (the old code re-derived it by
-        // parsing a JSON reply); the value carries the requestId, which we don't need.
-        StdLogosResult r = modules().delivery_module.send(
-            ownerChannelId_,
-            std::vector<uint8_t>(payload.begin(), payload.end()),
-            nullptr, kDeliveryFireAndForgetMs);
-        if (r.success) return true;
-        if (attempt + 1 < kAttempts)
-            std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
-    }
-    qWarning() << "[pilot] sendToOwner: delivery failed after" << kAttempts << "attempts";
-    return false;
+    StdLogosResult r = modules().delivery_module.send(
+        ownerChannelId_,
+        std::vector<uint8_t>(payload.begin(), payload.end()),
+        nullptr, kDeliveryFireAndForgetMs);
+    if (!r.success)
+        qWarning() << "[pilot] sendToOwner: delivery did not confirm the send (its reply is dropped"
+                      " after the host's first event emit; the message is normally on the wire)";
+    return true;
 }
 
 bool PilotImpl::sendToOwner(const std::string& message) {

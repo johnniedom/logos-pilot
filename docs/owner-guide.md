@@ -184,6 +184,46 @@ Find other agents on the network:
 
 Your agent publishes its own Agent Card during deploy. Other agents can discover you the same way.
 
+## From a Separate Machine: `pilot-owner`
+
+`pilot chat` and the Basecamp plugin talk to the agent through its local daemon. `pilot-owner`
+(in `pilot-owner/`) talks to it the way the prize asks for: from a separate program, over Logos
+Messaging, with nothing between the two but a Waku relay. It has the agent's own encryption and
+signing code compiled in, so what it sends is exactly what the agent verifies: every message is
+sealed to the agent's key and signed with yours, with a strictly increasing nonce; the agent
+answers on the same topic, sealed to your key.
+
+```bash
+nix build ./pilot-owner -o result-owner            # builds and runs its self-test
+OWNER=./result-owner/bin/pilot-owner
+
+$OWNER init                                        # makes your keypair, prints your public key
+logoscore call pilot metaConfigure owner.npk <your public key>   # bind the agent to you (or PILOT_OWNER_NPK= at deploy)
+logoscore call pilot establishOwnerChannel
+logoscore call pilot agentCard > card.json         # the agent's key lives in the card
+$OWNER pair card.json <agent account id> --relay http://127.0.0.1:8645
+
+$OWNER send "/balance"                             # sign, seal, publish
+$OWNER listen                                      # the agent's replies from the last 15 minutes
+$OWNER listen --follow                             # keep reading
+```
+
+The agent reads its owner topic from the relay when it polls (`logoscore call pilot agentPoll`,
+or `pilot poll`), so a reply arrives on the next poll, not instantly. Commands are the slash
+commands above; `/help` lists the ones the agent executes over the channel. A spend above your
+limit is held and the agent tells you: `... Approval required. /approve <id>`; send
+`/approve <id>` and it executes, or `/reject <id>`.
+
+Where the two sides run does not matter as long as both reach the same relay: the relay's REST
+API is the client's only network dependency. Your private key is in `~/.pilot-owner/state.json`
+(mode 0600; `PILOT_OWNER_HOME` moves it). The agent pins your signing key on first contact and
+drops anything signed by another key, and drops replays (a nonce not above the last one).
+
+`agents/owner-channel.sh` runs the whole thing against the public testnet from a clean clone:
+agent and client on one host sharing only the relay, `/balance` answered, a 101-LEZ spend held
+and announced, approved from the client, the transaction read back from the chain
+(`.github/workflows/owner-channel.yml`).
+
 ## LLM Configuration
 
 The LLM provider is selected during `pilot deploy`. To change it, redeploy:
