@@ -302,9 +302,9 @@ sys.exit(0 if want and any(a.get("_logos",{}).get("npk")==want for a in d.get("a
   BAL_A0=$(private_balance "$A_LC"); BAL_B0=$(private_balance "$B_LC")
   echo "      private balances before: A=$BAL_A0 B=$BAL_B0"
   TASK=$(call "$A_LC" agentTask "$NPK_B" agent-ask '{"prompt":"In one word: what colour is the sky?"}')
-  [ "$(echo "$TASK" | field state)" = "submitted" ] || fail task "agentTask answered: $TASK"
+  [ "$(echo "$TASK" | field status.state)" = "submitted" ] || fail task "agentTask answered: $TASK"
   TASK_ID=$(echo "$TASK" | field id)
-  echo "      task $TASK_ID submitted; payment $(echo "$TASK" | field payment)"
+  echo "      task $TASK_ID submitted; payment $(echo "$TASK" | field _logos.payment)"
   task_col() { python3 - "$A_DATA/pilot.db" "$TASK_ID" "$1" <<'PY' 2>/dev/null
 import sqlite3, sys
 db, task, col = sys.argv[1], sys.argv[2], sys.argv[3]
