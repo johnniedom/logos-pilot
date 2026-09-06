@@ -203,15 +203,23 @@ exchange balance "/balance" '"balance"'
 echo "EVIDENCE role=owner step=command front_end=pilot-owner-console command=/balance reply=balances-received"
 read -r RB2 RN2 <<<"$(acct "$DEMO_RECIPIENT_HEX")"
 exchange small "/send public:$DEMO_RECIPIENT_HEX $SMALL_AMOUNT owner-console test" '"status":"completed"'
-TXH2=$(grep -oE '"tx_hash":"[0-9a-f]{64}"' "$OUT/owner-transcript.txt" | tail -1 | cut -d'"' -f4)
-[ ${#TXH2} -eq 64 ] || fail small "the agent's reply to the $SMALL_AMOUNT-LEZ send carries no tx hash"
+# The agent answers an executed spend with {"request_id":…,"status":"completed"} (no hash in the
+# reply, run 34000121335); the hash is read from the agent's own history by that request id.
+REQ2=$(grep -oE '"request_id":"[0-9a-f]+","status":"completed"' "$OUT/owner-transcript.txt" | tail -1 | cut -d'"' -f4)
+[ -n "$REQ2" ] || fail small "no request id in the agent's reply to the $SMALL_AMOUNT-LEZ send"
+TX2=$(call "$A_LC" walletHistory | python3 -c 'import sys,json
+req=sys.argv[1]
+for t in json.loads(sys.stdin.read() or "{}").get("transactions",[]):
+    if t.get("id")==req: print(t.get("tx_hash",""), t.get("state",""))' "$REQ2")
+read -r TXH2 TXS2 <<<"$TX2"
+[ "$TXS2" = "COMPLETED" ] && [ ${#TXH2} -eq 64 ] || fail small "spend $REQ2 is '$TXS2' with hash '$TXH2' in the agent's history"
 BLK2=""; for i in $(seq 1 20); do BLK2=$(tx_block "$TXH2"); [ -n "$BLK2" ] && break; sleep 15; done
 [ -n "$BLK2" ] || fail chain "getTransaction($TXH2) is still unknown to the chain after 5 min"
 RB3=""; for i in $(seq 1 20); do read -r RB3 RN3 <<<"$(acct "$DEMO_RECIPIENT_HEX")"; [ "${RB3:-0}" -ge $(( RB2 + SMALL_AMOUNT )) ] && break; sleep 15; done
 [ "${RB3:-0}" -ge $(( RB2 + SMALL_AMOUNT )) ] || fail chain "recipient balance did not rise by $SMALL_AMOUNT: $RB2 -> ${RB3:-?}"
 read -r PBAL2 PNONCE2 <<<"$(acct "$A_PUB")"
 echo "      ON CHAIN: tx $TXH2 in block $BLK2; recipient $RB2 -> $RB3; agent public $PBAL1 -> $PBAL2  [$(elapsed)]"
-echo "EVIDENCE role=owner step=send front_end=pilot-owner-console amount=$SMALL_AMOUNT tx=$TXH2 block=$BLK2 recipient=\"$RB2 -> $RB3\" agent_public=\"$PBAL1 -> $PBAL2\" sent_via=pilot-owner-console-over-relay"
+echo "EVIDENCE role=owner step=send front_end=pilot-owner-console request=$REQ2 amount=$SMALL_AMOUNT tx=$TXH2 block=$BLK2 recipient=\"$RB2 -> $RB3\" agent_public=\"$PBAL1 -> $PBAL2\" sent_via=pilot-owner-console-over-relay"
 
 echo "[8/8] Done."
 echo
