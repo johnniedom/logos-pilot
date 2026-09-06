@@ -272,10 +272,17 @@ Implementation: `pilot_crypto.cpp` using OpenSSL 3.x EVP API (`OSSL_PARAM_BLD`, 
 ### Interoperability note
 
 Because the owner channel uses Pilot's own ECIES envelope over `delivery_module` rather
-than the bundled chat protocol, the counterparty must speak the same scheme — Pilot's
-own client (the Basecamp plugin in `pilot-ui/`) does. A generic Logos chat client would
-not read this envelope. This is the trade-off for the direct, self-contained control
-described above.
+than the bundled chat protocol, the counterparty must speak the same scheme. Pilot's own
+clients do, and they do it from one shared library, `pilot-owner/src/owner_client.*`, with
+the agent's crypto (`pilot_crypto.cpp`) compiled in: the `pilot-owner` console client, and
+the `pilot_owner` Logos module (`pilot-owner/module`) that the Basecamp plugin Pilot Remote
+(`pilot-ui/remote-plugin`) calls for every key or relay step. Both publish and read through a
+Waku relay's REST API only (`POST /relay/v1/auto/messages`, `GET /store/v3/messages`), so
+neither needs the agent's daemon or a server of ours. Run 34005712233 (2026-09-06,
+`agents/owner-channel.sh`) drives both: the module makes the owner key, pairs and approves a
+held spend; the console client imports the same key and spends under the limit; both spends
+read back from the chain. A generic Logos chat client would not read this envelope. This is
+the trade-off for the direct, self-contained control described above.
 
 ### Files involved
 

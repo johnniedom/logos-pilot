@@ -250,6 +250,16 @@ Basecamp requires three files for a QML plugin to appear in the sidebar:
 
 Missing any of these causes the plugin to silently not appear.
 
+The repository ships two plugins, both installed by `install-basecamp.sh`:
+- `pilot-ui/basecamp-plugin` — **Pilot Agent**: the agent runs inside this Basecamp; declares `pilot`
+  (and so pulls in `lez_core`, `delivery_module`, `storage_module`).
+- `pilot-ui/remote-plugin` — **Pilot Remote**: the agent runs anywhere else; declares only `pilot_owner`
+  (`pilot-owner/module`), the owner-side module that signs, seals and publishes over the relay's REST API.
+
+Basecamp loads a plugin's declared core dependencies when the plugin is opened and refuses the plugin if
+one of them fails to load (`app/PluginLoader.cpp` in logos-basecamp), so keep the two lists as they are:
+Pilot Remote must not declare `pilot`, or opening it on the owner's machine would start an agent stack there.
+
 ### LevelDB lock contention
 
 The `storage_module` uses LevelDB at `~/.cache/storage/dht/providers/`. If a previous `logos_host_qt` process holds the lock, the new storage_module crashes:

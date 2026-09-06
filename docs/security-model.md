@@ -56,7 +56,9 @@ It carries spend-approval prompts, status, and owner commands (`/approve`, `/rej
   temporary shim.
 - **Reachability caveat (stated honestly).** Because the channel uses Pilot's own
   ECIES scheme over `delivery_module`, it is readable only by a client that speaks
-  the same scheme — in practice the **pilot-ui Basecamp plugin**. A stock,
+  the same scheme — in practice Pilot's own owner clients, the `pilot-owner` console
+  client and the Basecamp plugin **Pilot Remote** through the `pilot_owner` module,
+  both built from `pilot-owner/src/owner_client.*`. A stock,
   third-party chat client cannot open or read the owner channel. This is a
   deliberate confidentiality property, not a limitation we hide: there is no
   plaintext owner channel.

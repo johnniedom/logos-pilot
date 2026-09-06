@@ -394,12 +394,40 @@ locate where it stops; the remaining failure is under active diagnosis, not unex
 Out-of-band import (`pilot peer add <card.json>`) remains available and does not depend
 on discovery.
 
+## 8. Basecamp: the Pilot Remote plugin is proven headlessly, not clicked through
+
+The Basecamp plugin **Pilot Remote** (`pilot-ui/remote-plugin`) puts the owner channel in the
+Logos desktop app: a set-up screen (make or import the owner key; paste the agent's card,
+account and relay) and a chat screen (send a line, replies polled every 5 s). It holds no key
+and opens no socket itself; every such step is `logos.callModule("pilot_owner", …)` into the
+`pilot_owner` module (`pilot-owner/module`), built from the same `owner_client.*` library as
+the `pilot-owner` console client.
+
+**What is proven.** `agents/owner-channel.sh` (run 34005712233, 2026-09-06) drives that module
+the way Basecamp does — loaded in its own `logoscore` daemon and called by name: createKey, the
+agent bound to that key, pair from the agent's card, `/balance` answered, a 101-LEZ `/send` held
+and approved from the module, tx `a8767800…` in block 39604. The module, the wire format and the
+relay-only transport are the ones the plugin uses.
+
+**What is not.** A GitHub-hosted runner has no display, so nothing in CI opens the Basecamp
+window, loads the plugin's QML, or exercises Basecamp's plugin loader with a plugin whose only
+declared dependency is `pilot_owner`. `agents/local-owner-demo.sh` is the desktop run that does
+(relay, an agent bound to the owner key, Basecamp paired through the shared state file). Until
+that run has been made on a desktop and its result recorded here, treat the module as verified
+and the window as not.
+
+**What would close it.** One recorded desktop run of `agents/local-owner-demo.sh` (the paired
+chat with a `/balance` reply and the `/approve` transaction hash), or Basecamp under
+`QT_QPA_PLATFORM=offscreen` in CI if the app allows it.
+
+---
+
 ## How to read this list
 
 - Items **1**, the upstream parts of **2.7**, and **6** are **platform gaps**,
   evidenced against pinned upstream revisions or against a captured crash — not
   Pilot defects.
-- Items **2 (1–6)**, **3**, **4** and **5** are **Pilot's own scope and verification
+- Items **2 (1–6)**, **3**, **4**, **5** and **8** are **Pilot's own scope and verification
   gaps**, stated so a follow-up question does not catch us out.
 - Item **7** is **fixed** (2026-07-28) and kept here deliberately rather than deleted.
   Its earlier text asserted a cause that turned out to be wrong — that messages were

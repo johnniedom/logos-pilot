@@ -2,10 +2,12 @@ name: Owner channel from a separate app
 
 # LP-0008: "The owner can interact with the agent in real time from a separate Logos app instance
 # using Logos Messaging, with no intermediary server." agents/owner-channel.sh runs one agent
-# (fresh identity, funded on the public testnet) and the owner client pilot-owner as a separate
-# program that shares nothing with the agent but a Waku relay: /balance answered, a held 101-LEZ
-# spend announced to the owner and approved from the client, the spend read back from the chain.
-# Manual trigger; ~30 min and one faucet claim.
+# (fresh identity, funded on the public testnet) and TWO owner front-ends that share nothing with
+# it but a Waku relay, both built from pilot-owner/src/owner_client.*: the pilot_owner module (what
+# the Basecamp plugin Pilot Remote calls; loaded in a second logoscore daemon and driven by name)
+# makes the owner key, pairs, gets /balance, has a 101-LEZ spend held and approves it; the
+# pilot-owner console client imports the same key, gets /balance and sends 20 LEZ under the limit.
+# Both spends are read back from the chain. Manual trigger; ~25 min and one faucet claim.
 on:
   workflow_dispatch:
 

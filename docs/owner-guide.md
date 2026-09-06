@@ -184,14 +184,17 @@ Find other agents on the network:
 
 Your agent publishes its own Agent Card during deploy. Other agents can discover you the same way.
 
-## From a Separate Machine: `pilot-owner`
+## From a Separate Machine: `pilot-owner` and Pilot Remote
 
-`pilot chat` and the Basecamp plugin talk to the agent through its local daemon. `pilot-owner`
-(in `pilot-owner/`) talks to it the way the prize asks for: from a separate program, over Logos
-Messaging, with nothing between the two but a Waku relay. It has the agent's own encryption and
-signing code compiled in, so what it sends is exactly what the agent verifies: every message is
-sealed to the agent's key and signed with yours, with a strictly increasing nonce; the agent
-answers on the same topic, sealed to your key.
+`pilot chat` and the Basecamp plugin **Pilot Agent** talk to an agent on the same machine through its
+daemon. Two front-ends talk to an agent anywhere the way the prize asks for: from a separate program,
+over Logos Messaging, with nothing between the two but a Waku relay. `pilot-owner` (in `pilot-owner/`)
+does it from a terminal; the Basecamp plugin **Pilot Remote** does it from the Logos desktop app through
+the `pilot_owner` module (`pilot-owner/module`). Both are built from one library
+(`pilot-owner/src/owner_client.*`) with the agent's own encryption and signing code compiled in, so what
+they send is exactly what the agent verifies: every message is sealed to the agent's key and signed with
+yours, with a strictly increasing nonce; the agent answers on the same topic, sealed to your key. They
+also share one state file (`~/.pilot-owner/state.json`), so a key made in one is the owner in the other.
 
 ```bash
 nix build ./pilot-owner -o result-owner            # builds and runs its self-test
@@ -219,10 +222,33 @@ API is the client's only network dependency. Your private key is in `~/.pilot-ow
 (mode 0600; `PILOT_OWNER_HOME` moves it). The agent pins your signing key on first contact and
 drops anything signed by another key, and drops replays (a nonce not above the last one).
 
-`agents/owner-channel.sh` runs the whole thing against the public testnet from a clean clone:
-agent and client on one host sharing only the relay, `/balance` answered, a 101-LEZ spend held
-and announced, approved from the client, the transaction read back from the chain
-(`.github/workflows/owner-channel.yml`).
+### From Basecamp: Pilot Remote
+
+`install-basecamp.sh` installs the `pilot_owner` module and the plugin. In Basecamp open **Pilot
+Remote**:
+
+1. **Your key.** *Create my key* makes the owner keypair (or *Import* the `<priv>:<pub>` pair that
+   `pilot-owner init` made on another device). The screen shows the line the agent side needs,
+   `PILOT_OWNER_NPK=<your public key> pilot deploy`, or `logoscore call pilot metaConfigure owner.npk <key>`
+   for an agent already running.
+2. **Your agent.** Paste the agent's card (`logoscore call pilot agentCard`), its account id
+   (`metaStatus.account`) and the REST address of the relay both sides use, then *Pair*.
+3. **Chat.** `/balance`, `/pending`, `/send <to> <amount> <reason>`, `/approve <id>` — the same
+   commands as above; replies are fetched every 5 s. A spend above your limit comes back as the
+   agent's hold notice with its `/approve <id>` line; send that line and it executes.
+
+Nothing in the window touches a key or the network: each step is a call into the `pilot_owner`
+module, and the module shares `~/.pilot-owner/state.json` with `pilot-owner`, so a key made in the
+terminal is already the owner in Basecamp, and the other way round. `agents/local-owner-demo.sh`
+sets the whole thing up on one machine — a relay, an agent deployed and bound to your key, Basecamp
+paired — and prints the lines to type.
+
+`agents/owner-channel.sh` runs both front-ends against the public testnet from a clean clone
+(`.github/workflows/owner-channel.yml`; run 34005712233, 2026-09-06): the `pilot_owner` module,
+loaded in a second `logoscore` daemon and called the way Basecamp calls it, makes the key, pairs,
+gets `/balance`, has a 101-LEZ spend held and approves it (tx `a8767800…`, block 39604); the
+console client imports the same key, gets `/balance` and sends 20 LEZ (tx `1b8a2f78…`, block
+39605). The Basecamp window itself is not opened in CI (no display): `KNOWN_LIMITATIONS.md` §8.
 
 ## LLM Configuration
 
