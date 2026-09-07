@@ -56,9 +56,10 @@ jobs:
           ln -sfn "$LS_PATH" result-logoscore
           ln -sfn "$LGPM_PATH" result-lgpm
 
-      # r0vm is the RISC0 prover binary the wallet shells out to for a real proof. The version
-      # must match the circuits the pinned wallet module was built against (risc0 3.0.5 for
-      # logos-blockchain-circuits 0.5.x — the same pairing the development box uses).
+      # r0vm is the RISC0 prover binary of the toolchain the pinned wallet module was built against
+      # (risc0 3.0.5 for logos-blockchain-circuits 0.5.x — the same pairing the development box uses).
+      # Kept on PATH as the toolchain expects; the heartbeat in the demo step shows the proving work
+      # itself inside the wallet module's host process, not in an r0vm child (run 34124369741).
       - name: Install the RISC0 prover (r0vm 3.0.5)
         run: |
           curl -L https://risczero.com/install | bash
@@ -90,8 +91,10 @@ jobs:
         run: |
           # Prover heartbeat. The wallet library prints nothing while it proves (run 33996348974: not one
           # prover line in 40,530), so the process table is the witness. Every 30 s: the dev-mode setting,
-          # the load average, and the r0vm / host processes with their CPU share. r0vm at several hundred
-          # percent for most of an hour is what a real proof looks like; dev mode never starts r0vm.
+          # the load average, and the host / prover processes with their CPU share. Measured on run
+          # 34124369741: the wallet module's own host process (logos_host_qt) sits at 200-360 % CPU on the
+          # 4-core runner with up to 9.5 GB resident for ~45 minutes; no separate r0vm process appears, the
+          # wallet library proves in-process. Dev mode never does this (load stays under 1).
           # The subshell drops errexit/pipefail on purpose: a grep with no match (nothing proving yet)
           # returned 1 and killed the loop after one beat in run 34119888347.
           ( set +e +o pipefail

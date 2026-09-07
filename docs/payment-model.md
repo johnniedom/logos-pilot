@@ -88,6 +88,15 @@ circuit in a standalone prover with a subscriber installed (e.g. `RUST_LOG=info`
 `tracing_subscriber::fmt` init) or read `session.total_cycles` from a host you control; then sum
 the segments for the per-operation cycle cost. Until then the table above carries times, not cycles.
 
+**What the proof looks like while it runs (the process table, since the prover prints nothing).**
+`real-proof.yml` prints a heartbeat every 30 s: the dev-mode setting, the load average and the
+host / prover processes with their CPU share. Run 34124369741 (2026-09-07, 4 vCPU / 16 GB hosted
+runner, `RISC0_SEGMENT_PO2=18`): 114 beats from 12:57 to 13:54 UTC; the wallet module's host
+process (`logos_host_qt`, the one that holds `lez_core`) above 100 % CPU on 89 of them, peak 360 %,
+peak 9.47 GB resident, load 5.4 on four cores; no separate `r0vm` process ever appears, the wallet
+library proves in-process. The build and the chain sync before it run under a load of 1. That
+heartbeat is the run's proof-generation record, next to the chain's own acceptance of the transfer.
+
 **Takeaway for agent design:** private transfers are the heavy operation, so the pilot batches/holds
 rather than proving speculatively, and the spending FSM only triggers a shielded proof once on an
 explicitly approved transfer — never on ambiguous input.
