@@ -92,9 +92,13 @@ jobs:
           # prover line in 40,530), so the process table is the witness. Every 30 s: the dev-mode setting,
           # the load average, and the r0vm / host processes with their CPU share. r0vm at several hundred
           # percent for most of an hour is what a real proof looks like; dev mode never starts r0vm.
-          ( while sleep 30; do
+          # The subshell drops errexit/pipefail on purpose: a grep with no match (nothing proving yet)
+          # returned 1 and killed the loop after one beat in run 34119888347.
+          ( set +e +o pipefail
+            while sleep 30; do
               echo "[heartbeat $(date -u +%H:%M:%S)] RISC0_DEV_MODE=${RISC0_DEV_MODE:-unset} load=$(cut -d' ' -f1-3 /proc/loadavg)"
-              ps -eo pid,pcpu,rss,etime,comm --sort=-pcpu | grep -E 'r0vm|logos_host|logoscore' | head -6 | sed 's/^/[heartbeat]   /'
+              rows=$(ps -eo pid,pcpu,rss,etime,comm --sort=-pcpu | grep -E 'r0vm|logos_host|logoscore' | head -6)
+              [ -n "$rows" ] && echo "$rows" | sed 's/^/[heartbeat]   /' || echo "[heartbeat]   (no prover or host process yet)"
             done ) &
           HB=$!
           set +e
