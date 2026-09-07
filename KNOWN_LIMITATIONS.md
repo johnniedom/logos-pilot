@@ -238,7 +238,10 @@ Status of the submission criteria:
 
 **What is proven on the public testnet** (`https://testnet.lez.logos.co`, not
 auth-gated; every item below is a chain read via `getAccount` / `getTransaction`,
-not a module log line):
+not a module log line. The public explorer at `explorer.testnet.lez.logos.co` is not
+a substitute: its indexer stopped at block 30017 on 29 August 2026, checked
+7 September with the chain past block 41,700, so nothing below renders there and
+its account pages show late-August balances):
 
 - 2026-08-27: `lez_core` re-pinned to the module revision tracking **LEZ v0.2.2**
   (branch `feat/lez-v0.2.2`). 2026-08-29: all five program image IDs the testnet's
