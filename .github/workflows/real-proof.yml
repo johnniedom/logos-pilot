@@ -5,8 +5,9 @@ name: Real proof (RISC0_DEV_MODE=0, public testnet)
 # separate from ci.yml's E2E (public rail, no client proof, runs on every push). Run it by hand
 # (Actions → Real proof → Run workflow); it takes 1–4 h and every step is asserted by ./demo.sh in
 # strict mode, ending with the chain showing the agent's public account down by 100 and its
-# private account funded. The demo log is kept as an artifact: that log, with the r0vm proving
-# output in it, is the RISC0_DEV_MODE=0 evidence.
+# private account funded. The demo log is kept as an artifact: that log, with the prover heartbeat
+# in it (the r0vm process and its CPU share every 30 s, since the wallet library prints nothing while
+# it proves), is the RISC0_DEV_MODE=0 evidence.
 on:
   workflow_dispatch:
     inputs:
@@ -86,7 +87,22 @@ jobs:
           SHIELDED_TIMEOUT_SECS: "16200"
           DEMO_AMOUNT: "1"
         shell: bash   # bash -eo pipefail: a failing demo must fail the job even through tee
-        run: ./demo.sh 2>&1 | tee real-proof-demo.log
+        run: |
+          # Prover heartbeat. The wallet library prints nothing while it proves (run 33996348974: not one
+          # prover line in 40,530), so the process table is the witness. Every 30 s: the dev-mode setting,
+          # the load average, and the r0vm / host processes with their CPU share. r0vm at several hundred
+          # percent for most of an hour is what a real proof looks like; dev mode never starts r0vm.
+          ( while sleep 30; do
+              echo "[heartbeat $(date -u +%H:%M:%S)] RISC0_DEV_MODE=${RISC0_DEV_MODE:-unset} load=$(cut -d' ' -f1-3 /proc/loadavg)"
+              ps -eo pid,pcpu,rss,etime,comm --sort=-pcpu | grep -E 'r0vm|logos_host|logoscore' | head -6 | sed 's/^/[heartbeat]   /'
+            done ) &
+          HB=$!
+          set +e
+          ./demo.sh 2>&1 | tee real-proof-demo.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          kill "$HB" 2>/dev/null || true
+          exit "$rc"
 
       - name: Keep the logs as evidence (demo output + daemon log with the prover's output)
         if: always()
