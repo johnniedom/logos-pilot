@@ -48,6 +48,7 @@ die()  { echo; echo "STOP: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 
 if [ "${1:-}" = "--stop" ]; then
+  if [ -f "$PILOT_DATA_DIR/local-owner-demo/poller.pid" ]; then kill "$(cat "$PILOT_DATA_DIR/local-owner-demo/poller.pid")" 2>/dev/null; rm -f "$PILOT_DATA_DIR/local-owner-demo/poller.pid"; fi
   [ -f "$RUN/relay.pid" ] && kill "$(cat "$RUN/relay.pid")" 2>/dev/null && echo "relay stopped"
   docker rm -f pilot-nwaku >/dev/null 2>&1 && echo "relay container removed"
   [ -x "$RUN/pilot" ] && "$RUN/pilot" stop >/dev/null 2>&1 && echo "agent daemon stopped"
@@ -131,6 +132,14 @@ fi
 [ ${#ACCOUNT} -eq 64 ] || die "no agent account yet (deploy log: $RUN/deploy.log)"
 [ -s "$RUN/agent-card.json" ] || die "no agent card yet"
 "$OWNER" pair "$RUN/agent-card.json" "$ACCOUNT" --relay "$REST" | sed 's/^/   /'
+
+# The agent reads its owner topic only when something asks it to (the delivery host drops push
+# events after its first one, upstream, measured 2026-08-25). On a runner the harness polls;
+# here a small loop does, every 5 s, or Basecamp's messages would sit in the relay unanswered.
+if [ -f "$RUN/poller.pid" ] && kill -0 "$(cat "$RUN/poller.pid")" 2>/dev/null; then kill "$(cat "$RUN/poller.pid")"; fi
+nohup bash -c "while sleep 5; do timeout 40 \"$RUN/pilot\" poll >/dev/null 2>&1; done" >/dev/null 2>&1 &
+echo $! > "$RUN/poller.pid"
+echo "   poller started (pid $(cat "$RUN/poller.pid")): the agent reads its owner topic every 5 s"
 
 say "[4/4] Your turn"
 cat <<TXT
