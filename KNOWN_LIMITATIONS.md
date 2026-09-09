@@ -200,9 +200,10 @@ Status of the submission criteria:
 - **F9 — ≥ 3 use cases demoed end-to-end on testnet:** met 2026-09-05
   (`docs/use-cases.md`): the **personal file vault** (every CI demo; sharing with a
   second identity in the storage-agent runs), the **on-chain event alerter**
-  (`testnet-use-cases.yml` run 33939827003: agent A read agent B's public account
-  through the wallet module, B spent 1 LEZ — tx `772889d0…`, block 38221 — A saw
-  150 → 149 and alerted B over Logos Messaging, B read the alert), and the **paid
+  (`testnet-use-cases.yml` run 34337961562, 2026-09-09, on the reset chain: agent A
+  read agent B's public account through the wallet module, B spent 1 LEZ — tx
+  `56ce4d2a…`, block 1267 — A saw 150 → 149 and alerted B over Logos Messaging, B
+  read the alert), and the **paid
   skill marketplace** (`testnet-use-cases.yml` run 33982458566, `RISC0_DEV_MODE=0`
   on a 16 GB runner: A funded its private account with a real proof, `ENMg…`
   150 → 50; discovered B's card on the discovery topic; bought `agent.ask` at B's
