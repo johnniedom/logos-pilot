@@ -204,12 +204,13 @@ Status of the submission criteria:
   read agent B's public account through the wallet module, B spent 1 LEZ — tx
   `56ce4d2a…`, block 1267 — A saw 150 → 149 and alerted B over Logos Messaging, B
   read the alert), and the **paid
-  skill marketplace** (`testnet-use-cases.yml` run 33982458566, `RISC0_DEV_MODE=0`
-  on a 16 GB runner: A funded its private account with a real proof, `ENMg…`
-  150 → 50; discovered B's card on the discovery topic; bought `agent.ask` at B's
-  declared 5 LEZ; B answered with its language model; A's settlement paid B over the
-  private rail with a second real proof — tx `d45ae495…`, block 39198, A's private
-  balance 100 → 95; 102 minutes. Two attempts before it failed for reasons recorded
+  skill marketplace** (`testnet-use-cases.yml` run 34337961562, 2026-09-09, on the
+  reset chain, `RISC0_DEV_MODE=0` on a 16 GB runner: A funded its private account
+  with a real proof, `GYj3…` 150 → 50; discovered B's card on the discovery topic;
+  bought `agent.ask` at B's declared 5 LEZ; B answered with its language model; A's
+  settlement paid B over the private rail with a second real proof — tx `8f1ad51a…`,
+  block 1355, A's private balance 100 → 95; 128 minutes. Before the reset the same
+  run passed on 2026-09-05 as 33982458566; two attempts before that failed for reasons recorded
   below and in the commit log: a wrong check in the role script, then the risc0
   3.0.5 lift gap.)
 - **F10 — three agents deployed on the public testnet, one per skill category
