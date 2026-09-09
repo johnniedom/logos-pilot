@@ -244,11 +244,12 @@ sets the whole thing up on one machine — a relay, an agent deployed and bound 
 paired — and prints the lines to type.
 
 `agents/owner-channel.sh` runs both front-ends against the public testnet from a clean clone
-(`.github/workflows/owner-channel.yml`; run 34005712233, 2026-09-06): the `pilot_owner` module,
-loaded in a second `logoscore` daemon and called the way Basecamp calls it, makes the key, pairs,
-gets `/balance`, has a 101-LEZ spend held and approves it (tx `a8767800…`, block 39604); the
-console client imports the same key, gets `/balance` and sends 20 LEZ (tx `1b8a2f78…`, block
-39605). The Basecamp window itself is not opened in CI (no display): `KNOWN_LIMITATIONS.md` §8.
+(`.github/workflows/owner-channel.yml`; run 34337937434, 2026-09-09, on the chain as reset on
+2026-09-08): the `pilot_owner` module, loaded in a second `logoscore` daemon and called the way
+Basecamp calls it, makes the key, pairs, gets `/balance`, has a 101-LEZ spend held and approves it
+(tx `f2d7a1ad…`, block 1258); the console client imports the same key, gets `/balance` and sends
+20 LEZ (tx `d04b9826…`, block 1259). The Basecamp window itself is not opened in CI (no display);
+what a desktop run showed is in `KNOWN_LIMITATIONS.md` §8.
 
 ## LLM Configuration
 

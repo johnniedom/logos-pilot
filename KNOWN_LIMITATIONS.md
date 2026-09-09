@@ -189,6 +189,12 @@ themselves; the on-demand `marketplace` job does, and has (run 33982458566).
 
 ## 5. Testnet evidence & demo video — the evidence set is in the repo; the video is not yet recorded
 
+The public testnet was reset by its operator on 2026-09-08. Everything recorded below before that
+date was real and verified on the day, and none of it resolves on the chain that runs now; the
+live evidence tables were re-landed on 2026-09-09 (`evidence/*.tsv`, run ids per row) and the old
+tables moved to `evidence/before-reset-2026-09-08/`. Where a paragraph below still names a
+pre-reset run, the re-landed run for the same step is in the tables.
+
 Status of the submission criteria:
 
 - **F9 — ≥ 3 use cases demoed end-to-end on testnet:** met 2026-09-05
@@ -251,7 +257,8 @@ its account pages show late-August balances):
   Pilot's own funding code were **mined** — the account it created shows
   `program_owner = authenticated_transfer`, balance 150, nonce 1.
 - 2026-09-02: a **public transfer** between two accounts this wallet owns was
-  **mined in one block** (tx `1bbd306b…`; sender 150 → 140, receiver 150 → 160,
+  **mined in one block** (tx `1bbd306b…`, on the chain before the 2026-09-08 reset —
+  see `evidence/before-reset-2026-09-08/`; sender 150 → 140, receiver 150 → 160,
   both nonces 1 → 2). A public transfer is signed by the client and proven by the
   sequencer, so it needs **no client-side RISC0 proof**. `wallet.send` exposes
   this rail as the `public:<64-hex account id>` recipient form, spending from the
@@ -406,11 +413,12 @@ and opens no socket itself; every such step is `logos.callModule("pilot_owner", 
 `pilot_owner` module (`pilot-owner/module`), built from the same `owner_client.*` library as
 the `pilot-owner` console client.
 
-**What is proven.** `agents/owner-channel.sh` (run 34005712233, 2026-09-06) drives that module
-the way Basecamp does — loaded in its own `logoscore` daemon and called by name: createKey, the
-agent bound to that key, pair from the agent's card, `/balance` answered, a 101-LEZ `/send` held
-and approved from the module, tx `a8767800…` in block 39604. The module, the wire format and the
-relay-only transport are the ones the plugin uses.
+**What is proven.** `agents/owner-channel.sh` (run 34337937434, 2026-09-09, on the reset chain; the
+same run had passed on 2026-09-06 as 34005712233) drives that module the way Basecamp does —
+loaded in its own `logoscore` daemon and called by name: createKey, the agent bound to that key,
+pair from the agent's card, `/balance` answered, a 101-LEZ `/send` held and approved from the
+module, tx `f2d7a1ad…` in block 1258. The module, the wire format and the relay-only transport
+are the ones the plugin uses.
 
 **What the desktop run showed (2026-09-09, WSL Ubuntu, Basecamp 0.1.2-RC3 AppImage, relay in
 Docker, `agents/local-owner-demo.sh`).** Basecamp loaded the plugin with `pilot_owner` as its only
