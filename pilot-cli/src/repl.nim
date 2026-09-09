@@ -113,11 +113,28 @@ proc formatJson(raw: string): string =
         let periodHrs = max(1, secs div 3600)
         limitLines = "\n  " & DIM & "Per-tx limit " & RESET & $perTx & " LEZ" &
                      "\n  " & DIM & "Period limit " & RESET & $perPeriod & " LEZ / " & $periodHrs & "h"
+      # The wallet has two balances. The PUBLIC account is the one the faucet credits and the
+      # one every `public:` send draws from; the private (shielded) one only fills when the
+      # shielded funding leg lands. Showing only the private figure read as "empty" on a
+      # desktop whose public account held 149 LEZ (2026-09-09).
+      let pubBal = j.getOrDefault("public_balance").getStr("")
+      let pubAcct = j.getOrDefault("public_account").getStr("")
+      var pubLines = ""
+      if pubBal != "":
+        pubLines = "
+  " & DIM & "Public       " & RESET & BOLD & pubBal & " LEZ" & RESET &
+                   (if pubAcct != "": DIM & "   public:" & pubAcct & RESET else: "")
+      let fundHint =
+        if pubBal == "" or pubBal == "0": "
+" & "
+  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
+        else: ""
       return BOLD & "  Agent Wallet" & RESET &
-             "\n  " & DIM & "Balance      " & RESET & BOLD & balStr & " LEZ" & RESET &
+             pubLines &
+             "
+  " & DIM & "Private      " & RESET & BOLD & balStr & " LEZ" & RESET &
              limitLines &
-             "\n" &
-             "\n  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
+             fundHint
 
     # Status
     if j.hasKey("initialized") and j.hasKey("npk"):
