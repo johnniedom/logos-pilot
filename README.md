@@ -501,7 +501,7 @@ Chat features:
 docker-compose up -d
 ```
 
-### Suite 1: Unit Tests (208 tests)
+### Suite 1: Unit Tests (216 tests)
 
 Tests crypto, skill registry, LLM factory, and core module behavior. No runtime needed.
 

@@ -146,7 +146,7 @@ trusted code, not a defense against untrusted code.**
 
 ## 4. Build & test — unit suite green; the end-to-end CI job settles a real spend on the public testnet
 
-**What it is.** The module **builds** and the full **unit suite (208 tests) passes**.
+**What it is.** The module **builds** and the full **unit suite (216 tests) passes**.
 The end-to-end CI job used to boot a Docker devnet sequencer on port 8080 that the
 wallet never talked to (the module defaults to `:3040`, `PILOT_SEQUENCER_ADDR` was
 never set, `initialize` was never called, and the only wallet line was `|| true`) —
@@ -397,7 +397,7 @@ locate where it stops; the remaining failure is under active diagnosis, not unex
 Out-of-band import (`pilot peer add <card.json>`) remains available and does not depend
 on discovery.
 
-## 8. Basecamp: the Pilot Remote plugin is proven headlessly, not clicked through
+## 8. Basecamp: the Pilot Remote plugin — clicked through on a desktop 2026-09-09; the held-spend approval from the window is still to be recorded
 
 The Basecamp plugin **Pilot Remote** (`pilot-ui/remote-plugin`) puts the owner channel in the
 Logos desktop app: a set-up screen (make or import the owner key; paste the agent's card,
@@ -412,16 +412,26 @@ agent bound to that key, pair from the agent's card, `/balance` answered, a 101-
 and approved from the module, tx `a8767800…` in block 39604. The module, the wire format and the
 relay-only transport are the ones the plugin uses.
 
-**What is not.** A GitHub-hosted runner has no display, so nothing in CI opens the Basecamp
-window, loads the plugin's QML, or exercises Basecamp's plugin loader with a plugin whose only
-declared dependency is `pilot_owner`. `agents/local-owner-demo.sh` is the desktop run that does
-(relay, an agent bound to the owner key, Basecamp paired through the shared state file). Until
-that run has been made on a desktop and its result recorded here, treat the module as verified
-and the window as not.
+**What the desktop run showed (2026-09-09, WSL Ubuntu, Basecamp 0.1.2-RC3 AppImage, relay in
+Docker, `agents/local-owner-demo.sh`).** Basecamp loaded the plugin with `pilot_owner` as its only
+declared dependency, the set-up screen paired from the agent's card, and the chat screen showed
+"Paired with Pilot Agent". Two things were wrong and are fixed in this tree:
 
-**What would close it.** One recorded desktop run of `agents/local-owner-demo.sh` (the paired
-chat with a `/balance` reply and the `/approve` transaction hash), or Basecamp under
-`QT_QPA_PLATFORM=offscreen` in CI if the app allows it.
+- the chat view never compiled: `LogosTextField` has no `accepted` signal, so `onAccepted` was an
+  error and the window stayed blank. Enter now sends through `Keys.onReturnPressed` (2ab5ac6).
+- the agent answered the first messages and then went silent for good: one poll answered a queue
+  of five owner messages in a row (a language-model turn plus wallet calls, about sixteen
+  seconds), the daemon dropped that call at its 20 s ceiling, and no later call to the module
+  returned until the agent was restarted. Owner messages are now queued and answered from the
+  host's event loop, so the poll returns at once (90c4ebf, with a unit test).
+
+With those in, `/help`, a plain "hello" (answered by the model) and `/balance` came back in the
+window, and a 1-LEZ `/send` typed on the desktop settled on the reset chain in 30 s (tx
+`bc34a2f6…`, agent `FLdW…` 150 → 149, nonce 2). A GitHub-hosted runner still has no display, so
+CI keeps proving the module (above) and not the window.
+
+**What would close it.** The held 101-LEZ `/send` and its `/approve` typed in the window, with
+the transaction hash recorded here — the last step of the desktop run, not yet made.
 
 ---
 
