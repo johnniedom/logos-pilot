@@ -530,8 +530,11 @@ proc dispatchAction(cfg: Config, action: JsonNode): string =
 
 proc cleanup() {.noconv.} =
   echo ""
-  info("Shutting down...")
-  stopDaemon(gCfg)
+  if daemonStartedHere:
+    info("Shutting down...")
+    stopDaemon(gCfg)
+  else:
+    info("Leaving the agent running (it was up before this chat started)")
   quit(0)
 
 proc runRepl*(cfg: Config, dataDir: string) =

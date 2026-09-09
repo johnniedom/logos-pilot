@@ -1,6 +1,11 @@
 import os, osproc, strutils, times, json
 import rpc, format, modules
 
+# True only when THIS process launched the daemon. `pilot chat` used to stop the daemon on exit
+# no matter who started it, so quitting the chat took down an agent that a service (and
+# Basecamp's Pilot Remote) were relying on (2026-09-09).
+var daemonStartedHere* = false
+
 proc readPidFromState(cfg: Config): int =
   let stateFile = cfg.configDir / "daemon" / "state.json"
   if fileExists(stateFile):
@@ -15,9 +20,12 @@ proc isProcessAlive(pid: int): bool =
   return dirExists("/proc/" & $pid)
 
 proc isDaemonRunning*(cfg: Config): bool =
+  # 10 s, not 3: a daemon in the middle of an agentPoll (an LLM turn, wallet calls) answered
+  # `status` late on 2026-09-09, the CLI took "late" for "dead" and started a second daemon on
+  # top of the live one — which killed it (cleanStaleDaemon below, and the port collision).
   try:
     let raw = execProcess("bash", args = ["-c",
-      "timeout 3 " & quoteShell(cfg.logoscore) &
+      "timeout 10 " & quoteShell(cfg.logoscore) &
       " --config-dir " & quoteShell(cfg.configDir) & " status --json"],
       options = {poUsePath, poStdErrToStdOut}).strip()
     return raw.contains("\"running\"")
@@ -25,14 +33,17 @@ proc isDaemonRunning*(cfg: Config): bool =
     return false
 
 proc cleanStaleDaemon*(cfg: Config) =
+  # Only a daemon whose pid is gone is stale. Until 2026-09-09 the pkill below ran
+  # unconditionally, so any code path that reached startDaemon while a daemon was alive
+  # killed every module host on the machine, the live agent's included.
   let pid = readPidFromState(cfg)
   if pid > 0 and not isProcessAlive(pid):
     let daemonDir = cfg.configDir / "daemon"
     if dirExists(daemonDir):
       removeDir(daemonDir)
-  discard execProcess("bash", args = ["-c",
-    "pkill -9 -f logos_host_qt 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
-    options = {poUsePath})
+    discard execProcess("bash", args = ["-c",
+      "pkill -9 -f " & quoteShell("instance-persistence-path " & cfg.configDir) & " 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
+      options = {poUsePath})
 
 # Keys at rest (2026-09-05). The module wraps the agent's private keys (ecies.priv, enc.priv)
 # with AES-256-GCM under a passphrase-derived key whenever PILOT_KEY_PASSPHRASE is set, and
@@ -88,6 +99,15 @@ proc startDaemon*(cfg: Config): bool =
       return false
   createDir(cfg.dataDir)
   createDir(cfg.dataDir / "wallet_storage")
+  # A live daemon is never replaced from here. If it exists but did not answer `status` in
+  # time, say so and stop — a second daemon on the same config dir kills the first.
+  let livePid = readPidFromState(cfg)
+  if livePid > 0 and isProcessAlive(livePid):
+    for i in 0 ..< 20:
+      if isDaemonRunning(cfg): return true
+      sleep(1000)
+    fail("A daemon is already running (pid " & $livePid & ") but is not answering; wait a moment and try again")
+    return false
   cleanStaleDaemon(cfg)
 
   let logFile = cfg.dataDir / "daemon.log"
@@ -117,6 +137,7 @@ proc startDaemon*(cfg: Config): bool =
     " > " & quoteShell(logFile) & " 2>&1 &\n")
   inclFilePermissions(scriptFile, {fpUserExec})
   discard execCmd("bash " & quoteShell(scriptFile))
+  daemonStartedHere = true
 
   # Daemon writes its own PID to state.json — poll for it instead of $!
   var pid = 0
@@ -185,8 +206,10 @@ proc stopDaemon*(cfg: Config) =
     "timeout 5 " & quoteShell(cfg.logoscore) &
     " --config-dir " & quoteShell(cfg.configDir) & " stop"],
     options = {poUsePath, poStdErrToStdOut})
+  # Only this config dir's module hosts (their command line carries its data path): another
+  # agent's daemon on the same machine is not ours to kill.
   discard execProcess("bash", args = ["-c",
-    "pkill -f logos_host_qt 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
+    "pkill -f " & quoteShell("instance-persistence-path " & cfg.configDir) & " 2>/dev/null; rm -f ~/.cache/storage/dht/providers/LOCK"],
     options = {poUsePath})
 
 proc recordStartTime*(cfg: Config) =
