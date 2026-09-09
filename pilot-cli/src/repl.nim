@@ -121,18 +121,14 @@ proc formatJson(raw: string): string =
       let pubAcct = j.getOrDefault("public_account").getStr("")
       var pubLines = ""
       if pubBal != "":
-        pubLines = "
-  " & DIM & "Public       " & RESET & BOLD & pubBal & " LEZ" & RESET &
+        pubLines = "\n  " & DIM & "Public       " & RESET & BOLD & pubBal & " LEZ" & RESET &
                    (if pubAcct != "": DIM & "   public:" & pubAcct & RESET else: "")
       let fundHint =
-        if pubBal == "" or pubBal == "0": "
-" & "
-  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
+        if pubBal == "" or pubBal == "0": "\n" & "\n  " & DIM & "Fund this agent → " & RESET & j["account"].getStr()
         else: ""
       return BOLD & "  Agent Wallet" & RESET &
              pubLines &
-             "
-  " & DIM & "Private      " & RESET & BOLD & balStr & " LEZ" & RESET &
+             "\n  " & DIM & "Private      " & RESET & BOLD & balStr & " LEZ" & RESET &
              limitLines &
              fundHint
 
