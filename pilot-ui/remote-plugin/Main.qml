@@ -345,7 +345,10 @@ Item {
                     id: input
                     Layout.fillWidth: true
                     placeholderText: "/send <to> <amount> <reason>    /approve <id>    /reject <id>    or ask in words"
-                    onAccepted: { root.sendLine(text); text = "" }
+                    // LogosTextField has no `accepted` signal (Basecamp 0.1.x): "Cannot assign to
+                    // non-existent property onAccepted" killed the whole view on the desktop, 2026-09-09.
+                    Keys.onReturnPressed: { root.sendLine(text); text = "" }
+                    Keys.onEnterPressed: { root.sendLine(text); text = "" }
                 }
                 LogosButton {
                     text: "Send"
