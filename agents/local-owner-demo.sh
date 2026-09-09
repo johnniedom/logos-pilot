@@ -107,18 +107,22 @@ CIRCUITS="$(find /nix/store -maxdepth 1 -type d -name '*logos-blockchain-circuit
 [ -n "$CIRCUITS" ] && export LOGOS_BLOCKCHAIN_CIRCUITS="$CIRCUITS"
 echo "   data $PILOT_DATA_DIR, modules $PILOT_MODULE_PATH"
 "$RUN/pilot" deploy --testnet 2>&1 | tee "$RUN/deploy.log" | sed 's/^/   /'
-LC_BIN="${LOGOSCORE:-$(command -v logoscore || true)}"
+# The runtime's own CLI, from the nix store, before anything on PATH: an older logoscore in
+# ~/.local/bin answered a `call` by hanging forever (2026-09-09, 58 minutes on getAccountId),
+# and a call with no time limit turned that into a stuck script. Every call below is bounded.
+LC_BIN="${LOGOSCORE:-$(ls -d /nix/store/*logoscore-cli-bin*/bin/logoscore 2>/dev/null | head -1)}"
+[ -n "$LC_BIN" ] || LC_BIN="$(command -v logoscore || true)"
 LCDIR="$PILOT_DATA_DIR/.logoscore"
 if [ -n "$LC_BIN" ]; then
   ACCOUNT=""; for i in $(seq 1 60); do
-    ACCOUNT=$("$LC_BIN" --config-dir "$LCDIR" call pilot getAccountId 2>/dev/null | python3 -c 'import sys,json
+    ACCOUNT=$(timeout 30 "$LC_BIN" --config-dir "$LCDIR" call pilot getAccountId 2>/dev/null | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("result",""))
 except Exception: print("")')
     [ ${#ACCOUNT} -eq 64 ] && break; sleep 10
   done
-  "$LC_BIN" --config-dir "$LCDIR" call pilot agentCard 2>/dev/null | python3 -c 'import sys,json
+  timeout 30 "$LC_BIN" --config-dir "$LCDIR" call pilot agentCard 2>/dev/null | python3 -c 'import sys,json
 r=json.load(sys.stdin).get("result",""); print(r if isinstance(r,str) else json.dumps(r))' > "$RUN/agent-card.json"
-  "$LC_BIN" --config-dir "$LCDIR" call pilot establishOwnerChannel >/dev/null 2>&1
+  timeout 30 "$LC_BIN" --config-dir "$LCDIR" call pilot establishOwnerChannel >/dev/null 2>&1
 else
   echo "   (logoscore not on PATH: read the card with 'pilot card' and the account with 'pilot status')"
   "$RUN/pilot" card > "$RUN/agent-card.json" 2>/dev/null || true
