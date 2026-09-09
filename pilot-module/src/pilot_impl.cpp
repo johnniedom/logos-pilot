@@ -18,6 +18,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QTimer>
+#include <QCoreApplication>
 
 PilotImpl::PilotImpl()
     : llm_(std::make_unique<NoOpProvider>()),
@@ -26,6 +28,7 @@ PilotImpl::PilotImpl()
 }
 
 PilotImpl::~PilotImpl() {
+    alive_.reset();
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -526,10 +529,32 @@ void PilotImpl::handleInboundMessage(const std::string& topic, const std::string
             // processOwnerMessage yields an ACTION object (the local chat CLI executes those
             // itself); over the channel nobody else can, so execute it here and send the
             // owner the result text. Before 2026-09-05 the raw object went back to the owner.
-            std::string action = processOwnerMessage(inner);
-            sendToOwner(ownerCommand(action));
+            queueOwnerMessage(inner);
         }
     } catch (...) {}
+}
+
+void PilotImpl::queueOwnerMessage(const std::string& inner) {
+    ownerQueue_.push_back(inner);
+    if (!QCoreApplication::instance()) { drainOwnerQueue(); return; }   // no event loop: inline
+    if (ownerDraining_) return;                                          // the running drain takes it
+    ownerDraining_ = true;
+    std::weak_ptr<bool> alive = alive_;
+    QTimer::singleShot(0, [this, alive]() {
+        if (alive.lock()) drainOwnerQueue();
+    });
+}
+
+void PilotImpl::drainOwnerQueue() {
+    ownerDraining_ = true;
+    while (!ownerQueue_.empty()) {
+        std::string inner = ownerQueue_.front();
+        ownerQueue_.pop_front();
+        try {
+            sendToOwner(ownerCommand(processOwnerMessage(inner)));
+        } catch (...) {}
+    }
+    ownerDraining_ = false;
 }
 
 // The topics whose NAMES depend on our own identity keys. Kept pure and separate from the

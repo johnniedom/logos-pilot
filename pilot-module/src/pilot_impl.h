@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <deque>
 #include <cstdint>
 #include <unordered_set>
 
@@ -96,6 +97,15 @@ public:
     // 2026-09-05 the agent sent the raw action object back to the owner instead of acting on it.
     // Money moves only through the spending FSM (send -> walletSend; approve -> approveSpend).
     std::string ownerCommand(const std::string& actionJson);
+    // An owner message that arrived through agentPoll or a delivery event is QUEUED here and
+    // answered from the host's event loop, not inside the RPC that carried it. Answering means
+    // an LLM turn plus wallet calls (15 s and more for a burst); the daemon drops any RPC that
+    // runs past its 20 s ceiling and every later call to the module hung after that
+    // (2026-09-09, laptop: one poll answered five queued messages, then not even echo came back).
+    // Without a Qt event loop (unit tests) the queue drains inline, so behaviour there is unchanged.
+    void queueOwnerMessage(const std::string& inner);
+    // Public so a test can drain the queue by hand where the harness already owns an event loop.
+    void drainOwnerQueue();
 
     // Phase 3: Spending FSM
     std::string createSpendRequest(const std::string& recipient, int64_t amount, const std::string& reason);
@@ -515,6 +525,13 @@ private:
     // int (not atomic): guards SYNCHRONOUS nested-QEventLoop re-entrancy, not OS threads.
     int llmInFlight_ = 0;
     std::vector<std::pair<std::string,std::string>> chatHistory_;
+    // Owner messages waiting to be answered (see queueOwnerMessage); ownerDraining_ is true
+    // while drainOwnerQueue runs so a message that arrives during an LLM turn is picked up by
+    // the running drain instead of starting a second, re-entrant one. alive_ lets a deferred
+    // drain notice the module is gone.
+    std::deque<std::string> ownerQueue_;
+    bool ownerDraining_ = false;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
 // The JSON handed to storage_module.init for an agent whose data dir is `dataDir` (empty
