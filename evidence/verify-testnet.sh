@@ -12,6 +12,10 @@ RPC="${LEZ_RPC:-https://testnet.lez.logos.co}"
 TSV="$(dirname "$0")/testnet-transactions.tsv"
 fail=0
 
+# The check loops read from pipes, so they run in subshells: a variable set inside one never
+# reaches the verdict below (this script said "all verified" over 27 missing rows on 2026-09-09,
+# the day after the testnet reset). Failures are recorded in a file instead.
+FAILF=$(mktemp); trap 'rm -f "$FAILF"' EXIT
 rpc() {  # method, params-json
   curl -s -m 30 -X POST "$RPC" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}"
@@ -29,7 +33,7 @@ tail -n +2 "$TSV" | awk -F'\t' '$7 != "-" {print $1"\t"$7"\t"$8}' | while IFS=$'
 import json,sys
 d=json.load(sys.stdin); r=d.get("result")
 print("missing" if r is None else ("block %s" % r[1] if isinstance(r,list) and len(r)>1 else "found"))')
-  if [ "$got" = "missing" ]; then echo "FAIL $date $hash -> not on chain"; fail=1
+  if [ "$got" = "missing" ]; then echo "FAIL $date $hash -> not on chain"; echo 1 >>"$FAILF"
   else echo "ok   $date $hash -> $got (tsv says block $block)"; fi
 done
 
@@ -47,7 +51,7 @@ nonce=r.get("nonce",0); bal=r.get("balance")
 owner=r.get("program_owner"); registered = owner is not None and owner != [0]*len(owner) if isinstance(owner,list) else bool(owner)
 ok = nonce >= 1 and registered
 print(("ok   " if ok else "FAIL ") + "%s balance=%s nonce=%s registered=%s" % (acct, bal, nonce, registered))
-sys.exit(0 if ok else 1)' "$acct" || fail=1
+sys.exit(0 if ok else 1)' "$acct" || echo 1 >>"$FAILF"
 done
 
 # 3. The three category agents (evidence/testnet-agents.tsv): every agent's public account must
@@ -68,10 +72,11 @@ nonce=r.get("nonce",0); bal=r.get("balance")
 owner=r.get("program_owner"); registered = owner is not None and owner != [0]*len(owner) if isinstance(owner,list) else bool(owner)
 ok = nonce >= 1 and registered
 print(("ok   " if ok else "FAIL ") + "%s/%s %s balance=%s nonce=%s registered=%s" % (role, agent, acct, bal, nonce, registered))
-sys.exit(0 if ok else 1)' "$role" "$agent" "$acct" || fail=1
+sys.exit(0 if ok else 1)' "$role" "$agent" "$acct" || echo 1 >>"$FAILF"
   done
 fi
 
 echo
+[ -s "$FAILF" ] && fail=1
 if [ "$fail" -ne 0 ]; then echo "RESULT: FAIL"; exit 1; fi
 echo "RESULT: all evidence rows verified against $RPC"
