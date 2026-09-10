@@ -230,3 +230,59 @@ LOGOS_TEST(openai_text_reads_content_beside_reasoning) {
     LOGOS_ASSERT_EQ(pilotExtractOpenAIText("{\"choices\":[]}"), std::string(""));
     LOGOS_ASSERT_EQ(pilotExtractOpenAIText("[]"), std::string(""));
 }
+
+// ===================== 2026-09-10: one action per reply; the model sometimes sends two =====
+
+LOGOS_TEST(first_json_object_trims_a_double_action_and_leaves_single_replies_alone) {
+    const std::string two =
+        "{\"action\": \"reply\", \"params\": {\"text\": \"Let me look } around.\"}}\n\n"
+        "{\"action\": \"discover\", \"params\": {}}";
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject(two),
+                    std::string("{\"action\": \"reply\", \"params\": {\"text\": \"Let me look } around.\"}}"));
+
+    const std::string one = "{\"action\": \"reply\", \"params\": {\"text\": \"hi\"}}";
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject(one), one);
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject("  " + one + "\n"), "  " + one + "\n");   // one object: untouched
+
+    const std::string escaped =
+        "{\"action\": \"reply\", \"params\": {\"text\": \"quote \\\" and brace }\"}} {\"action\": \"status\"}";
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject(escaped),
+                    std::string("{\"action\": \"reply\", \"params\": {\"text\": \"quote \\\" and brace }\"}}"));
+
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject("plain words"), std::string("plain words"));
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject("{\"unbalanced\": 1"), std::string("{\"unbalanced\": 1"));
+    LOGOS_ASSERT_EQ(pilotFirstJsonObject(""), std::string(""));
+}
+
+// An LLM that answers every turn with two action objects, the shape seen in chat on 2026-09-10.
+class DoubleActionLLM : public LLMProvider {
+public:
+    std::string complete(const std::string&, const std::vector<LLMMessage>&) override {
+        return "{\"action\": \"reply\", \"params\": {\"text\": \"No @yesterday here, let me look.\"}}\n\n"
+               "{\"action\": \"discover\", \"params\": {}}";
+    }
+    std::string model() const override { return "double-action"; }
+    std::string providerName() const override { return "double-action"; }
+    bool isConfigured() const override { return true; }
+};
+
+// processOwnerMessage hands consumers ONE object, so the CLI and the owner channel show the
+// reply text instead of the raw pair.
+LOGOS_TEST(process_owner_message_keeps_only_the_first_action) {
+    PilotImpl impl;
+    pilotSetLLMProvider(impl, std::make_unique<DoubleActionLLM>());
+    std::string out = impl.processOwnerMessage("what is the address of @yesterday");
+    LOGOS_ASSERT_CONTAINS(out, "\"action\": \"reply\"");
+    LOGOS_ASSERT_TRUE(out.find("discover") == std::string::npos);
+    LOGOS_ASSERT_EQ(impl.ownerCommand(out), std::string("No @yesterday here, let me look."));
+}
+
+// The system prompt states where the card goes and how @contacts work, so the model quotes
+// facts instead of inventing an on-chain registry or refusing a saved contact.
+LOGOS_TEST(system_prompt_states_card_channel_and_contact_rule) {
+    PilotImpl impl;
+    std::string prompt = impl.buildLLMSystemPrompt();
+    LOGOS_ASSERT_CONTAINS(prompt, "discovery channel on the Waku relay");
+    LOGOS_ASSERT_CONTAINS(prompt, "no on-chain registry");
+    LOGOS_ASSERT_CONTAINS(prompt, "NEVER say a contact does not exist");
+}

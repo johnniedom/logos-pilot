@@ -106,3 +106,30 @@ std::unique_ptr<LLMProvider> createLLMProvider(const std::string& provider,
 
     return std::make_unique<NoOpProvider>();
 }
+
+std::string pilotFirstJsonObject(const std::string& reply) {
+    size_t start = reply.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos || reply[start] != '{') return reply;
+
+    int depth = 0;
+    bool inString = false, escaped = false;
+    for (size_t i = start; i < reply.size(); ++i) {
+        char c = reply[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') inString = true;
+        else if (c == '{') ++depth;
+        else if (c == '}') {
+            if (--depth == 0) {
+                // Trailing whitespace only => a single object; keep the reply as it was.
+                if (reply.find_first_not_of(" \t\r\n", i + 1) == std::string::npos) return reply;
+                return reply.substr(start, i + 1 - start);
+            }
+        }
+    }
+    return reply;   // unbalanced: not ours to fix
+}

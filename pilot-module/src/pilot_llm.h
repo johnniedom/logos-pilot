@@ -54,3 +54,9 @@ bool pilotLlmThinkingEnabled();
 // visible text or "" (no choices, no text block, malformed JSON).
 std::string pilotExtractAnthropicText(const std::string& responseJson);
 std::string pilotExtractOpenAIText(const std::string& responseJson);
+
+// The first complete JSON object in a model reply, brace-matched with string awareness. A
+// reply that is not JSON, or holds exactly one object, comes back unchanged; "{a} {b}" or
+// "{a}\n\n{b}" comes back as "{a}". Owner-chat consumers parse one object and otherwise show
+// the raw text, so the model's occasional double action must be trimmed here.
+std::string pilotFirstJsonObject(const std::string& reply);

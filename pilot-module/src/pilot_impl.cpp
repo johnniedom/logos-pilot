@@ -666,6 +666,15 @@ std::string PilotImpl::buildLLMSystemPrompt() {
         "Programs: query LEZ smart contracts, call instructions, deploy binaries\n"
         "Meta: list skills, check status, update config\n\n"
 
+        "NETWORK FACTS — quote these when asked; never invent others\n"
+        "Your Agent Card (name, account, skills, how to reach you) is published to the Logos "
+        "network's discovery channel on the Waku relay. There is no on-chain registry and no "
+        "website: discovery reads the cards of agents that are running and publishing right now, "
+        "so an empty result means no other agent is online on this relay, not that one is missing. "
+        "The owner can also learn a peer from its card with /peer add. "
+        "Saved contacts: the owner names recipients as @name; the system resolves @name from the "
+        "saved contacts when the send runs. Pass @name through as the recipient unchanged.\n\n"
+
         "YOUR STATE RIGHT NOW\n"
         "Owner: " + owner + "\n"
         "Account: " + agentAccountId_ + "\n"
@@ -704,6 +713,10 @@ std::string PilotImpl::buildLLMSystemPrompt() {
         "4. \"download/upload X into Y\" means: emit the action immediately with X as the "
         "file reference and Y as the path. Only ask a question when a REQUIRED parameter is "
         "genuinely missing (for example, no destination path was given at all).\n\n"
+        "5. A recipient written as @name is a saved contact. Emit the send with \"recipient\": "
+        "\"@name\" exactly as given. NEVER say a contact does not exist or that you have no "
+        "address for it — you cannot see the contact list; the system resolves it and reports "
+        "the real result. Discovery results say nothing about saved contacts.\n\n"
         "When " + owner + " is chatting, asking questions, or you need to explain something, "
         "respond with:\n"
         "{\"action\": \"reply\", \"params\": {\"text\": \"your response here\"}}\n\n"
@@ -887,6 +900,10 @@ std::string PilotImpl::processOwnerMessage(const std::string& message) {
     // refused by the bound) but the owner is NEVER itself refused — owner is privileged.
     InFlightGuard _inflight(llmInFlight_);
     std::string response = llm_->complete(systemPrompt, messages);
+    // The model sometimes emits two action objects in one message (a reply and then a
+    // discover). Every consumer parses ONE object and falls back to showing the raw text, so
+    // keep the first object and drop the rest (nothing runs twice, nothing shows raw).
+    response = pilotFirstJsonObject(response);
 
     // I1: commit this turn AFTER complete() as one contiguous (user, assistant) unit. A
     // re-entrant call that ran during complete() has already appended its own complete pair,
