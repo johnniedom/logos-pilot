@@ -136,3 +136,97 @@ LOGOS_TEST(llm_timeout_ms_defaults_and_env_override) {
 
     unsetenv("PILOT_LLM_TIMEOUT_MS");                // clean up for other tests
 }
+
+// ===================== 2026-09-10: current model ids, output budget, thinking =========
+
+// Defaults follow each provider's live model list (DeepSeek retires deepseek-v4-pro on
+// 14 Sep 2026 and routes it to V4.1 Flash; deepseek-chat is an alias, not a listed model).
+LOGOS_TEST(llm_default_models_track_live_provider_lists) {
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("deepseek"),   std::string("deepseek-flash"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("anthropic"),  std::string("claude-opus-5"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("openai"),     std::string("gpt-5.6-terra"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("google"),     std::string("gemini-3.8-flash"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("openrouter"), std::string("anthropic/claude-opus-5"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("groq"),       std::string("llama-3.3-70b-versatile"));
+    LOGOS_ASSERT_EQ(pilotLlmDefaultModel("nonexistent"), std::string(""));
+}
+
+// A compatible provider takes the stored id, else PILOT_LLM_MODEL, else its default — the old
+// factory skipped PILOT_LLM_MODEL for every provider but anthropic/openai.
+LOGOS_TEST(factory_compat_provider_resolves_model_from_env_then_default) {
+    setenv("DEEPSEEK_API_KEY", "test-key", 1);
+    unsetenv("OPENAI_API_KEY");
+
+    setenv("PILOT_LLM_MODEL", "custom-from-env", 1);
+    auto fromEnv = createLLMProvider("deepseek", "");
+    LOGOS_ASSERT_TRUE(fromEnv->isConfigured());
+    LOGOS_ASSERT_EQ(fromEnv->model(), std::string("custom-from-env"));
+
+    auto stored = createLLMProvider("deepseek", "stored-id");
+    LOGOS_ASSERT_EQ(stored->model(), std::string("stored-id"));   // stored id wins over env
+
+    unsetenv("PILOT_LLM_MODEL");
+    auto dflt = createLLMProvider("deepseek", "");
+    LOGOS_ASSERT_EQ(dflt->model(), std::string("deepseek-flash"));
+
+    unsetenv("DEEPSEEK_API_KEY");
+    unsetenv("OPENAI_API_KEY");
+    unsetenv("OPENAI_BASE_URL");
+}
+
+LOGOS_TEST(llm_max_tokens_defaults_and_env_override) {
+    unsetenv("PILOT_LLM_MAX_TOKENS");
+    LOGOS_ASSERT_EQ(pilotLlmMaxTokens(), 4096);
+    setenv("PILOT_LLM_MAX_TOKENS", "512", 1);
+    LOGOS_ASSERT_EQ(pilotLlmMaxTokens(), 512);
+    setenv("PILOT_LLM_MAX_TOKENS", "-3", 1);
+    LOGOS_ASSERT_EQ(pilotLlmMaxTokens(), 4096);
+    unsetenv("PILOT_LLM_MAX_TOKENS");
+}
+
+LOGOS_TEST(llm_thinking_off_unless_env_says_one) {
+    unsetenv("PILOT_LLM_THINKING");
+    LOGOS_ASSERT_FALSE(pilotLlmThinkingEnabled());
+    setenv("PILOT_LLM_THINKING", "1", 1);
+    LOGOS_ASSERT_TRUE(pilotLlmThinkingEnabled());
+    setenv("PILOT_LLM_THINKING", "yes", 1);
+    LOGOS_ASSERT_FALSE(pilotLlmThinkingEnabled());
+    unsetenv("PILOT_LLM_THINKING");
+}
+
+// Claude Opus 5 thinks by default and puts a "thinking" block (empty text) BEFORE the "text"
+// block; the old parser read content[0] and returned "".
+LOGOS_TEST(anthropic_text_skips_thinking_block) {
+    const std::string withThinking =
+        "{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"abc\"},"
+        "{\"type\":\"text\",\"text\":\"Balance is 149 LEZ.\"}],\"stop_reason\":\"end_turn\"}";
+    LOGOS_ASSERT_EQ(pilotExtractAnthropicText(withThinking), std::string("Balance is 149 LEZ."));
+
+    const std::string textOnly =
+        "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
+    LOGOS_ASSERT_EQ(pilotExtractAnthropicText(textOnly), std::string("ok"));
+
+    LOGOS_ASSERT_EQ(pilotExtractAnthropicText("{\"content\":[]}"), std::string(""));
+    LOGOS_ASSERT_EQ(pilotExtractAnthropicText("{\"content\":[{\"type\":\"thinking\",\"thinking\":\"\"}]}"),
+                    std::string(""));
+    LOGOS_ASSERT_EQ(pilotExtractAnthropicText("not json"), std::string(""));
+}
+
+// Captured DeepSeek replies (2026-09-10): the visible answer sits in "content" beside
+// "reasoning_content"; a reply whose budget went entirely to reasoning has content "".
+LOGOS_TEST(openai_text_reads_content_beside_reasoning) {
+    const std::string deepseek =
+        "{\"id\":\"x\",\"object\":\"chat.completion\",\"model\":\"deepseek-flash\",\"choices\":["
+        "{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\","
+        "\"reasoning_content\":\"The user wants ok.\"},\"finish_reason\":\"stop\"}]}";
+    LOGOS_ASSERT_EQ(pilotExtractOpenAIText(deepseek), std::string("ok"));
+
+    const std::string budgetSpentOnReasoning =
+        "{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\","
+        "\"reasoning_content\":\"We need answer\"},\"finish_reason\":\"length\"}]}";
+    LOGOS_ASSERT_EQ(pilotExtractOpenAIText(budgetSpentOnReasoning), std::string(""));
+
+    LOGOS_ASSERT_EQ(pilotExtractOpenAIText("{\"choices\":[]}"), std::string(""));
+    LOGOS_ASSERT_EQ(pilotExtractOpenAIText("[]"), std::string(""));
+}

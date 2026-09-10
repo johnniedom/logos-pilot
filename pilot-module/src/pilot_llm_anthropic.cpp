@@ -10,6 +10,21 @@
 #include <QUrl>
 #include <cstdlib>
 
+std::string pilotExtractAnthropicText(const std::string& responseJson) {
+    QJsonDocument responseDoc = QJsonDocument::fromJson(QByteArray::fromStdString(responseJson));
+    if (responseDoc.isNull() || !responseDoc.isObject()) return "";
+
+    // Current Claude models think by default: the reply carries a "thinking" block (empty text
+    // unless a summary was asked for) before the "text" block. Return the first text block.
+    QJsonArray content = responseDoc.object()["content"].toArray();
+    for (const auto& block : content) {
+        QJsonObject obj = block.toObject();
+        if (obj["type"].toString() == "text")
+            return obj["text"].toString().toStdString();
+    }
+    return "";
+}
+
 class AnthropicProvider : public LLMProvider {
 public:
     AnthropicProvider(const std::string& apiKey, const std::string& modelId)
@@ -29,7 +44,7 @@ public:
 
         QJsonObject body;
         body["model"] = QString::fromStdString(modelId_);
-        body["max_tokens"] = 1024;
+        body["max_tokens"] = pilotLlmMaxTokens();
         body["messages"] = jsonMessages;
         if (!systemPrompt.empty()) {
             body["system"] = QString::fromStdString(systemPrompt);
@@ -72,14 +87,7 @@ public:
         QByteArray responseData = reply->readAll();
         reply->deleteLater();
 
-        QJsonDocument responseDoc = QJsonDocument::fromJson(responseData);
-        if (responseDoc.isNull()) return "";
-
-        QJsonObject responseObj = responseDoc.object();
-        QJsonArray content = responseObj["content"].toArray();
-        if (content.isEmpty()) return "";
-
-        return content[0].toObject()["text"].toString().toStdString();
+        return pilotExtractAnthropicText(responseData.toStdString());
     }
 
     std::string model() const override { return modelId_; }
@@ -98,7 +106,7 @@ std::unique_ptr<LLMProvider> createAnthropicProvider(const std::string& modelOve
     std::string modelId = modelOverride;
     if (modelId.empty()) {
         const char* envModel = std::getenv("PILOT_LLM_MODEL");
-        modelId = envModel ? envModel : "claude-sonnet-4-6";
+        modelId = (envModel && *envModel) ? envModel : pilotLlmDefaultModel("anthropic");
     }
 
     return std::make_unique<AnthropicProvider>(key, modelId);

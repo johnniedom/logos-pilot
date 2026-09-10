@@ -56,7 +56,7 @@ docker-compose up -d
 ./pilot-cli/result/bin/pilot deploy --testnet
 
 # Headless deploy (no terminal: CI, a remote box, a systemd unit) — name provider + model in the env
-PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-sonnet-4-6-20250514 \
+PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-opus-5 \
   PILOT_OWNER_NPK=<your npk> ./pilot-cli/result/bin/pilot deploy
 
 # Chat: starts daemon, LLM-powered conversation

@@ -252,7 +252,7 @@ if [ "$ROLE" = "marketplace" ]; then
   echo "EVIDENCE role=marketplace step=fund payer=A public_account=$A_PUB_B58 public_balance=$A_PBAL nonce=$A_PNONCE shielded=landed"
   call "$B_LC" metaConfigure llm.provider deepseek >/dev/null
   call "$B_LC" metaConfigure llm.api_key "$DEEPSEEK_API_KEY" >/dev/null
-  call "$B_LC" metaConfigure llm.model "${PILOT_LLM_MODEL:-deepseek-v4-pro}" >/dev/null
+  call "$B_LC" metaConfigure llm.model "${PILOT_LLM_MODEL:-deepseek-flash}" >/dev/null
   CARD_B=$(call "$B_LC" agentCard)
   NPK_B=$(echo "$CARD_B" | field _logos.npk)
   # The declared price lives in the card's service list (whatever its exact shape): find the

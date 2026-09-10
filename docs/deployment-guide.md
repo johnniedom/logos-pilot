@@ -69,7 +69,7 @@ Headless (no terminal: CI, a remote box, a systemd unit) — the two arrow selec
 env var and the owner key from `PILOT_OWNER_NPK`, so the whole deploy needs no keystrokes:
 
 ```bash
-PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-sonnet-4-6-20250514 \
+PILOT_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-... PILOT_LLM_MODEL=claude-opus-5 \
   PILOT_OWNER_NPK=<npk> ./pilot-cli/result/bin/pilot deploy
 ```
 
@@ -84,7 +84,7 @@ The wizard walks you through:
 
 1. **Agent Identity** — creates a shielded wallet account on the sequencer, generates NPK/ISK keypair
 2. **LLM Provider** — arrow-key selector: Anthropic, OpenAI, DeepSeek, Google Gemini, OpenRouter, Groq, or skip
-3. **Model Selection** — 2-3 models per provider (e.g., claude-sonnet-4-6, gpt-4.1, deepseek-v4-pro)
+3. **Model Selection** — 2-3 models per provider (e.g., claude-opus-5, gpt-5.6-terra, deepseek-flash)
 4. **API Key** — enter your key (stored in SQLite, restored on restart)
 5. **Owner Identity** — your secp256k1 public key (optional — skip for testing)
 6. **Agent Card** — published to the Waku discovery topic

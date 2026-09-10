@@ -98,7 +98,7 @@ jobs:
           LEZ_RPC: https://testnet.lez.logos.co
           RISC0_SEGMENT_PO2: ${{ github.event.inputs.segment_po2 || '18' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          PILOT_LLM_MODEL: deepseek-v4-pro
+          PILOT_LLM_MODEL: deepseek-flash
         shell: bash   # bash -eo pipefail: a failing script must fail the job even through tee
         run: |
           mkdir -p agents/out/${{ matrix.role }}

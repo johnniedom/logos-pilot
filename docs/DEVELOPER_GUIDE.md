@@ -324,7 +324,7 @@ API keys must be passed to the module process, not just set in the calling proce
 ```bash
 logoscore call pilot metaConfigure llm.provider anthropic
 logoscore call pilot metaConfigure llm.api_key sk-ant-...
-logoscore call pilot metaConfigure llm.model claude-sonnet-4-6-20250514
+logoscore call pilot metaConfigure llm.model claude-opus-5
 ```
 
 The module stores these in SQLite and restores them on restart via `loadIdentity()`.
@@ -335,11 +335,11 @@ All providers except Anthropic route through the OpenAI-compatible chat completi
 
 | Provider | Base URL | Default model | Auth |
 |----------|----------|---------------|------|
-| Anthropic | `api.anthropic.com` (native) | claude-sonnet-4-6 | `x-api-key` header |
-| OpenAI | `api.openai.com/v1` | gpt-4o | `Bearer` token |
-| DeepSeek | `api.deepseek.com` (no `/v1`) | deepseek-chat | `Bearer` token |
-| Google Gemini | `generativelanguage.googleapis.com/v1beta/openai` | gemini-2.5-flash | `Bearer` token |
-| OpenRouter | `openrouter.ai/api/v1` | anthropic/claude-sonnet-4-6 | `Bearer` token |
+| Anthropic | `api.anthropic.com` (native) | claude-opus-5 | `x-api-key` header |
+| OpenAI | `api.openai.com/v1` | gpt-5.6-terra | `Bearer` token |
+| DeepSeek | `api.deepseek.com` (no `/v1`) | deepseek-flash | `Bearer` token |
+| Google Gemini | `generativelanguage.googleapis.com/v1beta/openai` | gemini-3.8-flash | `Bearer` token |
+| OpenRouter | `openrouter.ai/api/v1` | anthropic/claude-opus-5 | `Bearer` token |
 | Groq | `api.groq.com/openai/v1` | llama-3.3-70b-versatile | `Bearer` token |
 
 **Google Gemini gotcha:** API keys from Google Cloud Console may not work. Use keys from **aistudio.google.com** which work immediately with the Generative Language API.

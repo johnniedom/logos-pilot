@@ -200,10 +200,17 @@ fragility in `KNOWN_LIMITATIONS.md` §6.
   pilot bug. Verify with `curl -s -m 10 https://api.deepseek.com/models`;
   retry when it resolves. Slash commands never need the network LLM.
 - **Model-id errors** — provider lineups change. Check the provider's live
-  model list before trusting old notes (as of 2026-07-11 DeepSeek serves
-  `deepseek-v4-flash` and `deepseek-v4-pro`; `deepseek-chat` is gone).
+  model list before trusting old notes (as of 2026-09-10 DeepSeek lists
+  `deepseek-flash` (V4.1) and `deepseek-v4-pro`; from 14 Sep 2026 `deepseek-v4-pro`
+  is routed to V4.1 Flash, and `deepseek-chat` / `deepseek-v4-flash` are aliases
+  that also land on Flash). `curl -s https://api.deepseek.com/models -H
+  "Authorization: Bearer $DEEPSEEK_API_KEY"` shows the current list.
   Update with: `logoscore call pilot metaConfigure llm.model <id>` or re-run
   `pilot deploy`.
+- **Empty LLM replies on DeepSeek** — its models think by default and the
+  reasoning counts against the output budget. The module sends
+  `thinking: disabled` (set `PILOT_LLM_THINKING=1` to keep thinking) and a
+  4096-token budget (`PILOT_LLM_MAX_TOKENS` overrides).
 - **"command-only mode (no LLM configured)"** — expected on a fresh agent; an
   LLM is attached via `pilot deploy` (re-deploy keeps the same identity).
 

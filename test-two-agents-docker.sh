@@ -544,7 +544,7 @@ echo "── Phase 7: A2A Paid Task (the headline claim) ──"
 if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   call_b metaConfigure llm.provider deepseek           > /dev/null
   call_b metaConfigure llm.api_key "$DEEPSEEK_API_KEY" > /dev/null
-  call_b metaConfigure llm.model deepseek-v4-pro       > /dev/null
+  call_b metaConfigure llm.model deepseek-flash       > /dev/null
   echo "  OK    Agent B has a language model"
 else
   echo "  WARN  DEEPSEEK_API_KEY is unset — B cannot answer agent-ask, so the"

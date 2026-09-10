@@ -21,15 +21,18 @@ const LLM_PROVIDER_KEYS = @[
   ("", "")
 ]
 
+# One row per LLM_PROVIDERS entry. Ids checked against each provider's live list on 2026-09-10:
+# DeepSeek serves deepseek-flash (V4.1) and routes deepseek-v4-pro to it from 14 Sep 2026;
+# Anthropic/OpenAI/Gemini rows are their current stable ids; OpenRouter ids from its /models.
 const LLM_MODELS: seq[seq[string]] = @[
-  @["claude-sonnet-4-6-20250514", "claude-opus-4-7-20250506", "claude-haiku-4-5-20251001"],
-  @["gpt-4.1", "gpt-4.1-mini", "gpt-4o"],
-  @["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"],
-  @["gemini-2.5-flash", "gemini-2.5-pro"],
-  @["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-7", "openai/gpt-4.1",
-    "deepseek/deepseek-v4-pro", "google/gemini-2.5-flash", "google/gemini-2.5-pro",
-    "meta-llama/llama-4-maverick", "qwen/qwen3-235b-a22b",
-    "mistralai/mistral-large-2411", "Custom (type model ID)"],
+  @["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+  @["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  @["deepseek-flash"],
+  @["gemini-3.8-flash", "gemini-2.5-pro"],
+  @["anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "openai/gpt-5.6-terra",
+    "deepseek/deepseek-v4.1-flash", "google/gemini-3.8-flash",
+    "meta-llama/llama-4-maverick", "qwen/qwen3.7-max",
+    "mistralai/mistral-large-2512", "Custom (type model ID)"],
   @["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
   @[]
 ]

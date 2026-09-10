@@ -10,6 +10,17 @@
 #include <QUrl>
 #include <cstdlib>
 
+std::string pilotExtractOpenAIText(const std::string& responseJson) {
+    QJsonDocument responseDoc = QJsonDocument::fromJson(QByteArray::fromStdString(responseJson));
+    if (responseDoc.isNull() || !responseDoc.isObject()) return "";
+
+    QJsonArray choices = responseDoc.object()["choices"].toArray();
+    if (choices.isEmpty()) return "";
+
+    // DeepSeek adds "reasoning_content" beside "content"; only the visible answer is returned.
+    return choices[0].toObject()["message"].toObject()["content"].toString().toStdString();
+}
+
 class OpenAIProvider : public LLMProvider {
 public:
     OpenAIProvider(const std::string& apiKey, const std::string& baseUrl,
@@ -36,8 +47,19 @@ public:
 
         QJsonObject body;
         body["model"] = QString::fromStdString(modelId_);
-        body["max_tokens"] = 1024;
         body["messages"] = jsonMessages;
+        // OpenAI's own endpoint retired "max_tokens" for its reasoning models in favour of
+        // "max_completion_tokens"; the compatible endpoints (DeepSeek, Gemini, OpenRouter, Groq)
+        // still take "max_tokens".
+        const bool nativeOpenAI = baseUrl_.find("api.openai.com") != std::string::npos;
+        body[nativeOpenAI ? "max_completion_tokens" : "max_tokens"] = pilotLlmMaxTokens();
+        // DeepSeek's current models think by default (reasoning tokens count against the budget
+        // and add seconds per reply); ask for a plain answer unless PILOT_LLM_THINKING=1.
+        if (baseUrl_.find("api.deepseek.com") != std::string::npos && !pilotLlmThinkingEnabled()) {
+            QJsonObject thinking;
+            thinking["type"] = "disabled";
+            body["thinking"] = thinking;
+        }
 
         QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
@@ -77,14 +99,7 @@ public:
         QByteArray responseData = reply->readAll();
         reply->deleteLater();
 
-        QJsonDocument responseDoc = QJsonDocument::fromJson(responseData);
-        if (responseDoc.isNull()) return "";
-
-        QJsonObject responseObj = responseDoc.object();
-        QJsonArray choices = responseObj["choices"].toArray();
-        if (choices.isEmpty()) return "";
-
-        return choices[0].toObject()["message"].toObject()["content"].toString().toStdString();
+        return pilotExtractOpenAIText(responseData.toStdString());
     }
 
     std::string model() const override { return modelId_; }
@@ -107,7 +122,7 @@ std::unique_ptr<LLMProvider> createOpenAIProvider(const std::string& modelOverri
     std::string modelId = modelOverride;
     if (modelId.empty()) {
         const char* envModel = std::getenv("PILOT_LLM_MODEL");
-        modelId = envModel ? envModel : "gpt-4o";
+        modelId = (envModel && *envModel) ? envModel : pilotLlmDefaultModel("openai");
     }
 
     return std::make_unique<OpenAIProvider>(key, baseUrl, modelId);
