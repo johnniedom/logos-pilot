@@ -979,3 +979,7 @@ std::string PilotImpl::dispatchSkill(const std::string& skillName, const std::st
     if (!registry_) return "{\"error\": \"registry not initialized\"}";
     return registry_->dispatch(skillName, argsJson);
 }
+
+std::string pilotSystemPrompt(PilotImpl& impl) {
+    return impl.buildLLMSystemPrompt();
+}

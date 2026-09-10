@@ -281,7 +281,7 @@ LOGOS_TEST(process_owner_message_keeps_only_the_first_action) {
 // facts instead of inventing an on-chain registry or refusing a saved contact.
 LOGOS_TEST(system_prompt_states_card_channel_and_contact_rule) {
     PilotImpl impl;
-    std::string prompt = impl.buildLLMSystemPrompt();
+    std::string prompt = pilotSystemPrompt(impl);
     LOGOS_ASSERT_CONTAINS(prompt, "discovery channel on the Waku relay");
     LOGOS_ASSERT_CONTAINS(prompt, "no on-chain registry");
     LOGOS_ASSERT_CONTAINS(prompt, "NEVER say a contact does not exist");

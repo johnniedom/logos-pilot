@@ -347,6 +347,7 @@ public:
     // pilotSetLLMProvider(impl, ...) to drive agent.ask deterministically; deploy-time LLM
     // selection goes through metaConfigure (llm.provider/llm.api_key) + initLLM(), not RPC.
     friend void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
+    friend std::string pilotSystemPrompt(PilotImpl& impl);
 
     // Skill dispatch
     std::string dispatchSkill(const std::string& skillName, const std::string& argsJson);
@@ -587,3 +588,5 @@ bool pilotOpenGroupMessage(const std::string& groupKeyHex, const std::string& pa
 // A free function (not a PilotImpl method) so the Qt Remote Objects generator never tries to
 // marshal std::unique_ptr<LLMProvider>; friended above for access to the private llm_ member.
 void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
+// Test hook: the owner-chat system prompt as the model receives it (buildLLMSystemPrompt is private).
+std::string pilotSystemPrompt(PilotImpl& impl);
