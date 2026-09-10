@@ -173,6 +173,30 @@ The agent enforces per-transaction and per-period limits. Configure via:
 
 Default: 100 LEZ per transaction, 500 LEZ per period (24 hours).
 
+### Settings you can change while the agent runs
+
+`/status` in chat (or `pilot status --json` from the shell) shows the live values: the spend
+limits and period, the LLM provider and model, the owner, the account and balances. Change any
+of them with `pilot configure <key> <value>`; the agent applies it at once and keeps it in its
+database across restarts.
+
+| Key | Short alias | Meaning |
+|-----|-------------|---------|
+| `llm.provider` | | `anthropic`, `openai`, `deepseek`, `google`, `openrouter` or `groq` |
+| `llm.model` | | the model id, e.g. `deepseek-flash` |
+| `owner.npk` | `owner.address` | the owner's public key |
+| `spending.per_transaction_limit` | `spend.per_tx` | largest single send without approval, in LEZ |
+| `spending.per_period_limit` | `spend.per_period` | total allowed per period, in LEZ |
+| `spending.period_seconds` | `spend.period` | length of that period, in seconds |
+
+```
+pilot configure spend.per_tx 50
+pilot configure llm.model deepseek-flash
+```
+
+The API key is the one setting `configure` does not take; only `pilot deploy` does, and a
+re-deploy keeps the same identity. Sends above a limit are held for your `/approve`.
+
 ## Agent Discovery
 
 Find other agents on the network:
