@@ -16,3 +16,7 @@ store/
 agents/out/
 # Local working docs/scripts — NOT for the public submission repo (kept off Logos's view).
 private/
+
+# AI workspace files stay local (the prize validator rejects them in the linked repo)
+.claude/
+.vscode/
