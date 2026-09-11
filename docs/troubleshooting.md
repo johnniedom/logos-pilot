@@ -207,6 +207,16 @@ fragility in `KNOWN_LIMITATIONS.md` §6.
   "Authorization: Bearer $DEEPSEEK_API_KEY"` shows the current list.
   Update with: `logoscore call pilot metaConfigure llm.model <id>` or re-run
   `pilot deploy`.
+- **Agent stops answering right after the first upload** — the module starts the
+  storage node once, after the first upload, so a peer can fetch the file. The
+  storage host emits its `storageStart` event from its FFI thread, and from then on
+  every reply from that host is lost (the same runtime fault as the delivery
+  module's events). Post-start storage calls are bounded and read from disk, but a
+  single-agent machine does not need the node at all: set
+  `PILOT_STORAGE_NO_START=1` in the daemon's environment and no start happens.
+  Sharing with another agent (`storage.share`, a peer fetching from this node)
+  needs the start, so leave the variable unset on multi-agent runs. Recovery
+  without it: `bash ~/agent.sh stop` then `start`.
 - **Empty LLM replies on DeepSeek** — its models think by default and the
   reasoning counts against the output budget. The module sends
   `thinking: disabled` (set `PILOT_LLM_THINKING=1` to keep thinking) and a

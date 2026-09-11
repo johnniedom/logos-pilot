@@ -10,6 +10,7 @@
 #include <set>
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 #include <QString>
 #include <QByteArray>
 #include <QJsonDocument>
@@ -107,6 +108,17 @@ bool storageRestReady(int deadlineMs) {
 
 void PilotImpl::startStorageNodeIfNeeded() {
     if (storageNodeStarted_) return;
+    // PILOT_STORAGE_NO_START=1: never start the node (single-agent use, e.g. a laptop vault
+    // demo). Uploads and same-agent downloads work on the pre-start channel; only a peer
+    // fetching from THIS node needs the start, and the host's post-start channel loss
+    // (storageStart emitted off-thread) then never enters the picture. Seen 2026-09-10/11:
+    // the first upload's start left the module silent behind one unanswered call.
+    if (const char* noStart = std::getenv("PILOT_STORAGE_NO_START")) {
+        if (std::string(noStart) == "1") {
+            qWarning() << "[pilot] storage node NOT started (PILOT_STORAGE_NO_START=1)";
+            return;
+        }
+    }
     storageNodeStarted_ = true;
     // From this point the host's reply channel is poisoned (storageStart's emit) — every
     // typed storage call AFTER this start loses its reply until the host restarts. Uploads

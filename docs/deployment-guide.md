@@ -219,6 +219,7 @@ only while it is open for hire (`agentOpenForHire`): closed means nobody can rea
 | `PILOT_STORAGE_DISC_PORT` | (libstorage default, 8090) | Storage node discovery UDP port; distinct per agent on one host |
 | `PILOT_STORAGE_LISTEN_PORT` | (random) | Storage node libp2p listen port; fix it so a peer can dial `/ip4/<extip>/tcp/<port>` |
 | `PILOT_STORAGE_NAT` | (auto) | Storage node NAT: `extip:<IP>` (the only other form libstorage accepts) |
+| `PILOT_STORAGE_NO_START` | (unset) | `1` = never start the storage node after an upload (single-agent machines; the host loses every reply after its `storageStart` event). Leave unset when peers must fetch from this node |
 | `PILOT_STORAGE_BOOTSTRAP` | — | Comma list of storage SPRs handed to the node as `bootstrap-node` |
 | `ANTHROPIC_API_KEY` | — | Anthropic Claude API key |
 | `PILOT_LLM_PROVIDER` | — | Headless `pilot deploy`: `anthropic`, `openai`, `deepseek`, `google`, `openrouter`, `groq` or `none` — skips the provider selector (which needs a terminal) |
