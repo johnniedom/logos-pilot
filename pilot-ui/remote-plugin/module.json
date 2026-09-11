@@ -1,0 +1,15 @@
+{
+  "name": "pilot_remote",
+  "displayName": "Pilot Remote",
+  "version": "1.0.0",
+  "description": "Pilot Remote - talk to your Pilot agent on another machine over Logos Messaging: no server in between, no local agent",
+  "type": "ui_qml",
+  "view": "Main.qml",
+  "dependencies": ["pilot_owner"],
+  "category": "general",
+  "author": "Johnnie Dom",
+  "manifests": {
+    "runtime": "metadata.json",
+    "package": "manifest.json"
+  }
+}
