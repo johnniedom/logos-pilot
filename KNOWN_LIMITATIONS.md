@@ -445,6 +445,41 @@ the transaction hash recorded here — the last step of the desktop run, not yet
 
 ---
 
+## 9. Storage host: every reply is lost after the node starts — upstream; one unbounded wait on our side
+
+**What happens.** The first `storage.upload` on an agent finishes, then the module starts the
+storage node once so a peer can fetch the file (`startStorageNodeIfNeeded`). The storage host
+emits its `storageStart` event from the libstorage callback thread instead of the thread that owns
+its Qt Remote Objects source; Qt logs `QSocketNotifier: Socket notifiers cannot be enabled or
+disabled from another thread` and, from that point until the host process restarts, the storage
+host still executes every call but none of its replies reach the caller. This is the same runtime
+fault as the delivery module's events (§7, measured 2026-08-25); the newer `module_proxy.cpp` in
+logos-protocol re-queues the emit onto the owning thread, the host bundled with the logoscore CLI
+does not. Filed 2026-09-11 as
+[logos-co/logos-storage-module#88](https://github.com/logos-co/logos-storage-module/issues/88).
+
+**What the module does about it.** Every typed storage call runs before the first start where it
+can (upload, list); post-start calls get a 3 s bound and the result is read from the node's own
+files (`repo/manifests/<cid>.dsobj`, the node log). That is how the CI vault step passes
+(upload → download → byte-identical, every run).
+
+**Our residual gap.** On a laptop with the owner's poll loop running, the module twice went silent
+right after the first upload (2026-09-10 20:05, 2026-09-11 14:14): the host journal shows
+`start` timing out at 10 s as `storageStart` was forwarded, then the next call into the module
+(`agentPoll`) never returning; the host stayed alive at 0.1 % CPU with nothing further logged.
+One wait in that path has no bound after the channel is poisoned. It has not been identified by
+reading; it needs a run with thread ids in the journal.
+
+**Mitigation shipped.** `PILOT_STORAGE_NO_START=1` in the daemon's environment makes the module
+never start the node. Uploads and same-agent downloads work on the pre-start channel; only a peer
+fetching from that node needs the start, so multi-agent runs (the storage-sharing agent in
+`testnet-agents.yml`) leave it unset. Recovery without it: restart the agent (`bash ~/agent.sh
+stop` / `start`).
+
+**What would close it.** Upstream: emit `storageStart` from the Qt thread, or queue the emit in
+the runtime's `ModuleProxy` (the fix already present in newer logos-protocol sources). Ours: find
+the unbounded wait behind `agentPoll` post-start and give it the same 3 s bound as the rest.
+
 ## How to read this list
 
 - Items **1**, the upstream parts of **2.7**, and **6** are **platform gaps**,
