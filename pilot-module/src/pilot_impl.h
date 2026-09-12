@@ -590,3 +590,8 @@ bool pilotOpenGroupMessage(const std::string& groupKeyHex, const std::string& pa
 void pilotSetLLMProvider(PilotImpl& impl, std::unique_ptr<LLMProvider> provider);
 // Test hook: the owner-chat system prompt as the model receives it (buildLLMSystemPrompt is private).
 std::string pilotSystemPrompt(PilotImpl& impl);
+// A configure value as the wire delivers it. `logoscore call` turns "20" into a JSON number,
+// which never reaches a string parameter; the CLI therefore sends numbers as "str:20". Newer
+// logoscore builds strip that prefix themselves, the pinned build passes it through, so the
+// module strips it too.
+std::string pilotConfigureValue(const std::string& wireValue);

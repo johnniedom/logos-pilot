@@ -287,3 +287,14 @@ LOGOS_TEST(wallet_failure_reason_carries_the_wallets_own_words) {
     LOGOS_ASSERT_EQ(pilotWalletFailureReason("claim_pinata", "not json"),
         std::string("claim_pinata failed: not json"));
 }
+
+// `pilot configure spend.per_tx 20` never took: logoscore sends "20" as a number, which the
+// host cannot hand to a string parameter (2026-09-12). The CLI now sends "str:20"; the pinned
+// logoscore passes the prefix through, so the module strips it. Plain values are untouched.
+LOGOS_TEST(configure_value_strips_str_prefix) {
+    LOGOS_ASSERT_EQ(pilotConfigureValue("str:20"), std::string("20"));
+    LOGOS_ASSERT_EQ(pilotConfigureValue("20"), std::string("20"));
+    LOGOS_ASSERT_EQ(pilotConfigureValue("deepseek-flash"), std::string("deepseek-flash"));
+    LOGOS_ASSERT_EQ(pilotConfigureValue("str:"), std::string(""));
+    LOGOS_ASSERT_EQ(pilotConfigureValue("xstr:20"), std::string("xstr:20"));
+}

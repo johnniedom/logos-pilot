@@ -165,8 +165,14 @@ std::string PilotImpl::metaStatus() {
     return QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
 }
 
-bool PilotImpl::metaConfigure(const std::string& key, const std::string& value) {
+std::string pilotConfigureValue(const std::string& wireValue) {
+    if (wireValue.rfind("str:", 0) == 0) return wireValue.substr(4);
+    return wireValue;
+}
+
+bool PilotImpl::metaConfigure(const std::string& key, const std::string& wireValue) {
     if (!db_) return false;
+    const std::string value = pilotConfigureValue(wireValue);
 
     // Persist under the SAME key names loadIdentity() reads on startup, or the setting
     // silently reverts to its default after a restart. The public/CLI keys are dotted
