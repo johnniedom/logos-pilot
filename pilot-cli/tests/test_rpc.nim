@@ -267,3 +267,18 @@ doAssert not fundedFromBalance("""{"error":"balance query failed"}""")
 # before it says "timeout" itself, and the client waits as long again. A wrapper shorter than
 # that kills the client while the daemon is still running its call.
 doAssert DAEMON_ANSWER_SECS >= 45
+
+# `pilot configure spend.per_tx 20` printed the tick while the limit stayed at 100: logoscore
+# sent 20 as a JSON number, the module's text parser refused it, and the CLI never read the
+# reply (2026-09-12). Numbers travel with the `str:` prefix; words are left alone.
+doAssert configureValueArg("20") == "str:20"
+doAssert configureValueArg("-5") == "str:-5"
+doAssert configureValueArg("1.5") == "str:1.5"
+doAssert configureValueArg("deepseek-flash") == "deepseek-flash"
+doAssert configureValueArg("04302e440f") == "04302e440f"
+doAssert configureValueArg("") == ""
+doAssert configureAccepted("true")
+doAssert configureAccepted("true\n")
+doAssert not configureAccepted("false")
+doAssert not configureAccepted("")
+doAssert not configureAccepted("""{"code":"RPC_FAILED","status":"error"}""")

@@ -87,6 +87,24 @@ proc extractDaemonResult*(raw: string): string =
     return raw[idx + 8 .. ^1].strip()
   return raw.strip()
 
+# `logoscore call` turns any decimal-looking argument into a JSON number before it goes
+# on the wire, and the module's metaConfigure takes its value as text: "20" arrived as
+# int 20, the parser refused it, and the limit silently stayed at 100 (recording day,
+# 2026-09-12). The CLI's `str:` prefix keeps an argument a string. Numbers only — an
+# older logoscore without the prefix would pass "str:deepseek-flash" through literally.
+proc configureValueArg*(value: string): string =
+  var i = 0
+  if value.len > 0 and value[0] in {'+', '-'}: i = 1
+  if i >= value.len: return value
+  for c in value[i .. ^1]:
+    if c notin {'0'..'9', '.'}: return value
+  return "str:" & value
+
+# metaConfigure answers a bool: true = stored, false = refused (bad number, unknown key).
+# Anything else ("", RPC_FAILED json) means the agent never took the call.
+proc configureAccepted*(reply: string): bool =
+  reply.strip() == "true"
+
 proc cardPublishOk*(reply: string): bool =
   ## agentCard answers with the card itself (a JSON object). An empty reply is the daemon giving
   ## up on a call the module could not take — it was inside a wallet call, still funding — and an

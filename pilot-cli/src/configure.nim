@@ -39,7 +39,13 @@ proc runConfigure*(cfg: Config, key, value: string) =
       fail("Failed to start daemon")
       return
 
-  discard daemonCall(cfg, "metaConfigure", @[resolved, value])
-  ok(resolved & " → " & value)
+  let reply = daemonCall(cfg, "metaConfigure", @[resolved, configureValueArg(value)])
+  if configureAccepted(reply):
+    ok(resolved & " → " & value)
+  elif reply.strip() == "false":
+    fail(resolved & " refused by the agent (not a whole number?)")
+  else:
+    fail(resolved & " not set: no answer from the agent" &
+         (if reply.len > 0: " (" & reply.strip() & ")" else: ""))
 
   if startedDaemon: stopDaemon(cfg)
