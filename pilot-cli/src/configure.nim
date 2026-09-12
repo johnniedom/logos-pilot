@@ -1,3 +1,4 @@
+import std/strutils
 import rpc, daemon, format
 
 const VALID_KEYS = @[
