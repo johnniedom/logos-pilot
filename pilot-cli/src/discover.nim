@@ -14,7 +14,7 @@ proc runDiscover*(cfg: Config, topic: string, timeout: int, jsonOutput: bool) =
     info("Topic: " & (if topic == "": "(shared discovery channel)" else: topic))
     blankLine()
 
-  let startedDaemon = not isDaemonRunning(cfg)
+  let startedDaemon = not daemonPresent(cfg)
   if startedDaemon:
     if not jsonOutput: spinner("Starting daemon")
     if not startDaemon(cfg):

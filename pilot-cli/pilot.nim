@@ -30,7 +30,7 @@ const USAGE = BOLD & "pilot" & RESET & " — Logos autonomous agent" & """
 """
 
 proc runStatus(cfg: Config, jsonOutput: bool) =
-  let startedDaemon = not isDaemonRunning(cfg)
+  let startedDaemon = not daemonPresent(cfg)
   if startedDaemon:
     spinner("Starting daemon")
     if not startDaemon(cfg):
@@ -96,7 +96,7 @@ proc runStatus(cfg: Config, jsonOutput: bool) =
 # the same signature and TOFU checks on an imported card as on a broadcast one, so
 # this is a shortcut in DELIVERY, not in trust.
 proc runPeerAdd(cfg: Config, card: string) =
-  let startedDaemon = not isDaemonRunning(cfg)
+  let startedDaemon = not daemonPresent(cfg)
   if startedDaemon:
     spinner("Starting daemon")
     if not startDaemon(cfg):

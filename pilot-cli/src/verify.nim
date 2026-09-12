@@ -20,7 +20,7 @@ proc runVerify*(cfg: Config, jsonOnly: bool) =
     blankLine()
     spinner("Collecting data")
 
-  let startedDaemon = not isDaemonRunning(cfg)
+  let startedDaemon = not daemonPresent(cfg)
   if startedDaemon:
     if not startDaemon(cfg):
       fail("Failed to start daemon")

@@ -32,6 +32,13 @@ proc isDaemonRunning*(cfg: Config): bool =
   except:
     return false
 
+# A daemon whose pid is alive IS running, whether or not it answers `status` in time: a
+# module deep in a chain call keeps the daemon's RPC busy for longer than any probe, and on
+# 2026-09-12 `pilot status` took that silence for "no daemon", started one over the live
+# agent and stopped it on exit. Callers that would start a daemon of their own ask this.
+proc daemonPresent*(cfg: Config): bool =
+  isProcessAlive(readPidFromState(cfg)) or isDaemonRunning(cfg)
+
 proc cleanStaleDaemon*(cfg: Config) =
   # Only a daemon whose pid is gone is stale. Until 2026-09-09 the pkill below ran
   # unconditionally, so any code path that reached startDaemon while a daemon was alive

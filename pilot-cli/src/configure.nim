@@ -34,7 +34,7 @@ proc runConfigure*(cfg: Config, key, value: string) =
       echo "    " & alias & " → " & canonical
     return
 
-  let startedDaemon = not isDaemonRunning(cfg)
+  let startedDaemon = not daemonPresent(cfg)
   if startedDaemon:
     if not startDaemon(cfg):
       fail("Failed to start daemon")
