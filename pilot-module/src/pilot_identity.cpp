@@ -352,8 +352,57 @@ bool PilotImpl::loadIdentity() {
 // pilot's notebook and the wallet's keyring consistent: the agent then recreates a
 // fresh matching identity and re-funds, instead of pointing at an account the wallet
 // no longer has (which is what caused ACCOUNT_NOT_FOUND / KEY_NOT_FOUND).
+bool pilotWalletFileParses(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good()) return false;
+    std::stringstream buf; buf << in.rdbuf();
+    const std::string text = buf.str();
+    if (text.empty()) return false;
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(text));
+    return doc.isObject() && doc.object().contains("key_chain");
+}
+
+bool pilotWalletLooksCorrupt(bool sawTransportError, bool fileParses) {
+    return !sawTransportError && !fileParses;
+}
+
 void PilotImpl::resetStaleIdentity() {
     if (db_) {
+        // Keep a copy of what is about to go, under reset.<epoch>.*, so a wrong call here is
+        // a two-line repair instead of a lost agent (the 2026-09-14 repair had to pull the
+        // key blob out of the still-running process).
+        {
+            const std::string stamp = std::to_string(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            sqlite3_stmt* s = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                    "INSERT OR REPLACE INTO config (key, value) "
+                    "SELECT 'reset.' || ? || '.' || key, value FROM config "
+                    "WHERE key IN ('funded','funding.public_account');",
+                    -1, &s, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, stamp.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(s); sqlite3_finalize(s);
+            }
+            s = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                    "INSERT OR REPLACE INTO config (key, value) "
+                    "SELECT 'reset.' || ? || '.npk', npk FROM agent_identity WHERE id=1;",
+                    -1, &s, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, stamp.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(s); sqlite3_finalize(s);
+            }
+            s = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                    "INSERT OR REPLACE INTO config (key, value) "
+                    "SELECT 'reset.' || ? || '.account_id', account_id FROM agent_identity WHERE id=1;",
+                    -1, &s, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, stamp.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(s); sqlite3_finalize(s);
+            }
+            qWarning() << "[pilot] resetStaleIdentity: previous identity + funding pointer kept under config reset."
+                       << QString::fromStdString(stamp) << ".*";
+        }
         sqlite3_exec(db_, "DELETE FROM agent_identity WHERE id=1;", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "DELETE FROM config WHERE key='funded';", nullptr, nullptr, nullptr);
         // The persisted funding account's keys lived in the wallet that diverged; forget it
@@ -455,10 +504,22 @@ bool PilotImpl::initWallet() {
     // initialize() returned false on a wallet that was in fact being created. Give both
     // the same budget as a chain sync — the fast path returns the moment the wallet
     // answers, so a local run is not slowed.
+    // A transport error (the wallet module did not answer) says nothing about the file. Retry
+    // a couple of times before giving up, and remember that it happened: path 3 below must
+    // never quarantine a wallet on the strength of an unanswered call (2026-09-14: one failed
+    // open set aside a perfectly good wallet and wiped the identity + funding pointer).
+    bool sawTransportError = false;
     auto tryOpen = [&](const std::string& path) -> bool {
-        logos::CallError err;
-        int64_t rc = modules().lez_core.open(configPath, path, statsPath, &err, kWalletSyncTimeoutMs);
-        return err.code.empty() && rc == 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            logos::CallError err;
+            int64_t rc = modules().lez_core.open(configPath, path, statsPath, &err, kWalletSyncTimeoutMs);
+            if (err.code.empty()) return rc == 0;   // the wallet answered: its verdict stands
+            sawTransportError = true;
+            qWarning() << "[pilot] initWallet: open did not answer (attempt" << attempt + 1
+                       << "of 3):" << err.code.c_str();
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+        return false;
     };
     auto copyFile = [](const std::string& from, const std::string& to) {
         std::ifstream src(from, std::ios::binary);
@@ -485,6 +546,15 @@ bool PilotImpl::initWallet() {
     //    aside for forensics, and reset the now-orphaned identity so pilot.db and the
     //    fresh wallet stay consistent.
     if (storageExists) {
+        // Only a file that is NOT a wallet, refused by a wallet module that actually answered,
+        // is corrupt. Anything else (module unreachable, a second process holding the file,
+        // a slow open) keeps the file and the identity; the next start tries again.
+        if (!pilotWalletLooksCorrupt(sawTransportError, pilotWalletFileParses(storagePath))) {
+            qWarning() << "[pilot] initWallet: wallet open failed but the file is intact"
+                       << (sawTransportError ? "(module did not answer)" : "(wallet refused it)")
+                       << "- keeping wallet and identity untouched";
+            return false;
+        }
         std::rename(storagePath.c_str(), (storagePath + ".corrupt").c_str());
         qWarning() << "[pilot] initWallet: wallet unreadable; moved aside + resetting identity";
         resetStaleIdentity();

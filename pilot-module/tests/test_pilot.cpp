@@ -6,6 +6,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
 
 LOGOS_TEST(echo_returns_input) {
     PilotImpl impl;
@@ -297,4 +300,32 @@ LOGOS_TEST(configure_value_strips_str_prefix) {
     LOGOS_ASSERT_EQ(pilotConfigureValue("deepseek-flash"), std::string("deepseek-flash"));
     LOGOS_ASSERT_EQ(pilotConfigureValue("str:"), std::string(""));
     LOGOS_ASSERT_EQ(pilotConfigureValue("xstr:20"), std::string("xstr:20"));
+}
+
+// initWallet set a good wallet aside as ".corrupt" and wiped the identity + funding pointer
+// after ONE failed open (2026-09-14, 15:52; the file parsed fine and held all four accounts).
+// A file is only corrupt when the wallet module answered AND the bytes are not a wallet.
+LOGOS_TEST(wallet_file_parses_only_for_a_real_wallet) {
+    const std::string dir = "/tmp/pilot-test-wallet-" + std::to_string(::getpid());
+    ::mkdir(dir.c_str(), 0700);
+    const std::string good = dir + "/good.json", junk = dir + "/junk.json",
+                      nokc = dir + "/nokeychain.json", empty = dir + "/empty.json";
+    { std::ofstream f(good); f << "{\"key_chain\":{\"accounts\":[]},\"last_synced_block\":1,\"labels\":{}}"; }
+    { std::ofstream f(junk); f << "not json at all {{{"; }
+    { std::ofstream f(nokc); f << "{\"hello\":\"world\"}"; }
+    { std::ofstream f(empty); }
+    LOGOS_ASSERT_TRUE(pilotWalletFileParses(good));
+    LOGOS_ASSERT_FALSE(pilotWalletFileParses(junk));
+    LOGOS_ASSERT_FALSE(pilotWalletFileParses(nokc));
+    LOGOS_ASSERT_FALSE(pilotWalletFileParses(empty));
+    LOGOS_ASSERT_FALSE(pilotWalletFileParses(dir + "/missing.json"));
+    ::remove(good.c_str()); ::remove(junk.c_str()); ::remove(nokc.c_str()); ::remove(empty.c_str());
+    ::rmdir(dir.c_str());
+}
+
+LOGOS_TEST(wallet_looks_corrupt_needs_an_answer_and_a_bad_file) {
+    LOGOS_ASSERT_TRUE(pilotWalletLooksCorrupt(false, false));    // module answered, bytes are not a wallet
+    LOGOS_ASSERT_FALSE(pilotWalletLooksCorrupt(false, true));    // module refused a file that IS a wallet: keep it
+    LOGOS_ASSERT_FALSE(pilotWalletLooksCorrupt(true, false));    // module never answered: no verdict
+    LOGOS_ASSERT_FALSE(pilotWalletLooksCorrupt(true, true));
 }

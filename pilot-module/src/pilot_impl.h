@@ -595,3 +595,9 @@ std::string pilotSystemPrompt(PilotImpl& impl);
 // logoscore builds strip that prefix themselves, the pinned build passes it through, so the
 // module strips it too.
 std::string pilotConfigureValue(const std::string& wireValue);
+// Wallet-file triage (2026-09-14). initWallet used to quarantine wallet_storage.json and wipe
+// the agent's identity + funding pointer after ONE failed open; the file it set aside that day
+// parsed fine and still held every account. A failed open is only proof of a bad file when the
+// wallet module actually answered (no transport error) AND the file itself is not a wallet.
+bool pilotWalletFileParses(const std::string& path);
+bool pilotWalletLooksCorrupt(bool sawTransportError, bool fileParses);
