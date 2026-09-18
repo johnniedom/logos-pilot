@@ -187,7 +187,7 @@ themselves; the on-demand `marketplace` job does, and has (run 33982458566).
 
 ---
 
-## 5. Testnet evidence & demo video — the evidence set is in the repo; the video is not yet recorded
+## 5. Testnet evidence — the evidence set is in the repo
 
 The public testnet was reset by its operator on 2026-09-08. Everything recorded below before that
 date was real and verified on the day, and none of it resolves on the chain that runs now; the
@@ -302,11 +302,7 @@ its account pages show late-August balances):
   2^13 lift, or an executor that pads the final segment to 2^14.
 - The `RISC0_DEV_MODE=0` real-proof scripts **are** committed
   (`run-sequencer-realproof.sh`, `demo-realproof.sh`, both with a `REHEARSE=1`
-  dev-mode dry-run switch), but the end-to-end **demo video is not yet recorded /
-  committed.**
-
-**What would close it.** Record the narrated video. (The three use cases, the three
-category agents and the shielded funding proofs on a 16 GB runner are done — see above.)
+  dev-mode dry-run switch).
 
 **A faucet race worth knowing about.** The faucet's puzzle data changes with every
 claim it pays, so two agents claiming in the same minute race each other: the
